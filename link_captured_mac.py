@@ -15,10 +15,18 @@ listed += [str(objroot/x) for x in ('lastkerneldataconst.o','lastkernelconstruct
 if any(not Path(x).is_file() for x in listed):raise SystemExit('Missing real object')
 filelist=out/'link.filelist';filelist.write_text('\n'.join(listed)+'\n')
 flags=shlex.split((objroot/'.LDFLAGS').read_text().strip('\0\r\n'))[1:]
+# -lcc_kext is dropped on purpose: current SDK libcc_kext.a implements the LLVM21
+# 12-param llvm_profile buffer ABI, while XNU 10063 source declares the 6/7-param
+# one; linking it would resolve by name but mismatch at runtime. The project-built
+# LLVM 17 kernel runtime below carries the matching real implementations and is the
+# same archive used by the verified WSL relink of this exact object closure.
 flags=[f.replace(OLD,str(root)) for f in flags if f!='-lcc_kext']
 command=['xcrun','--sdk','iphoneos','clang++',*flags,'-filelist',str(filelist),
          str(root/'.cache/fakeroot/usr/local/lib/kernel/libfirehose_kernel.a'),
          str(root/'build/corecrypto-2023/libcorecrypto_kernel_noasm-namespaced.a')]
+runtime=KIT/'runtime/libcompiler_runtime_kernel.a'
+if not runtime.is_file():raise SystemExit('Missing project LLVM17 kernel compiler runtime (runtime/)')
+command.append(str(runtime))
 for archive in ('armdt-platform/libArmDTPlatform.a','armcpu/libArmCpu.a','libpthread-kernel/libpthread_kernel.a','mockfs-fixture/libmockfs_fixture.a'):
     path=root/'build'/archive
     if not path.is_file():raise SystemExit('Missing exact source archive '+archive)
