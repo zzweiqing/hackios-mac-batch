@@ -1,0 +1,28 @@
+--- a/bsd/kern/ubc_subr.c
++++ b/bsd/kern/ubc_subr.c
+@@ -4367,6 +4367,25 @@
+ accelerate_entitlement_queries(
+ 	struct cs_blob *cs_blob)
+ {
++
++#if XNU_NABU_MOCKFS_EL0
++	/* The isolated mockfs fixture has no entitlement provider. There is no
++	 * entitlement context to accelerate for its ad-hoc, entitlement-free
++	 * CodeDirectory. Retain structural and page-hash checks, and reject any
++	 * signature that would require AMFI instead of inventing its callbacks.
++	 */
++	if (amfi == NULL) {
++		if ((cs_blob->csb_flags & CS_ADHOC) == 0 ||
++		    cs_blob->csb_entitlements != NULL ||
++		    cs_blob->csb_entitlements_blob != NULL ||
++		    cs_blob->csb_der_entitlements_blob != NULL ||
++		    cs_blob->csb_cd == NULL ||
++		    ntohl(cs_blob->csb_cd->teamOffset) != 0) {
++			return ENOTSUP;
++		}
++		return 0;
++	}
++#endif
+ 	kern_return_t ret = KERN_NOT_SUPPORTED;
+ 
+ #if CODE_SIGNING_MONITOR

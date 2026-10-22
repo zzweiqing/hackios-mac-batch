@@ -1,0 +1,44 @@
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -1502,6 +1502,13 @@
+ extern "C" boolean_t
+ IOTaskHasStringEntitlement(task_t task, const char *entitlement, const char *value)
+ {
++#if XNU_NABU_MOCKFS_EL0
++	/* Missing provider grants no entitlement. */
++	if (amfi == NULL) {
++		return false;
++	}
++#endif
++
+ 	if (task == NULL) {
+ 		task = current_task();
+ 	}
+@@ -1533,6 +1540,13 @@
+ extern "C" boolean_t
+ IOTaskHasEntitlement(task_t task, const char *entitlement)
+ {
++#if XNU_NABU_MOCKFS_EL0
++	/* Missing provider grants no entitlement. */
++	if (amfi == NULL) {
++		return false;
++	}
++#endif
++
+ 	if (task == NULL) {
+ 		task = current_task();
+ 	}
+@@ -1563,6 +1577,13 @@
+ extern "C" char*
+ IOTaskGetEntitlement(task_t task, const char *entitlement)
+ {
++#if XNU_NABU_MOCKFS_EL0
++	/* Missing provider grants no entitlement. */
++	if (amfi == NULL) {
++		return NULL;
++	}
++#endif
++
+ 	void *entitlement_object = NULL;
+ 	char *return_value = NULL;
+ 

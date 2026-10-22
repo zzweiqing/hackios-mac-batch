@@ -1,0 +1,135 @@
+name: mac-batch captured build
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 执行模式
+        type: choice
+        default: build-captured
+        options:
+          - preflight-only
+          - build-captured
+
+permissions:
+  contents: read
+
+env:
+  BATCH_TARBALL: mac-batch-20261022-r2.tar.gz
+
+jobs:
+  captured-build:
+    name: Apple captured batch (preflight + 11 objects + relink)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout（公共仓库：仅本项目自有脚本/补丁/文档）
+        uses: actions/checkout@v4
+
+      - name: Check private inputs configuration
+        shell: bash
+        env:
+          PRIVATE_INPUTS_REPO: ${{ vars.PRIVATE_INPUTS_REPO }}
+          PRIVATE_INPUTS_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PRIVATE_INPUTS_REPO" ] || [ -z "$PRIVATE_INPUTS_TOKEN" ]; then
+            echo "::error::缺少 repository variable PRIVATE_INPUTS_REPO（如 yourname/hackios-batch-inputs）或 secret PRIVATE_INPUTS_TOKEN"
+            exit 1
+          fi
+
+      - name: Download private batch inputs（Apple 素材运行时拉取，不入公共仓库）
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
+          PRIVATE_INPUTS_REPO: ${{ vars.PRIVATE_INPUTS_REPO }}
+        run: |
+          set -euo pipefail
+          gh release download batch-inputs \
+            --repo "$PRIVATE_INPUTS_REPO" \
+            --pattern "$BATCH_TARBALL" \
+            --output "$RUNNER_TEMP/$BATCH_TARBALL"
+          ls -l "$RUNNER_TEMP/$BATCH_TARBALL"
+
+      - name: Restore inputs/ and capture/ into workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/batch-extract"
+          tar -xzf "$RUNNER_TEMP/$BATCH_TARBALL" -C "$RUNNER_TEMP/batch-extract"
+          cp -R "$RUNNER_TEMP/batch-extract/mac-batch-20261022/inputs" ./inputs
+          cp -R "$RUNNER_TEMP/batch-extract/mac-batch-20261022/capture" ./capture
+          test -f inputs/mac-xnu-sdk-and-objects-backup-20261022.tar.gz
+          test -f inputs/xnu-d8b80295118ef25ac3a784134bcf95cd8e88109f.tar.gz
+          test -f inputs/restored-apple-headers.tar.gz
+          test -f capture/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/link.filelist
+          ls run_mac_batch.sh patches inputs capture
+
+      - name: Preflight（Xcode/SDK/compiler/输入完整性报告）
+        shell: bash
+        run: bash run_mac_batch.sh --preflight
+
+      - name: Build captured objects and relink kernel
+        if: ${{ inputs.mode == 'build-captured' }}
+        shell: bash
+        run: bash run_mac_batch.sh --build-captured "$RUNNER_TEMP/batch-work"
+
+      - name: Collect summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/batch-work/mac-batch-output"
+          {
+            echo "mode=${{ inputs.mode }} run=$GITHUB_RUN_ID"
+            date -u
+            echo '--- preflight ---'
+            cat output/preflight.log 2>/dev/null || true
+            if [ -f "$OUT/compile-report.json" ]; then
+              echo '--- compile summary ---'
+              jq '{all_passed, objects: [.records[] | {object, returncode}]}' "$OUT/compile-report.json" || true
+            fi
+            if [ -f "$OUT/link.json" ]; then
+              echo '--- link summary ---'
+              jq '{returncode, kernel, hardware_verified, runtime_verified}' "$OUT/link.json" || true
+            fi
+            if [ -f "$OUT/nabu-mockfs-native-apple.macho" ]; then
+              echo '--- kernel ---'
+              stat -f 'bytes=%z' "$OUT/nabu-mockfs-native-apple.macho"
+              shasum -a 256 "$OUT/nabu-mockfs-native-apple.macho"
+            fi
+          } > ci-summary.txt
+          cat ci-summary.txt
+
+      - name: Upload summary artifact（公开：仅版本/返回码/尺寸/哈希）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-summary-${{ github.run_id }}
+          path: ci-summary.txt
+          if-no-files-found: warn
+
+      - name: Upload full build outputs to private inputs repo
+        if: ${{ always() && inputs.mode == 'build-captured' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
+          PRIVATE_INPUTS_REPO: ${{ vars.PRIVATE_INPUTS_REPO }}
+        run: |
+          set -euo pipefail
+          if [ ! -d "$RUNNER_TEMP/batch-work/mac-batch-output" ]; then
+            echo 'No build output directory; nothing to upload.'
+            exit 0
+          fi
+          TAG="ci-$GITHUB_RUN_ID"
+          ARCHIVE="$RUNNER_TEMP/$TAG.tar.gz"
+          if [ -f "$RUNNER_TEMP/batch-work/batch-restore.json" ]; then
+            tar -czf "$ARCHIVE" -C "$RUNNER_TEMP/batch-work" mac-batch-output batch-restore.json
+          else
+            tar -czf "$ARCHIVE" -C "$RUNNER_TEMP/batch-work" mac-batch-output
+          fi
+          gh release create "$TAG" --repo "$PRIVATE_INPUTS_REPO" \
+            --title "CI $TAG" \
+            --notes "mac-batch captured build; public repo run $GITHUB_RUN_ID" >/dev/null 2>&1 || true
+          gh release upload "$TAG" "$ARCHIVE" --repo "$PRIVATE_INPUTS_REPO" --clobber
+          echo "uploaded: $PRIVATE_INPUTS_REPO release $TAG / $TAG.tar.gz"

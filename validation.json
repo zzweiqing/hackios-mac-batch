@@ -1,0 +1,15 @@
+{
+  "date": "2026-10-22",
+  "local_python_syntax_checks": true,
+  "local_bash_syntax_check": true,
+  "local_fixed_input_presence_checks": true,
+  "new_empty_root_restore_executed": true,
+  "restore_root": "/tmp/hackios-mac-batch-restore-check",
+  "mac_compilation_executed": false,
+  "full_clean_build_executed": false,
+  "corecrypto_exact_source_available": false,
+  "remote_mac_connected": false,
+  "tablet_access": false,
+  "secrets_included": false,
+  "purpose": "One batch prepared for a newly opened, explicitly authorized Mac; current WSL candidate is independently reproduced and verified"
+}

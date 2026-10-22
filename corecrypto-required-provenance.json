@@ -1,0 +1,10 @@
+{
+  "source_url": "https://github.com/ONLYA/corecrypto-2023",
+  "source_revision": "11fba65b12d8830630e248dfa8344caf8b065f26",
+  "provenance": "Third-party source snapshot; not authenticated against an Apple archive",
+  "module_version": "14.0",
+  "compiled_sources": 529,
+  "assembly_enabled": false,
+  "source_missing_locally": true,
+  "requires_exact_revision": true
+}

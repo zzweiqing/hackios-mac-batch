@@ -1,0 +1,6 @@
+# 运行时由 CI 从私有仓库拉取/生成,永不提交
+inputs/
+capture/
+output/
+__pycache__/
+*.pyc

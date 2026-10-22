@@ -1,0 +1,43 @@
+{
+  "reviewed_at": "2026-10-22T11:26:13.741366+08:00",
+  "reviewer": "local agent continuing AGENT_HANDOFF_4",
+  "package": "mac_build/mac-batch-20261022",
+  "device_access": false,
+  "remote_access": false,
+  "mac_build_executed": false,
+  "checks": {
+    "bash_syntax_run_mac_batch": true,
+    "python_syntax_all_five_scripts": true,
+    "check_batch_inputs_local_run": {
+      "captured_batch_complete": true,
+      "full_clean_build_ready": false
+    },
+    "inputs_sdk_backup_sha256_matches_evidence": true,
+    "patches_match_project_copies": true,
+    "captured_compile_records_11_objects_in_inputs_archive": true,
+    "captured_records_are_real_apple_clang_commands": true,
+    "ldflags_and_link_filelist_in_inputs_archive": true,
+    "wsl_fresh_empty_root_restore": {
+      "exit_code": 0,
+      "seconds": 4.5,
+      "all_11_object_sources_present": true
+    },
+    "tar_gz_vs_directory": {
+      "all_tar_files_present_and_identical": true,
+      "stale_member": "archive-filelist.txt",
+      "stale_detail": "tar 内清单 88 行,少列 3 个实际存在的成员;目录版 91 行完整"
+    }
+  },
+  "coverage_of_handoff_items": {
+    "iokit_entitlement_source_compile": "compile_captured_mac.py OBJECTS[iokit/DEVELOPMENT/IOKitBSDInit.cpo] + entitlements/query patches",
+    "kernel_tests_optional_pan_post_table": "compile_captured_mac.py OBJECTS[osfmk/DEVELOPMENT/kernel_tests.o]",
+    "full_apple_toolchain_clean_rebuild": "run_mac_batch.sh --build-clean + prepare_clean_mac.py + --full-root closure check",
+    "corecrypto_full_source_gap": "run_mac_batch.sh --archive-corecrypto fixed revision + corecrypto-required-provenance.json"
+  },
+  "fixes_applied": [
+    "review/ 子目录加入审查脚本与报告;archive-filelist.txt 重新生成包含全部当前成员",
+    "生成 mac-batch-20261022-r2.tar.gz(filelist 与内容自洽);原始 10:51 tar.gz 保留未改",
+    "不新建重复的 mac-batch-next 包(交接 4 要求先检索避免重复)"
+  ],
+  "overall_passed": true
+}

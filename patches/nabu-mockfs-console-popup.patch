@@ -1,0 +1,18 @@
+--- a/bsd/dev/arm/km.c
++++ b/bsd/dev/arm/km.c
+@@ -108,6 +108,15 @@
+ 
+ 		tty_unlock(tp);         /* XXX race window */
+ 
++#if XNU_NABU_MOCKFS_EL0
++		/* Match the existing i386 O_POPUP console contract for this
++		 * explicit ARM mockfs instrument. No TTY lock is held here.
++		 */
++		if (flag & O_POPUP) {
++			PE_initialize_console(0, kPETextScreen);
++		}
++#endif
++
+ 		bzero(&video, sizeof(video));
+ 		PE_current_console(&video);
+ 
