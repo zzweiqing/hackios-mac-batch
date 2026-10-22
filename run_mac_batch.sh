@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local-only script to run after the user opens a newly authorized Mac.
+# Runs on the GitHub Actions macOS runner; no rented-Mac fallback.
 set -euo pipefail
 KIT=$(cd -- "$(dirname -- "$0")" && pwd)
 MODE=${1:---preflight}
@@ -15,12 +15,14 @@ case "$MODE" in
     xcrun clang -print-resource-dir >> "$KIT/output/preflight.log"
     python3 "$KIT/check_batch_inputs.py" >> "$KIT/output/preflight.log"
     ;;
-  --build-captured)
+  --build-captured|--build-prelinked)
     test "$(uname -s)" = Darwin || { echo 'Run on the newly authorized Mac' >&2; exit 1; }
     ROOT=${2:?Usage: --build-captured NEW_EMPTY_PRIVATE_ROOT}
     bash "$KIT/run_mac_batch.sh" --preflight
     python3 "$KIT/prepare_mac_workspace.py" "$ROOT"
-    python3 "$KIT/compile_captured_mac.py" "$ROOT"
+    CRYPTO_MODE=source
+    if [ "$MODE" = --build-prelinked ]; then CRYPTO_MODE=prelinked; fi
+    python3 "$KIT/compile_captured_mac.py" "$ROOT" --crypto-bootstrap "$CRYPTO_MODE"
     python3 "$KIT/link_captured_mac.py" "$ROOT"
     ;;
   --archive-corecrypto)

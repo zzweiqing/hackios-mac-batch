@@ -1,7 +1,7 @@
 # nabu / UniXNU XNU 移植——Mac 批处理公共仓库
 
 本仓库是 [hackios](.) 项目"确需 Apple 工具链"批处理的**公共部分**:自有脚本、
-补丁、审查记录与 GitHub Actions CI。用于在 GitHub 托管的 macOS runner 上,
+补丁与 GitHub Actions CI。用于在 GitHub 托管的 macOS runner 上,
 用真实 Apple Clang 重编 XNU 受影响对象并全核重链(XNU 10063.141.1 / nabu 平板移植实验)。
 
 **本仓库不含、也永不提交 Apple 专有材料**(iPhoneOS SDK 头/对象备份、CoreCrypto
@@ -42,8 +42,7 @@
 | `prepare_mac_workspace.py` 等 5 个脚本 | 工作区恢复、捕获命令重编、链接、干净构建准备、输入检查 |
 | `patches/` | 10 个源补丁(PAN、4K 用户 ABI、mockfs 无 AMFI、console popup 等) |
 | `MAC_REQUIRED.zh-CN.md` | 什么真正需要 Mac、批处理内容、完成证据要求 |
-| `review/` | 2026-10-22 对批处理包的独立审查记录 |
-| `validation*.json`、`corecrypto-required-provenance.json` | 本地验证与来源溯源元数据 |
+| `runtime/`、`corecrypto-required-provenance.json` | 明确许可的 compiler-rt 依赖及来源元数据 |
 
 本地无 `inputs/`、`capture/`(私有材料)时,`check_batch_inputs.py` 会正确地
 报告 `captured_batch_complete=false`——这是设计行为,不是缺陷。
