@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -32,8 +33,8 @@ class PrepareError(RuntimeError):
     """The input is not the pinned source, or the patch does not apply."""
 
 
-def run(args, cwd=None):
-    proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+def run(args, cwd=None, env=None):
+    proc = subprocess.run(args, cwd=cwd, env=env, capture_output=True, text=True)
     if proc.returncode != 0:
         raise PrepareError("%s failed (%d): %s" % (" ".join(args), proc.returncode,
                                                    (proc.stderr or proc.stdout).strip()))
@@ -73,8 +74,12 @@ def apply_patch(output: Path, patch: Path, names: list[str]) -> None:
     for name in names:
         if not (output / name).is_file() and "new file mode" not in patch.read_text(encoding="utf-8"):
             raise PrepareError("patch target %s is absent from the copy" % name)
-    run(["git", "apply", "--check", str(patch)], cwd=output)
-    run(["git", "apply", str(patch)], cwd=output)
+    # A copy inside another checkout must not inherit its repository prefix:
+    # git apply otherwise skips every top-level driver path and returns zero.
+    env = os.environ.copy()
+    env["GIT_CEILING_DIRECTORIES"] = str(output.parent.resolve())
+    run(["git", "apply", "--check", str(patch)], cwd=output, env=env)
+    run(["git", "apply", str(patch)], cwd=output, env=env)
 
 
 def verify_applied(output: Path) -> None:
