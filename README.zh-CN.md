@@ -15,11 +15,18 @@
 
 1. **preflight**:记录 runner 的 Xcode/SDK/Clang/ld 版本,校验批处理输入完整性。
 2. **build-captured**(默认):全新空工作区恢复归档 → 应用补丁 → 用捕获的原始
-   Apple 编译命令重编 11 个对象(ubc_subr、IOKitBSDInit.cpo、7 个 PAN 对象、
-   km.o 含 kernel_tests.o)→ `.LDFLAGS` 全核重链 → CoreCrypto FIPS HMAC 封印 →
+   Apple 编译命令重编精确清单中的 12 个对象（含 memdev.o、IOKitBSDInit.cpo）→
+   `.LDFLAGS` 全核重链 → CoreCrypto FIPS HMAC 封印 →
    `nm -u` 无未定义符号检查。
 3. 产物:公共 artifact `ci-summary-<run>`;完整对象/日志/新内核在私有仓库
    release `ci-<run_id>`。
+
+`build-prelinked` 在同一清单上增加原生 `prng_random.o`，共 13 对象；
+源码 provider 重复启动入口在编译时移除，原始组件仍由后续预链步骤加入。
+`apfs-fixture` 在 macOS 制作小型未加密 APFS 镜像；
+`mdev-fixture` 编译、签名自有 EL0 块读/挂载测试程序。
+这两个 fixture 模式不下载 batch 输入，产物只保存在私有
+`apfs-fixture-<run_id>` release。宿主制作或编译成功不代表 guest 挂载成功。
 
 不伪造 Apple 专用 builtin(`__builtin_xnu_type_summary` 等);工具链不兼容时
 首错即停并保存现场。
@@ -38,9 +45,10 @@
 
 | 路径 | 内容 |
 | --- | --- |
-| `run_mac_batch.sh` | 批处理入口(preflight / build-captured / archive-corecrypto / build-clean) |
-| `prepare_mac_workspace.py` 等 5 个脚本 | 工作区恢复、捕获命令重编、链接、干净构建准备、输入检查 |
-| `patches/` | 10 个源补丁(PAN、4K 用户 ABI、mockfs 无 AMFI、console popup 等) |
+| `run_mac_batch.sh` | 批处理入口（含 source/prelinked 底座与 APFS 镜像） |
+| `prepare_mac_workspace.py` 等脚本 | 工作区恢复、捕获命令重编、链接、输入检查 |
+| `make_apfs_fixture.py`、`make_mdev_user_fixture.py` | 宿主镜像与自有 EL0 测试程序 |
+| `patches/` | PAN、4K 用户 ABI、mockfs 测试边界、console、只读 md1 等源补丁 |
 | `MAC_REQUIRED.zh-CN.md` | 什么真正需要 Mac、批处理内容、完成证据要求 |
 | `runtime/`、`corecrypto-required-provenance.json` | 明确许可的 compiler-rt 依赖及来源元数据 |
 
