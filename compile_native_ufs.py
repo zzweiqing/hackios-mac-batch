@@ -3,6 +3,7 @@
 import argparse
 import json
 from pathlib import Path
+import shutil
 import subprocess
 
 from prepare_storage_headers import prepare
@@ -18,6 +19,9 @@ def main():
     if prepared.get("source_commit") != "af785c1777161a62931425c2faaa536ce0bebd5b":
         raise SystemExit("Expected the prepared pinned nabu UFS source")
     headers = prepare(root, storage_device=True)
+    sdk = Path(subprocess.check_output(
+        ["xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip())
+    shutil.copyfile(sdk / "usr/include/TargetConditionals.h", headers / "TargetConditionals.h")
     output = root / "mac-batch-output/native-ufs"
     output.mkdir(exist_ok=False)
     (output / "source-prepare.json").write_text(json.dumps(prepared, indent=2) + "\n")
