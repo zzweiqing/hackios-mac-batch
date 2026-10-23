@@ -49,5 +49,10 @@ case "$MODE" in
     export XNU_EXTRA_CFLAGS='-DXNU_NABU_MOCKFS_EL0=1 -Wno-unknown-warning-option -Wno-error'
     JOBS=2 bash scripts/build-xnu-offline.sh > mac-clean-build.log 2>&1
     ;;
-  *) echo 'Supported: --preflight, --build-captured NEW_ROOT, --archive-corecrypto EXACT_SOURCE, --build-clean' >&2; exit 2 ;;
+  --apfs-fixture)
+    test "$(uname -s)" = Darwin || { echo 'APFS fixture creation requires the authorized macOS runner' >&2; exit 1; }
+    OUTPUT=${2:?Usage: --apfs-fixture NEW_OUTPUT_DIR}
+    python3 "$KIT/make_apfs_fixture.py" --output-dir "$OUTPUT"
+    ;;
+  *) echo 'Supported: --preflight, --build-captured NEW_ROOT, --archive-corecrypto EXACT_SOURCE, --build-clean, --apfs-fixture NEW_OUTPUT_DIR' >&2; exit 2 ;;
 esac

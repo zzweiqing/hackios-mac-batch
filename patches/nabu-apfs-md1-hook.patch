@@ -1,0 +1,42 @@
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -64,6 +64,9 @@ extern dev_t mdevadd(int devid, uint64_t base, unsigned int size, int phys);
+ extern dev_t mdevlookup(int devid);
+ extern void mdevremoveall(void);
+ extern int mdevgetrange(int devid, uint64_t *base, uint64_t *size);
++#if XNU_NABU_APFS_MD1
++extern int mdev_apfs_md1_register(uint64_t base, unsigned int pages);
++#endif
+ extern void di_root_ramfile(IORegistryEntry * entry);
+ extern int IODTGetDefault(const char *key, void *infoAddr, unsigned int infoSize);
+ extern boolean_t cpuid_vmm_present(void);
+@@ -711,6 +714,11 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+ 	OSDataAllocation<char> str;
+ 	const char *        look = NULL;
+ 	int                 len;
++#if XNU_NABU_APFS_MD1
++	uint64_t            apfsBase = 0;
++	uint64_t            apfsSize = 0;
++#endif
+ 	bool                debugInfoPrintedOnce = false;
+ 	bool                needNetworkKexts = false;
+ 	const char *        uuidStr = NULL;
+@@ -771,6 +779,21 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+ 		if ((regEntry = IORegistryEntry::fromPath( "/chosen/memory-map", gIODTPlane ))) {        /* Find the map node */
++#if XNU_NABU_APFS_MD1
++		/*
++		 * Optional QEMU-only APFS probe.  The backing range must be supplied
++		 * explicitly by the harness and is never inferred from RAMDisk or the
++		 * DarwinBoot allocation window.
++		 */
++		if (PE_parse_boot_argn("hackios-apfs-md1-base", &apfsBase,
++		    sizeof(apfsBase)) &&
++		    PE_parse_boot_argn("hackios-apfs-md1-size", &apfsSize,
++		    sizeof(apfsSize)) &&
++		    apfsSize > 0 && (apfsSize & (PAGE_SIZE - 1)) == 0) {
++			(void)mdev_apfs_md1_register(apfsBase, apfsSize >> PAGE_SHIFT);
++		}
++#endif
+ 
+ 
+ //

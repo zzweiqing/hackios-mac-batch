@@ -11,6 +11,7 @@ on:
           - preflight-only
           - build-captured
           - build-prelinked
+          - apfs-fixture
 
 permissions:
   contents: read
@@ -40,6 +41,7 @@ jobs:
           fi
 
       - name: Download private batch inputs（Apple 素材运行时拉取，不入公共仓库）
+        if: ${{ inputs.mode != 'apfs-fixture' }}
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
@@ -53,6 +55,7 @@ jobs:
           ls -l "$RUNNER_TEMP/$BATCH_TARBALL"
 
       - name: Restore inputs/ and capture/ into workspace
+        if: ${{ inputs.mode != 'apfs-fixture' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -67,6 +70,7 @@ jobs:
           ls run_mac_batch.sh patches inputs capture
 
       - name: Preflight（Xcode/SDK/compiler/输入完整性报告）
+        if: ${{ inputs.mode != 'apfs-fixture' }}
         shell: bash
         run: bash run_mac_batch.sh --preflight
 
@@ -75,13 +79,18 @@ jobs:
         shell: bash
         run: bash run_mac_batch.sh --build-captured "$RUNNER_TEMP/batch-work"
 
-      - name: Build native prelinked-provider base (12 objects)
+      - name: Build native prelinked-provider base (13 objects)
         if: ${{ inputs.mode == 'build-prelinked' }}
         shell: bash
         run: bash run_mac_batch.sh --build-prelinked "$RUNNER_TEMP/batch-work"
 
+      - name: Create small unencrypted APFS fixture
+        if: ${{ inputs.mode == 'apfs-fixture' }}
+        shell: bash
+        run: bash run_mac_batch.sh --apfs-fixture "$RUNNER_TEMP/apfs-fixture"
+
       - name: Collect summary
-        if: always()
+        if: ${{ always() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -91,6 +100,9 @@ jobs:
             date -u
             echo '--- preflight ---'
             cat output/preflight.log 2>/dev/null || true
+            if [ -f "$RUNNER_TEMP/apfs-fixture/apfs-probe.json" ]; then
+              jq '{creation_passed, image_bytes, image_sha256, volume_uuid, probe_sha256, error, apfs_mount_tested, ipados_booted}' "$RUNNER_TEMP/apfs-fixture/apfs-probe.json"
+            fi
             if [ -f "$OUT/compile-report.json" ]; then
               echo '--- compile summary ---'
               jq '{all_passed, crypto_bootstrap, objects: [.records[] | {object, returncode, sha256}]}' "$OUT/compile-report.json" || true
@@ -108,12 +120,33 @@ jobs:
           cat ci-summary.txt
 
       - name: Upload summary artifact（公开：仅版本/返回码/尺寸/哈希）
-        if: always()
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: ci-summary-${{ github.run_id }}
           path: ci-summary.txt
           if-no-files-found: warn
+
+      - name: Upload APFS fixture to private inputs repo
+        if: ${{ always() && inputs.mode == 'apfs-fixture' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
+          PRIVATE_INPUTS_REPO: ${{ vars.PRIVATE_INPUTS_REPO }}
+        run: |
+          set -euo pipefail
+          FIXTURE="$RUNNER_TEMP/apfs-fixture"
+          if [ ! -d "$FIXTURE" ]; then
+            echo 'Fixture generation did not start.'
+            exit 0
+          fi
+          TAG="apfs-fixture-$GITHUB_RUN_ID"
+          ARCHIVE="$RUNNER_TEMP/$TAG.tar.gz"
+          tar -czf "$ARCHIVE" -C "$FIXTURE" .
+          gh release create "$TAG" --repo "$PRIVATE_INPUTS_REPO" \
+            --title "APFS fixture $TAG" \
+            --notes "host-only APFS fixture; public repo run $GITHUB_RUN_ID" >/dev/null 2>&1 || true
+          gh release upload "$TAG" "$ARCHIVE" --repo "$PRIVATE_INPUTS_REPO" --clobber
 
       - name: Upload full build outputs to private inputs repo
         if: ${{ always() && (inputs.mode == 'build-captured' || inputs.mode == 'build-prelinked') }}

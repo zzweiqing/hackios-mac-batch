@@ -10,7 +10,8 @@ if not record.get('all_passed'):raise SystemExit('Compile batch incomplete')
 mode=record.get('crypto_bootstrap','source')
 if mode not in ('source','prelinked'):raise SystemExit('Unknown crypto bootstrap mode')
 expected=record.get('expected_objects')
-if expected is not None and ([r['object'] for r in record['records']]!=expected or len(expected)!=(12 if mode=='prelinked' else 11)):raise SystemExit('Compile object closure incomplete')
+expected_count=(13 if mode=='prelinked' else 12)
+if expected is not None and ([r['object'] for r in record['records']]!=expected or len(expected)!=expected_count):raise SystemExit('Compile object closure incomplete')
 for r in record['records']:
     if r['returncode'] or (r.get('sha256') and hashlib.sha256(Path(r['output']).read_bytes()).hexdigest()!=r['sha256']):raise SystemExit('Compiled object failed or changed')
 if mode=='prelinked':

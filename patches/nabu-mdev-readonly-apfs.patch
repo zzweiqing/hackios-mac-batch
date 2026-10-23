@@ -1,0 +1,127 @@
+--- a/bsd/dev/memdev.c
++++ b/bsd/dev/memdev.c
+@@ -85,6 +85,11 @@
+ 
+ #include <sys/conf.h>
+ 
++#if XNU_NABU_APFS_MD1
++#include <sys/buf.h>
++#include <sys/errno.h>
++#endif
++
+ /*
+  * Copyright (c) 1982, 1986, 1993
+  *	The Regents of the University of California.  All rights reserved.
+@@ -648,6 +653,94 @@ mdevlookup(int devid)
+ 	return mdev[devid].mdBDev;
+ }
+ 
++#if XNU_NABU_APFS_MD1
++/*
++ * The APFS bring-up device is a bounded read-only view of a preloaded image.
++ * The range is guest RAM owned by the loader, not a VM allocation.  The
++ * caller must establish ownership and non-overlap before registration.
++ */
++static int mdev_apfs_md1_ready;
++static uint64_t mdev_apfs_md1_base;
++static unsigned int mdev_apfs_md1_pages;
++volatile uint64_t mdev_apfs_md1_reads;
++volatile uint64_t mdev_apfs_md1_read_bytes;
++volatile uint64_t mdev_apfs_md1_read_failures;
++volatile uint64_t mdev_apfs_md1_writes;
++volatile uint64_t mdev_apfs_md1_write_failures;
++
++static int
++mdev_apfs_md1_bounds(uint64_t offset, size_t bytes)
++{
++	uint64_t capacity = (uint64_t)mdev_apfs_md1_pages * PAGE_SIZE;
++
++	if (!mdev_apfs_md1_ready || bytes == 0 || offset > capacity ||
++	    bytes > capacity - offset) {
++		return EINVAL;
++	}
++	return 0;
++}
++
++int
++mdev_apfs_md1_register(uint64_t base, unsigned int pages)
++{
++	dev_t device;
++
++	if (mdev_apfs_md1_ready || base == 0 || pages == 0 ||
++	    (base & (PAGE_SIZE - 1)) != 0 ||
++	    pages > UINT_MAX / PAGE_SIZE) {
++		return EINVAL;
++	}
++	device = mdevadd(1, base >> PAGE_SHIFT, pages, 0);
++	if (device == NODEV) {
++		return ENODEV;
++	}
++	mdev_apfs_md1_base = base;
++	mdev_apfs_md1_pages = pages;
++	mdev_apfs_md1_ready = 1;
++	return 0;
++}
++
++static int
++mdev_apfs_md1_strategy(struct buf *bp)
++{
++	uint64_t offset;
++	size_t bytes;
++
++	if (!mdev_apfs_md1_ready || bp == NULL) {
++		return ENODEV;
++	}
++	if ((buf_flags(bp) & B_WRITE) != 0) {
++		mdev_apfs_md1_writes++;
++		mdev_apfs_md1_write_failures++;
++		return EROFS;
++	}
++	offset = (uint64_t)buf_blkno(bp) * 512;
++	bytes = (size_t)buf_count(bp);
++	if (mdev_apfs_md1_bounds(offset, bytes) != 0) {
++		mdev_apfs_md1_read_failures++;
++		return EIO;
++	}
++	if (buf_map(bp) == NULL || buf_dataptr(bp) == NULL) {
++		mdev_apfs_md1_read_failures++;
++		return EIO;
++	}
++	bcopy((const void *)(uintptr_t)(mdev_apfs_md1_base + offset),
++	    buf_dataptr(bp), bytes);
++	mdev_apfs_md1_reads++;
++	mdev_apfs_md1_read_bytes += bytes;
++	buf_biodone(bp);
++	return 0;
++}
++#endif
++
+ dev_t
+ mdevadd(int devid, uint64_t base, unsigned int size, int phys)
+ {
+@@ -660,6 +753,15 @@ mdevadd(int devid, uint64_t base, unsigned int size, int phys)
+ {
+ 	dev_t dev;
+ 
++#if XNU_NABU_APFS_MD1
++	if (devid == 1 &&
++	    (!mdev_apfs_md1_ready ||
++	     base != (mdev_apfs_md1_base >> PAGE_SHIFT) ||
++	     size != mdev_apfs_md1_pages)) {
++		return NODEV;
++	}
++#endif
++
+ 	if (devid == -1) {
+ 		/* locate an unused memory disk */
+ 		for (devid = 0; devid < NMDEV; devid++) {
+@@ -700,6 +802,6 @@ mdevadd(int devid, uint64_t base, unsigned int size, int phys)
+ 	devfs_make_node(mdev[devid].mdCDev, DEV_CHAR, mdev_cdevsw,
+ 	    mdev[devid].mdBDev, UID_ROOT, GID_OPERATOR, 0600, "rmd%d", devid);
+ 
++	if (devid == 1) {
++		mdev[devid].mdStrategy = mdev_apfs_md1_strategy;
++	}
+ 	/* return the dev_t */
+ 	return mdev[devid].mdBDev;
+ }
