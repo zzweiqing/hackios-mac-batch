@@ -93,7 +93,9 @@ jobs:
       - name: Compile and sign own md1 block-read fixture
         if: ${{ inputs.mode == 'mdev-fixture' }}
         shell: bash
-        run: python3 make_mdev_user_fixture.py --output-dir "$RUNNER_TEMP/apfs-fixture/md1-user"
+        run: |
+          python3 make_mdev_user_fixture.py --output-dir "$RUNNER_TEMP/apfs-fixture/md1-user"
+          python3 make_mdev_user_fixture.py --output-dir "$RUNNER_TEMP/apfs-fixture/md0-user" --device /dev/md0 --read-offset 0x10000
 
       - name: Collect summary
         if: ${{ always() }}

@@ -53,15 +53,36 @@ _md1_buffer: .space 4096, 0
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--device", choices=("/dev/md0", "/dev/md1"), default="/dev/md1")
+    parser.add_argument("--read-offset", type=lambda v: int(v, 0), default=0)
     args = parser.parse_args()
     if sys.platform != "darwin":
         raise SystemExit("own EL0 fixture compilation requires macOS Actions")
     out = args.output_dir.resolve()
     out.mkdir(parents=True, exist_ok=False)
-    source = BASE_SOURCE.replace(".p2align 2\n_checkpoint:", BLOCK_PROBE + "\n.p2align 2\n_checkpoint:")
+    if not 0 <= args.read_offset <= 0xffffffff or args.read_offset % 4096:
+        raise ValueError("read offset must be page aligned and fit 32 bits")
+    block_probe = BLOCK_PROBE
+    if args.read_offset:
+        seek = f"""
+  mov x22, x0
+  movz x1, #{args.read_offset & 65535}
+  movk x1, #{args.read_offset >> 16}, lsl #16
+  mov x2, #0
+  mov x16, #199
+  svc #0x80
+  b.cs _failure_checkpoint
+  movz x9, #{args.read_offset & 65535}
+  movk x9, #{args.read_offset >> 16}, lsl #16
+  cmp x0, x9
+  b.ne _failure_checkpoint
+  mov x0, x22
+"""
+        block_probe = block_probe.replace("  adrp x1, _md1_buffer@PAGE", seek + "  adrp x1, _md1_buffer@PAGE")
+    source = BASE_SOURCE.replace(".p2align 2\n_checkpoint:", block_probe + "\n.p2align 2\n_checkpoint:")
     if source == BASE_SOURCE:
         raise ValueError("base fixture checkpoint marker absent")
-    source += BLOCK_DATA
+    source += BLOCK_DATA.replace('"/dev/md1"', json.dumps(args.device))
     assembly = out / "md1-user.S"
     assembly.write_text(source, encoding="ascii")
     image = out / "launchd.macho"
@@ -90,6 +111,7 @@ def main():
             "checkpoint": symbols["_checkpoint"], "failure_checkpoint": symbols["_failure_checkpoint"],
             "description": "Own static PID1: core syscall regression plus actual md1 read of block 0",
             "mdev_block_read_probe": True, "apfs_mount_tested": False, "apple_userspace_used": False,
+            "mdev_device": args.device, "mdev_read_offset": args.read_offset, "source": "md1-user.S",
         })
         contract["memory"].update({
             "_md1_open_result": {"width": 8, "predicate": "nonnegative_signed"},
