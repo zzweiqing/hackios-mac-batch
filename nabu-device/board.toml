@@ -36,6 +36,10 @@ fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustC
 
 [kernel]
 defconfig = "nabu_bootstrap_defconfig"
+archives = [
+  "build-corecrypto-14.py",
+  "build-corecrypto-14.py --namespace",
+]
 
 [kernel.prelink]
 tool = "kits/NativePrelink/emit_prelink.py"

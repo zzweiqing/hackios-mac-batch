@@ -1,9 +1,14 @@
 # Kernel configuration of the first nabu from-source bootstrap pass.
-# Example-shaped minimal set: no archive builders, no storage or owner-root paths.
-# CONFIG_XNU_<NAME> becomes XNU_<NAME> for the kernel build script.
+# Example-shaped minimal set plus the two link requirements of this pinned tree:
+# BUILD_ARCHIVES with the corecrypto builders (the non-bootstrap pass tests for
+# the namespaced corecrypto archive) and BOOT_PROGRESS (its archive provides the
+# stub for the offline display probe hook that bsd_init references in
+# DEVELOPMENT builds). CONFIG_XNU_<NAME> becomes XNU_<NAME> for the build script.
 
 CONFIG_XNU_SOURCE_CORECRYPTO14=y
 CONFIG_XNU_SOURCE_PTHREAD=y
 CONFIG_XNU_ARM_DT_PLATFORM=y
 CONFIG_XNU_ARMCPU=y
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
+CONFIG_XNU_BOOT_PROGRESS=y
+CONFIG_XNU_BUILD_ARCHIVES=y
