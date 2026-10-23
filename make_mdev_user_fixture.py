@@ -49,6 +49,97 @@ Lmd1_path: .asciz "/dev/md1"
 _md1_buffer: .space 4096, 0
 """
 
+APFS_PROBE = """
+  adrp x0, Lapfs_mountpoint@PAGE
+  add x0, x0, Lapfs_mountpoint@PAGEOFF
+  mov x1, #0755
+  mov x16, #136
+  svc #0x80
+  mrs x9, nzcv
+  adrp x21, _apfs_mkdir_result@PAGE
+  add x21, x21, _apfs_mkdir_result@PAGEOFF
+  str x0, [x21]
+  str x9, [x21, #8]
+  b.cs _failure_checkpoint
+  adrp x0, Lapfs_name@PAGE
+  add x0, x0, Lapfs_name@PAGEOFF
+  adrp x1, Lapfs_mountpoint@PAGE
+  add x1, x1, Lapfs_mountpoint@PAGEOFF
+  mov x2, #1
+  adrp x3, Lapfs_arguments@PAGE
+  add x3, x3, Lapfs_arguments@PAGEOFF
+  mov x9, #1
+  str x9, [x21, #64]
+  mov x16, #167
+  svc #0x80
+  mrs x9, nzcv
+  str x0, [x21, #16]
+  str x9, [x21, #24]
+  b.cs _failure_checkpoint
+  adrp x0, Lapfs_mountpoint@PAGE
+  add x0, x0, Lapfs_mountpoint@PAGEOFF
+  adrp x1, _apfs_statfs_buf@PAGE
+  add x1, x1, _apfs_statfs_buf@PAGEOFF
+  mov x16, #345
+  svc #0x80
+  b.cs _failure_checkpoint
+  adrp x0, Lapfs_probe_path@PAGE
+  add x0, x0, Lapfs_probe_path@PAGEOFF
+  mov x1, #0
+  mov x2, #0
+  mov x16, #5
+  svc #0x80
+  mrs x9, nzcv
+  str x0, [x21, #32]
+  str x9, [x21, #40]
+  b.cs _failure_checkpoint
+  adrp x1, _apfs_probe_buffer@PAGE
+  add x1, x1, _apfs_probe_buffer@PAGEOFF
+  mov x2, #64
+  mov x16, #3
+  svc #0x80
+  mrs x9, nzcv
+  str x0, [x21, #48]
+  str x9, [x21, #56]
+  b.cs _failure_checkpoint
+"""
+
+APFS_DATA = """
+.data
+.balign 8
+.global _apfs_mkdir_result, _apfs_mkdir_flags, _apfs_mount_result, _apfs_mount_flags
+.global _apfs_open_result, _apfs_open_flags, _apfs_read_result, _apfs_read_flags, _apfs_mount_attempted
+_apfs_mkdir_result: .quad -1
+_apfs_mkdir_flags: .quad 0
+_apfs_mount_result: .quad -1
+_apfs_mount_flags: .quad 0
+_apfs_open_result: .quad -1
+_apfs_open_flags: .quad 0
+_apfs_read_result: .quad -1
+_apfs_read_flags: .quad 0
+_apfs_mount_attempted: .quad 0
+Lapfs_name: .asciz "apfs"
+Lapfs_mountpoint: .asciz "/dev/apfs-offline"
+Lapfs_probe_path: .asciz "/dev/apfs-offline/probe.bin"
+Lapfs_device: .asciz "/dev/md1"
+.balign 8
+Lapfs_arguments:
+  .quad Lapfs_device, 1
+  .short 1
+  .space 0x150 - 18, 0
+.global _apfs_probe_buffer
+_apfs_probe_buffer: .space 64, 0
+.balign 8
+_apfs_statfs_buf: .space 64, 0
+.global _apfs_statfs_flags
+_apfs_statfs_flags: .long 0
+  .space 4, 0
+.global _apfs_statfs_fstype, _apfs_statfs_mountpoint
+_apfs_statfs_fstype: .space 16, 0
+_apfs_statfs_mountpoint: .space 1024, 0
+  .space 1024 + 32, 0
+"""
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -56,6 +147,7 @@ def main():
     parser.add_argument("--device", choices=("/dev/md0", "/dev/md1"), default="/dev/md1")
     parser.add_argument("--read-offset", type=lambda v: int(v, 0), default=0)
     parser.add_argument("--write-open", action="store_true", help="Expected-refusal control: try O_RDWR")
+    parser.add_argument("--apfs-mount", action="store_true", help="21H16 APFS read-only data mount and file read")
     args = parser.parse_args()
     if sys.platform != "darwin":
         raise SystemExit("own EL0 fixture compilation requires macOS Actions")
@@ -66,6 +158,10 @@ def main():
     block_probe = BLOCK_PROBE
     if args.write_open:
         block_probe = block_probe.replace("  mov x1, #0\n  mov x2, #0", "  mov x1, #2\n  mov x2, #0")
+    if args.apfs_mount:
+        if args.write_open or args.device != "/dev/md1" or args.read_offset:
+            raise ValueError("APFS mount requires the ordinary md1 read instrument")
+        block_probe += APFS_PROBE
     if args.read_offset:
         seek = f"""
   mov x22, x0
@@ -86,6 +182,10 @@ def main():
     if source == BASE_SOURCE:
         raise ValueError("base fixture checkpoint marker absent")
     source += BLOCK_DATA.replace('"/dev/md1"', json.dumps(args.device))
+    if args.apfs_mount:
+        # 21H16 mount_apfs passes fspec/flags/mode at 0/8/16; original APFS
+        # vfs_mount copies 0x144 bytes. Reserve the helper's 0x150-byte storage.
+        source += APFS_DATA
     assembly = out / "md1-user.S"
     assembly.write_text(source, encoding="ascii")
     image = out / "launchd.macho"
@@ -123,6 +223,25 @@ def main():
             "_md1_read_result": {"width": 8, "value": 4096},
             "_md1_read_flags": {"width": 8, "value": 0, "mask": 0x20000000},
         })
+        if args.apfs_mount:
+            contract["apfs_file_read_probe"] = True
+            contract["memory"].update({
+                "_apfs_mkdir_result": {"width": 8, "value": 0},
+                "_apfs_mkdir_flags": {"width": 8, "value": 0, "mask": 0x20000000},
+                "_apfs_mount_result": {"width": 8, "value": 0},
+                "_apfs_mount_flags": {"width": 8, "value": 0, "mask": 0x20000000},
+                "_apfs_open_result": {"width": 8, "predicate": "nonnegative_signed"},
+                "_apfs_open_flags": {"width": 8, "value": 0, "mask": 0x20000000},
+                "_apfs_read_result": {"width": 8, "value": 22},
+                "_apfs_read_flags": {"width": 8, "value": 0, "mask": 0x20000000},
+                "_apfs_mount_attempted": {"width": 8, "value": 1},
+                "_apfs_statfs_flags": {"width": 4, "value": 1, "mask": 1},
+            })
+            contract["buffers"] = {
+                "_apfs_probe_buffer": {"size": 22, "sha256": hashlib.sha256(b"HACKIOS_APFS_PROBE_V1\n").hexdigest()},
+                "_apfs_statfs_fstype": {"size": 5, "sha256": hashlib.sha256(b"apfs\0").hexdigest()},
+                "_apfs_statfs_mountpoint": {"size": 18, "sha256": hashlib.sha256(b"/dev/apfs-offline\0").hexdigest()},
+            }
         (out / "addresses.json").write_text(json.dumps(symbols, indent=2) + "\n")
         (out / "el0-contract.json").write_text(json.dumps(contract, indent=2) + "\n")
     finally:
