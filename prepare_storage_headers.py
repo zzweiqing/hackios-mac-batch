@@ -10,12 +10,14 @@ BASE = "https://raw.githubusercontent.com/apple-oss-distributions/IOStorageFamil
 HEADERS = ("IOStorage.h", "IOMedia.h")
 
 
-def prepare(root):
+def prepare(root, storage_device=False):
     root = Path(root)
     output = root / "mac-batch-output/storage-headers"
     target = output / "IOKit/storage"
     target.mkdir(parents=True, exist_ok=True)
-    for name in HEADERS:
+    names = HEADERS + (("IOBlockStorageDevice.h", "IOStorageDeviceCharacteristics.h")
+                       if storage_device else ())
+    for name in names:
         with urlopen(BASE + REVISION + "/" + name, timeout=60) as response:
             data = response.read()
         if b"@APPLE_LICENSE_HEADER_START@" not in data:
@@ -24,7 +26,7 @@ def prepare(root):
     (output / "provenance.json").write_text(json.dumps({
         "repository": "apple-oss-distributions/IOStorageFamily",
         "revision": REVISION,
-        "headers": list(HEADERS),
+        "headers": list(names),
         "purpose": "declarations only; original IOMedia is allocated at runtime",
         "storage_implementation_recompiled": False,
     }, indent=2) + "\n")
