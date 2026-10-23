@@ -12,6 +12,7 @@ on:
           - build-captured
           - build-prelinked
           - apfs-fixture
+          - mdev-fixture
 
 permissions:
   contents: read
@@ -41,7 +42,7 @@ jobs:
           fi
 
       - name: Download private batch inputs（Apple 素材运行时拉取，不入公共仓库）
-        if: ${{ inputs.mode != 'apfs-fixture' }}
+        if: ${{ inputs.mode != 'apfs-fixture' && inputs.mode != 'mdev-fixture' }}
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
@@ -55,7 +56,7 @@ jobs:
           ls -l "$RUNNER_TEMP/$BATCH_TARBALL"
 
       - name: Restore inputs/ and capture/ into workspace
-        if: ${{ inputs.mode != 'apfs-fixture' }}
+        if: ${{ inputs.mode != 'apfs-fixture' && inputs.mode != 'mdev-fixture' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -70,7 +71,7 @@ jobs:
           ls run_mac_batch.sh patches inputs capture
 
       - name: Preflight（Xcode/SDK/compiler/输入完整性报告）
-        if: ${{ inputs.mode != 'apfs-fixture' }}
+        if: ${{ inputs.mode != 'apfs-fixture' && inputs.mode != 'mdev-fixture' }}
         shell: bash
         run: bash run_mac_batch.sh --preflight
 
@@ -88,6 +89,11 @@ jobs:
         if: ${{ inputs.mode == 'apfs-fixture' }}
         shell: bash
         run: bash run_mac_batch.sh --apfs-fixture "$RUNNER_TEMP/apfs-fixture"
+
+      - name: Compile and sign own md1 block-read fixture
+        if: ${{ inputs.mode == 'mdev-fixture' }}
+        shell: bash
+        run: python3 make_mdev_user_fixture.py --output-dir "$RUNNER_TEMP/apfs-fixture/md1-user"
 
       - name: Collect summary
         if: ${{ always() }}
@@ -128,7 +134,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload APFS fixture to private inputs repo
-        if: ${{ always() && inputs.mode == 'apfs-fixture' }}
+        if: ${{ always() && (inputs.mode == 'apfs-fixture' || inputs.mode == 'mdev-fixture') }}
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
