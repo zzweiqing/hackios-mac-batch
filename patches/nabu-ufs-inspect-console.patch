@@ -63,26 +63,26 @@ diff --git a/NativeUfs.cpp b/NativeUfs.cpp
    unsigned readHc = 0;
    if (powered && busClocks) {
 +    native_ufs_inspect_stage = 10;
-+  printf ("UFS stage: map HC\n");
++    printf ("UFS stage: map HC\n");
      uintptr_t hc = mapPhys (nabu_ufs::kBoard.hcBase, nabu_ufs::kBoard.hcMapBytes, hcMap);
      if (hc) {
 +      native_ufs_inspect_stage = 11;
-+  printf ("UFS stage: read HC CAP\n");
++      printf ("UFS stage: read HC CAP\n");
        cap = read32 (hc, 0x00);
 +      native_ufs_inspect_stage = 12;
-+  printf ("UFS stage: read HC VER\n");
++      printf ("UFS stage: read HC VER\n");
        ver = read32 (hc, 0x08);
 +      native_ufs_inspect_stage = 13;
-+  printf ("UFS stage: read HC IS\n");
++      printf ("UFS stage: read HC IS\n");
        is = read32 (hc, 0x20);
 +      native_ufs_inspect_stage = 14;
-+  printf ("UFS stage: read HC HCS\n");
++      printf ("UFS stage: read HC HCS\n");
        hcs = read32 (hc, 0x30);
 +      native_ufs_inspect_stage = 15;
-+  printf ("UFS stage: read HC HCE\n");
++      printf ("UFS stage: read HC HCE\n");
        hce = read32 (hc, 0x34);
 +      native_ufs_inspect_stage = 16;
-+  printf ("UFS stage: read HC UTRLBA\n");
++      printf ("UFS stage: read HC UTRLBA\n");
        utrlba = read32 (hc, 0x50);
        readHc = 1;
      }
