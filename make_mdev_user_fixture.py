@@ -144,7 +144,7 @@ _apfs_statfs_mountpoint: .space 1024, 0
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--device", choices=("/dev/md0", "/dev/md1"), default="/dev/md1")
+    parser.add_argument("--device", choices=("/dev/md0", "/dev/md1", "/dev/md1s1"), default="/dev/md1s1")
     parser.add_argument("--read-offset", type=lambda v: int(v, 0), default=0)
     parser.add_argument("--write-open", action="store_true", help="Expected-refusal control: try O_RDWR")
     parser.add_argument("--apfs-mount", action="store_true", help="21H16 APFS read-only data mount and file read")
@@ -159,7 +159,7 @@ def main():
     if args.write_open:
         block_probe = block_probe.replace("  mov x1, #0\n  mov x2, #0", "  mov x1, #2\n  mov x2, #0")
     if args.apfs_mount:
-        if args.write_open or args.device != "/dev/md1" or args.read_offset:
+        if args.write_open or args.device != "/dev/md1s1" or args.read_offset:
             raise ValueError("APFS mount requires the ordinary md1 read instrument")
         block_probe += APFS_PROBE
     if args.read_offset:
