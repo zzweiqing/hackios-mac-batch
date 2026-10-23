@@ -2,6 +2,7 @@
 """One native-Apple batch of real source object recompiles; fail on any error."""
 import argparse,hashlib,json,subprocess
 from pathlib import Path
+from prepare_storage_headers import prepare as prepare_storage_headers
 
 KIT=Path(__file__).resolve().parent
 OLD='/Users/chuzu/Desktop/UniXNU-build/unixnu-mac-offline-20261021/work/UniXNU'
@@ -15,6 +16,7 @@ for patch,include in PATCHES:
     if check.returncode==0:subprocess.run(command,cwd=source,check=True)
     elif subprocess.run([command[0],command[1],'--reverse','--check',*command[2:]],cwd=source,capture_output=True).returncode:
         raise SystemExit('Patch requires review: '+patch+'\n'+check.stderr)
+storage_headers=prepare_storage_headers(root)
 records=[]
 for relative in objects:
     record=json.loads((objroot/(relative+'.json')).read_text().rstrip(',\n'))
@@ -26,6 +28,7 @@ for relative in objects:
         if flag=='XNU_NATIVE_PAN=0':flag='XNU_NATIVE_PAN=1'
         command.append(flag.replace(OLD,str(root)));i+=1
     command+=['-DXNU_NATIVE_PAN=1','-DXNU_NABU_MOCKFS_EL0=1','-DXNU_NABU_APFS_MD1=1','-march=armv8.1-a','-Wno-error']
+    if relative=='iokit/DEVELOPMENT/IOKitBSDInit.cpo':command+=['-I',str(storage_headers)]
     if relative=='osfmk/DEVELOPMENT/prng_random.o':command+=['-UXNU_SOURCE_CORECRYPTO14']
     result=subprocess.run(command,cwd=objroot/Path(relative).parent,capture_output=True,text=True)
     destination.with_suffix(destination.suffix+'.log').write_text(result.stdout+result.stderr)

@@ -1,6 +1,18 @@
 --- a/iokit/bsddev/IOKitBSDInit.cpp
 +++ b/iokit/bsddev/IOKitBSDInit.cpp
-@@ -65,6 +65,10 @@
+@@ -35,6 +35,11 @@
+ #include <IOKit/IOPlatformExpert.h>
+ #include <IOKit/IOUserClient.h>
+ #include <libkern/c++/OSAllocation.h>
++#if XNU_NABU_APFS_MD1
++#include <IOKit/storage/IOMedia.h>
++#include <libkern/c++/OSMetaClass.h>
++#include <libkern/c++/OSSymbol.h>
++#endif
+ 
+ extern "C" {
+ #include <libkern/amfi/amfi.h>
+@@ -65,6 +70,10 @@
  extern dev_t mdevlookup(int devid);
  extern void mdevremoveall(void);
  extern int mdevgetrange(int devid, uint64_t *base, uint64_t *size);
@@ -11,7 +23,79 @@
  extern void di_root_ramfile(IORegistryEntry * entry);
  extern int IODTGetDefault(const char *key, void *infoAddr, unsigned int infoSize);
  extern boolean_t cpuid_vmm_present(void);
-@@ -774,6 +778,19 @@
+@@ -105,6 +114,71 @@
+ static void IOOpenPolledCoreFile(thread_call_param_t __unused, thread_call_param_t corefilename);
+ 
+ thread_call_t corefile_open_call = NULL;
++#endif
++
++#if XNU_NABU_APFS_MD1
++volatile int mdev_apfs_iomedia_status = -1;
++volatile uint32_t mdev_apfs_iomedia_count;
++
++/* The existing mdev bdevsw owns I/O and devfs. IOMedia supplies its real identity
++ * to APFS; its BSD client category is owned before synchronous publication. */
++static int
++mdev_apfs_publish_media(int slot, const char *name, uint64_t bytes)
++{
++	dev_t device = mdevlookup(slot);
++	if (device == (dev_t)-1 || !bytes) {
++		return ENXIO;
++	}
++	OSObject *object = OSMetaClass::allocClassWithName("IOMedia");
++	IOService *service = OSDynamicCast(IOService, object);
++	if (!service || !service->metaCast("IOMedia")) {
++		OSSafeReleaseNULL(object);
++		return ENODEV;
++	}
++	IOMedia *media = static_cast<IOMedia *>(service);
++	if (!media->init(0, bytes, 4096, 0, false, false, "")) {
++		media->release();
++		return ENOMEM;
++	}
++	media->setName(name);
++	bool properties = media->setProperty(kIOBSDNameKey, name) &&
++	    media->setProperty(kIOBSDMajorKey, (uint64_t)((uint32_t)device >> 24), 32) &&
++	    media->setProperty(kIOBSDMinorKey, (uint64_t)((uint32_t)device & 0xffffff), 32);
++	IOService *provider = IOService::getResourceService();
++	if (!properties || !provider || !media->attach(provider)) {
++		media->release();
++		return ENOMEM;
++	}
++	IOService *client = new IOService;
++	const OSSymbol *category = OSSymbol::withCStringNoCopy("IOMediaBSDClient");
++	bool initialized = client && client->init();
++	bool attached = initialized && category &&
++	    client->setProperty(kIOMatchCategoryKey, category) && client->attach(media);
++	OSSafeReleaseNULL(category);
++	if (!attached) {
++		OSSafeReleaseNULL(client);
++		media->detach(provider);
++		media->release();
++		return ENOMEM;
++	}
++	client->setName("HackiosMdevBSDOwner");
++	media->registerService(kIOServiceSynchronous);
++	bool matched = (media->getState() & kIOServiceMatchedState) != 0;
++	OSNumber *majorValue = OSDynamicCast(OSNumber, media->getProperty(kIOBSDMajorKey));
++	OSNumber *minorValue = OSDynamicCast(OSNumber, media->getProperty(kIOBSDMinorKey));
++	bool identity = majorValue && minorValue &&
++	    majorValue->unsigned32BitValue() == ((uint32_t)device >> 24) &&
++	    minorValue->unsigned32BitValue() == ((uint32_t)device & 0xffffff);
++	if (matched && identity) {
++		mdev_apfs_iomedia_count++;
++	}
++	IOLog("APFS mdev IOMedia %s dev=%x matched=%d identity=%d\n",
++	    name, (unsigned int)device, matched, identity);
++	/* Attached objects remain owned by the registry until reboot. */
++	client->release();
++	media->release();
++	return matched && identity ? 0 : EIO;
++}
+ #endif
+ 
+ kern_return_t
+@@ -774,6 +848,27 @@
  				}
  #endif /* __LP64__ */
  				(void)mdevadd(-1, ml_static_ptovirt(ramdParms[0]) >> 12, (unsigned int) (ramdParms[1] >> 12), 0);        /* Initialize it and pass back the device number */
@@ -22,6 +106,14 @@
 +					if (PE_parse_boot_argn("hackios-apfs-md1-offset", &apfsOffset, sizeof(apfsOffset)) &&
 +					    PE_parse_boot_argn("hackios-apfs-md1-size", &apfsSize, sizeof(apfsSize))) {
 +						mdev_apfs_md1_status = mdev_apfs_md1_register(apfsOffset, apfsSize);
++						int publishMedia = 0;
++						if (!mdev_apfs_md1_status &&
++						    PE_parse_boot_argn("hackios-apfs-iomedia", &publishMedia, sizeof(publishMedia)) && publishMedia == 1) {
++							mdev_apfs_iomedia_status = mdev_apfs_publish_media(1, "md1", apfsSize);
++							if (!mdev_apfs_iomedia_status) {
++								mdev_apfs_iomedia_status = mdev_apfs_publish_media(2, "md1s1", apfsSize);
++							}
++						}
 +					} else {
 +						mdev_apfs_md1_status = EINVAL;
 +					}
