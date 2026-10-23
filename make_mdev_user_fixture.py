@@ -140,6 +140,30 @@ _apfs_statfs_mountpoint: .space 1024, 0
   .space 1024 + 32, 0
 """
 
+APFS_VOLUME_LINK = """
+  adrp x0, Lapfs_parent_device@PAGE
+  add x0, x0, Lapfs_parent_device@PAGEOFF
+  adrp x1, Lapfs_device@PAGE
+  add x1, x1, Lapfs_device@PAGEOFF
+  mov x16, #9
+  svc #0x80
+  mrs x9, nzcv
+  adrp x10, _apfs_volume_link_result@PAGE
+  add x10, x10, _apfs_volume_link_result@PAGEOFF
+  str x0, [x10]
+  str x9, [x10, #8]
+  b.cs _failure_checkpoint
+"""
+
+APFS_VOLUME_LINK_DATA = """
+.data
+.balign 8
+.global _apfs_volume_link_result, _apfs_volume_link_flags
+_apfs_volume_link_result: .quad -1
+_apfs_volume_link_flags: .quad 0
+Lapfs_parent_device: .asciz "/dev/md1"
+"""
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -148,6 +172,8 @@ def main():
     parser.add_argument("--read-offset", type=lambda v: int(v, 0), default=0)
     parser.add_argument("--write-open", action="store_true", help="Expected-refusal control: try O_RDWR")
     parser.add_argument("--apfs-mount", action="store_true", help="21H16 APFS read-only data mount and file read")
+    parser.add_argument("--apfs-volume-index", type=int, choices=(0, 1),
+                        help="Create a normal devfs hard link after EL0 starts; 1 is the absent-volume control")
     args = parser.parse_args()
     if sys.platform != "darwin":
         raise SystemExit("own EL0 fixture compilation requires macOS Actions")
@@ -156,11 +182,15 @@ def main():
     if not 0 <= args.read_offset <= 0xffffffff or args.read_offset % 4096:
         raise ValueError("read offset must be page aligned and fit 32 bits")
     block_probe = BLOCK_PROBE
+    if args.apfs_volume_index is not None and not args.apfs_mount:
+        raise ValueError("volume selection requires the APFS mount instrument")
     if args.write_open:
         block_probe = block_probe.replace("  mov x1, #0\n  mov x2, #0", "  mov x1, #2\n  mov x2, #0")
     if args.apfs_mount:
         if args.write_open or args.device != "/dev/md1" or args.read_offset:
             raise ValueError("APFS mount requires the ordinary md1 read instrument")
+        if args.apfs_volume_index is not None:
+            block_probe += APFS_VOLUME_LINK
         block_probe += APFS_PROBE
     if args.read_offset:
         seek = f"""
@@ -185,7 +215,12 @@ def main():
     if args.apfs_mount:
         # 21H16 mount_apfs passes fspec/flags/mode at 0/8/16; original APFS
         # vfs_mount copies 0x144 bytes. Reserve the helper's 0x150-byte storage.
-        source += APFS_DATA
+        apfs_data = APFS_DATA
+        if args.apfs_volume_index is not None:
+            apfs_data = apfs_data.replace('Lapfs_device: .asciz "/dev/md1"',
+                                         f'Lapfs_device: .asciz "/dev/md1s{args.apfs_volume_index + 1}"')
+            apfs_data += APFS_VOLUME_LINK_DATA
+        source += apfs_data
     assembly = out / "md1-user.S"
     assembly.write_text(source, encoding="ascii")
     image = out / "launchd.macho"
@@ -242,6 +277,13 @@ def main():
                 "_apfs_statfs_fstype": {"size": 5, "sha256": hashlib.sha256(b"apfs\0").hexdigest()},
                 "_apfs_statfs_mountpoint": {"size": 18, "sha256": hashlib.sha256(b"/dev/apfs-offline\0").hexdigest()},
             }
+            if args.apfs_volume_index is not None:
+                contract["apfs_volume_index"] = args.apfs_volume_index
+                contract["apfs_volume_device"] = f"/dev/md1s{args.apfs_volume_index + 1}"
+                contract["memory"].update({
+                    "_apfs_volume_link_result": {"width": 8, "value": 0},
+                    "_apfs_volume_link_flags": {"width": 8, "value": 0, "mask": 0x20000000},
+                })
         (out / "addresses.json").write_text(json.dumps(symbols, indent=2) + "\n")
         (out / "el0-contract.json").write_text(json.dumps(contract, indent=2) + "\n")
     finally:

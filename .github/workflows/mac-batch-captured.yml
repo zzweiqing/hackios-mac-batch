@@ -98,6 +98,8 @@ jobs:
           python3 make_mdev_user_fixture.py --output-dir "$RUNNER_TEMP/apfs-fixture/md0-user" --device /dev/md0 --read-offset 0x10000
           python3 make_mdev_user_fixture.py --output-dir "$RUNNER_TEMP/apfs-fixture/md1-write-user" --write-open
           python3 make_mdev_user_fixture.py --output-dir "$RUNNER_TEMP/apfs-fixture/apfs-user" --apfs-mount
+          python3 make_mdev_user_fixture.py --output-dir "$RUNNER_TEMP/apfs-fixture/apfs-index0-user" --apfs-mount --apfs-volume-index 0
+          python3 make_mdev_user_fixture.py --output-dir "$RUNNER_TEMP/apfs-fixture/apfs-index1-user" --apfs-mount --apfs-volume-index 1
 
       - name: Collect summary
         if: ${{ always() }}
