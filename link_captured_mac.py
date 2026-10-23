@@ -45,7 +45,7 @@ if kernel.exists():raise SystemExit('Refuse to overwrite existing kernel')
 command+=['-o',str(kernel)]
 result=subprocess.run(command,capture_output=True,text=True)
 (out/'link.log').write_text(result.stdout+result.stderr)
-(out/'link.json').write_text(json.dumps({'command':command,'returncode':result.returncode,'kernel':str(kernel),'hardware_verified':False,'runtime_verified':False},indent=2)+'\n')
+(out/'link.json').write_text(json.dumps({'command':command,'returncode':result.returncode,'kernel':str(kernel),'crypto_bootstrap':mode,'finalization_passed':False,'hardware_verified':False,'runtime_verified':False},indent=2)+'\n')
 if result.returncode:raise SystemExit(result.stderr[-6000:])
 if mode=='source':
     subprocess.run(['python3',str(root/'scripts/seal-source-crypto-kernel.py'),str(kernel)],check=True)
@@ -60,6 +60,6 @@ required={'_register_and_init_prng','_prng_ready','_kalloc_sparse_prelink_index_
 if not required.issubset(names):raise SystemExit('Required PRNG/prelink symbols missing')
 if mode=='prelinked' and names & {'_source_corecrypto14_bootstrap','_source_corecrypto14_status'}:raise SystemExit('Source provider startup still linked')
 linked=json.loads((out/'link.json').read_text())
-linked.update(crypto_bootstrap=mode,kernel_sha256=hashlib.sha256(kernel.read_bytes()).hexdigest(),undefined_symbol_count=0,required_symbols_present=True,source_bootstrap_absent=mode=='prelinked',objects=[r['object'] for r in record['records']])
+linked.update(finalization_passed=True,kernel_sha256=hashlib.sha256(kernel.read_bytes()).hexdigest(),undefined_symbol_count=0,required_symbols_present=True,source_bootstrap_absent=mode=='prelinked',objects=[r['object'] for r in record['records']])
 (out/'link.json').write_text(json.dumps(linked,indent=2)+'\n')
 print(kernel)

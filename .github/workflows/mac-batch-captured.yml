@@ -97,7 +97,7 @@ jobs:
             fi
             if [ -f "$OUT/link.json" ]; then
               echo '--- link summary ---'
-              jq '{returncode, kernel, crypto_bootstrap, kernel_sha256, undefined_symbol_count, source_bootstrap_absent, hardware_verified, runtime_verified}' "$OUT/link.json" || true
+              jq '{returncode, finalization_passed, kernel, crypto_bootstrap, kernel_sha256, undefined_symbol_count, source_bootstrap_absent, hardware_verified, runtime_verified}' "$OUT/link.json" || true
             fi
             if [ -f "$OUT/nabu-mockfs-native-apple.macho" ]; then
               echo '--- kernel ---'
