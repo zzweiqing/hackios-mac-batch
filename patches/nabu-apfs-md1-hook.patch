@@ -1,42 +1,33 @@
 --- a/iokit/bsddev/IOKitBSDInit.cpp
 +++ b/iokit/bsddev/IOKitBSDInit.cpp
-@@ -64,6 +64,9 @@ extern dev_t mdevadd(int devid, uint64_t base, unsigned int size, int phys);
+@@ -65,6 +65,10 @@
  extern dev_t mdevlookup(int devid);
  extern void mdevremoveall(void);
  extern int mdevgetrange(int devid, uint64_t *base, uint64_t *size);
 +#if XNU_NABU_APFS_MD1
-+extern int mdev_apfs_md1_register(uint64_t base, unsigned int pages);
++extern int mdev_apfs_md1_register(uint64_t offset, uint64_t size);
++extern volatile int mdev_apfs_md1_status;
 +#endif
  extern void di_root_ramfile(IORegistryEntry * entry);
  extern int IODTGetDefault(const char *key, void *infoAddr, unsigned int infoSize);
  extern boolean_t cpuid_vmm_present(void);
-@@ -711,6 +714,11 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
- 	OSDataAllocation<char> str;
- 	const char *        look = NULL;
- 	int                 len;
+@@ -774,6 +778,19 @@
+ 				}
+ #endif /* __LP64__ */
+ 				(void)mdevadd(-1, ml_static_ptovirt(ramdParms[0]) >> 12, (unsigned int) (ramdParms[1] >> 12), 0);        /* Initialize it and pass back the device number */
 +#if XNU_NABU_APFS_MD1
-+	uint64_t            apfsBase = 0;
-+	uint64_t            apfsSize = 0;
++				int apfsProbe = 0;
++				uint64_t apfsOffset = 0, apfsSize = 0;
++				if (PE_parse_boot_argn("hackios-apfs-md1", &apfsProbe, sizeof(apfsProbe)) && apfsProbe == 1) {
++					if (PE_parse_boot_argn("hackios-apfs-md1-offset", &apfsOffset, sizeof(apfsOffset)) &&
++					    PE_parse_boot_argn("hackios-apfs-md1-size", &apfsSize, sizeof(apfsSize))) {
++						mdev_apfs_md1_status = mdev_apfs_md1_register(apfsOffset, apfsSize);
++					} else {
++						mdev_apfs_md1_status = EINVAL;
++					}
++					IOLog("APFS md1 registration status=%d\n", mdev_apfs_md1_status);
++				}
 +#endif
- 	bool                debugInfoPrintedOnce = false;
- 	bool                needNetworkKexts = false;
- 	const char *        uuidStr = NULL;
-@@ -771,6 +779,21 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
- 		if ((regEntry = IORegistryEntry::fromPath( "/chosen/memory-map", gIODTPlane ))) {        /* Find the map node */
-+#if XNU_NABU_APFS_MD1
-+		/*
-+		 * Optional QEMU-only APFS probe.  The backing range must be supplied
-+		 * explicitly by the harness and is never inferred from RAMDisk or the
-+		 * DarwinBoot allocation window.
-+		 */
-+		if (PE_parse_boot_argn("hackios-apfs-md1-base", &apfsBase,
-+		    sizeof(apfsBase)) &&
-+		    PE_parse_boot_argn("hackios-apfs-md1-size", &apfsSize,
-+		    sizeof(apfsSize)) &&
-+		    apfsSize > 0 && (apfsSize & (PAGE_SIZE - 1)) == 0) {
-+			(void)mdev_apfs_md1_register(apfsBase, apfsSize >> PAGE_SHIFT);
-+		}
-+#endif
- 
- 
- //
+ 			}
+ 			regEntry->release();                                                            /* Toss the entry */
+ 		}

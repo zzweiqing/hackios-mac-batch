@@ -1,127 +1,157 @@
 --- a/bsd/dev/memdev.c
 +++ b/bsd/dev/memdev.c
-@@ -85,6 +85,11 @@
- 
- #include <sys/conf.h>
- 
-+#if XNU_NABU_APFS_MD1
-+#include <sys/buf.h>
-+#include <sys/errno.h>
-+#endif
-+
- /*
-  * Copyright (c) 1982, 1986, 1993
-  *	The Regents of the University of California.  All rights reserved.
-@@ -648,6 +653,94 @@ mdevlookup(int devid)
- 	return mdev[devid].mdBDev;
- }
+@@ -173,6 +173,18 @@
+ #define mdRO            0x02    /* This device is read-only */
+ #define mdPhys          0x04    /* This device is in physical memory */
  
 +#if XNU_NABU_APFS_MD1
-+/*
-+ * The APFS bring-up device is a bounded read-only view of a preloaded image.
-+ * The range is guest RAM owned by the loader, not a VM allocation.  The
-+ * caller must establish ownership and non-overlap before registration.
-+ */
-+static int mdev_apfs_md1_ready;
-+static uint64_t mdev_apfs_md1_base;
-+static unsigned int mdev_apfs_md1_pages;
++/* Boot-only, read-only alias of the already reserved RAMDisk, never a new PA range. */
++volatile uint32_t mdev_apfs_md1_ready;
++volatile int mdev_apfs_md1_status = -1;
++volatile uint64_t mdev_apfs_md1_capacity_bytes;
 +volatile uint64_t mdev_apfs_md1_reads;
 +volatile uint64_t mdev_apfs_md1_read_bytes;
 +volatile uint64_t mdev_apfs_md1_read_failures;
 +volatile uint64_t mdev_apfs_md1_writes;
 +volatile uint64_t mdev_apfs_md1_write_failures;
++#endif
 +
-+static int
-+mdev_apfs_md1_bounds(uint64_t offset, size_t bytes)
-+{
-+	uint64_t capacity = (uint64_t)mdev_apfs_md1_pages * PAGE_SIZE;
-+
-+	if (!mdev_apfs_md1_ready || bytes == 0 || offset > capacity ||
-+	    bytes > capacity - offset) {
-+		return EINVAL;
-+	}
-+	return 0;
-+}
-+
-+int
-+mdev_apfs_md1_register(uint64_t base, unsigned int pages)
-+{
-+	dev_t device;
-+
-+	if (mdev_apfs_md1_ready || base == 0 || pages == 0 ||
-+	    (base & (PAGE_SIZE - 1)) != 0 ||
-+	    pages > UINT_MAX / PAGE_SIZE) {
-+		return EINVAL;
-+	}
-+	device = mdevadd(1, base >> PAGE_SHIFT, pages, 0);
-+	if (device == NODEV) {
-+		return ENODEV;
-+	}
-+	mdev_apfs_md1_base = base;
-+	mdev_apfs_md1_pages = pages;
-+	mdev_apfs_md1_ready = 1;
-+	return 0;
-+}
-+
-+static int
-+mdev_apfs_md1_strategy(struct buf *bp)
-+{
-+	uint64_t offset;
-+	size_t bytes;
-+
-+	if (!mdev_apfs_md1_ready || bp == NULL) {
-+		return ENODEV;
-+	}
-+	if ((buf_flags(bp) & B_WRITE) != 0) {
+ int mdevBMajor = -1;
+ int mdevCMajor = -1;
+ 
+@@ -199,6 +211,13 @@
+ 	if (devid >= NB_MAX_MDEVICES || devid < 0) {
+ 		return ENXIO;                                                                 /* Not valid */
+ 	}
++#if XNU_NABU_APFS_MD1
++	if (devid == 1 && mdev_apfs_md1_ready && (flags & FWRITE)) {
 +		mdev_apfs_md1_writes++;
 +		mdev_apfs_md1_write_failures++;
 +		return EROFS;
 +	}
-+	offset = (uint64_t)buf_blkno(bp) * 512;
-+	bytes = (size_t)buf_count(bp);
-+	if (mdev_apfs_md1_bounds(offset, bytes) != 0) {
-+		mdev_apfs_md1_read_failures++;
-+		return EIO;
++#endif
+ 	if ((flags & FWRITE) && (mdev[devid].mdFlags & mdRO)) {
+ 		return EACCES;                                                /* Currently mounted RO */
+ 	}
+@@ -228,6 +247,20 @@
+ 	if (uio_resid(uio) < 0) {
+ 		return EINVAL;
+ 	}
++#if XNU_NABU_APFS_MD1
++	if (devid == 1 && mdev_apfs_md1_ready) {
++		if (uio->uio_rw != UIO_READ) {
++			mdev_apfs_md1_writes++;
++			mdev_apfs_md1_write_failures++;
++			return EROFS;
++		}
++		if ((uint64_t)uio->uio_offset > mdev_apfs_md1_capacity_bytes ||
++		    (uint64_t)uio_resid(uio) > mdev_apfs_md1_capacity_bytes - (uint64_t)uio->uio_offset) {
++			mdev_apfs_md1_read_failures++;
++			return EIO;
++		}
 +	}
-+	if (buf_map(bp) == NULL || buf_dataptr(bp) == NULL) {
-+		mdev_apfs_md1_read_failures++;
-+		return EIO;
++#endif
+ 	mdata = ((addr64_t)mdev[devid].mdBase << 12) + uio->uio_offset; /* Point to the area in "file" */
+ 
+ 	saveflag = uio->uio_segflg;                                                     /* Remember what the request is */
+@@ -249,6 +282,16 @@
+ 	}
+ 
+ 	status = uiomove64(mdata, count, uio);     /* Move the data */
++#if XNU_NABU_APFS_MD1
++	if (devid == 1 && mdev_apfs_md1_ready) {
++		if (status) {
++			mdev_apfs_md1_read_failures++;
++		} else if (count) {
++			mdev_apfs_md1_reads++;
++			mdev_apfs_md1_read_bytes += count;
++		}
 +	}
-+	bcopy((const void *)(uintptr_t)(mdev_apfs_md1_base + offset),
-+	    buf_dataptr(bp), bytes);
-+	mdev_apfs_md1_reads++;
-+	mdev_apfs_md1_read_bytes += bytes;
-+	buf_biodone(bp);
++#endif
+ 	uio->uio_segflg = saveflag;                                                     /* Restore the flag */
+ 
+ 	return status;
+@@ -265,6 +308,29 @@
+ 
+ 	devid = minor(buf_device(bp));                                                  /* Get minor device number */
+ 
++#if XNU_NABU_APFS_MD1
++	if (devid == 1 && mdev_apfs_md1_ready) {
++		uint64_t block = (uint64_t)buf_blkno(bp);
++		uint64_t sector = mdev[devid].mdSecsize;
++		uint64_t capacity = mdev_apfs_md1_capacity_bytes;
++		int error = 0;
++		if (!(buf_flags(bp) & B_READ)) {
++			mdev_apfs_md1_writes++;
++			mdev_apfs_md1_write_failures++;
++			error = EROFS;
++		} else if (buf_blkno(bp) < 0 || sector == 0 || block > UINT64_MAX / sector ||
++		    block * sector > capacity || buf_count(bp) > capacity - block * sector) {
++			mdev_apfs_md1_read_failures++;
++			error = EIO;
++		}
++		if (error) {
++			buf_seterror(bp, error);
++			buf_setresid(bp, buf_count(bp));
++			buf_biodone(bp);
++			return;
++		}
++	}
++#endif
+ 	if ((mdev[devid].mdFlags & mdInited) == 0) {            /* Have we actually been defined yet? */
+ 		buf_seterror(bp, ENXIO);
+ 		buf_biodone(bp);
+@@ -356,6 +422,12 @@
+ 	 */
+ 	buf_unmap(bp);
+ 
++#if XNU_NABU_APFS_MD1
++	if (devid == 1 && mdev_apfs_md1_ready && buf_count(bp)) {
++		mdev_apfs_md1_reads++;
++		mdev_apfs_md1_read_bytes += buf_count(bp);
++	}
++#endif
+ 	buf_setresid(bp, 0);                                                                    /* Nothing more to do */
+ 	buf_biodone(bp);                                                                        /* Say we've finished */
+ }
+@@ -427,7 +499,7 @@
+ 		break;
+ 
+ 	case DKIOCISWRITABLE:
+-		*f = 1;
++		*f = (mdev[devid].mdFlags & mdRO) ? 0 : 1;
+ 		break;
+ 
+ 	case DKIOCGETBLOCKCOUNT:
+@@ -767,3 +839,31 @@
+ 
+ 	return 0;
+ }
++
++#if XNU_NABU_APFS_MD1
++/* Called only during IOFindBSDRoot, before userspace can open the new nodes. */
++int
++mdev_apfs_md1_register(uint64_t offset, uint64_t size)
++{
++	uint64_t base, capacity;
++	dev_t device;
++	if (mdev_apfs_md1_ready || (mdev[1].mdFlags & mdInited)) {
++		return EBUSY;
++	}
++	if (offset == 0 || size == 0 || size >= (64ULL << 20) ||
++	    (offset & 4095) || (size & 4095) ||
++	    mdevgetrange(0, &base, &capacity) || (mdev[0].mdFlags & mdPhys) ||
++	    offset > capacity || size > capacity - offset) {
++		return EINVAL;
++	}
++	/* Explicit slots permit aliases; all bounds derive from the actual md0 KVA. */
++	device = mdevadd(1, (base + offset) >> 12, (unsigned int)(size >> 12), 0);
++	if (device == (dev_t)-1) {
++		return ENODEV;
++	}
++	mdev[1].mdFlags |= mdRO;
++	mdev_apfs_md1_capacity_bytes = size;
++	mdev_apfs_md1_ready = 1;
 +	return 0;
 +}
 +#endif
-+
- dev_t
- mdevadd(int devid, uint64_t base, unsigned int size, int phys)
- {
-@@ -660,6 +753,15 @@ mdevadd(int devid, uint64_t base, unsigned int size, int phys)
- {
- 	dev_t dev;
- 
-+#if XNU_NABU_APFS_MD1
-+	if (devid == 1 &&
-+	    (!mdev_apfs_md1_ready ||
-+	     base != (mdev_apfs_md1_base >> PAGE_SHIFT) ||
-+	     size != mdev_apfs_md1_pages)) {
-+		return NODEV;
-+	}
-+#endif
-+
- 	if (devid == -1) {
- 		/* locate an unused memory disk */
- 		for (devid = 0; devid < NMDEV; devid++) {
-@@ -700,6 +802,6 @@ mdevadd(int devid, uint64_t base, unsigned int size, int phys)
- 	devfs_make_node(mdev[devid].mdCDev, DEV_CHAR, mdev_cdevsw,
- 	    mdev[devid].mdBDev, UID_ROOT, GID_OPERATOR, 0600, "rmd%d", devid);
- 
-+	if (devid == 1) {
-+		mdev[devid].mdStrategy = mdev_apfs_md1_strategy;
-+	}
- 	/* return the dev_t */
- 	return mdev[devid].mdBDev;
- }
