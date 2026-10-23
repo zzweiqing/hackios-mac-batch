@@ -76,7 +76,7 @@ def main():
     device = None
     try:
         report["tool_versions"] = {
-            "sw_vers": run(["sw_vers"]), "hdiutil": run(["hdiutil", "version"]),
+            "sw_vers": run(["sw_vers"]), "hdiutil": run(["hdiutil", "info", "-plist"]),
             "diskutil": run(["diskutil", "version"], required=False),
         }
         with image.open("xb") as stream:
