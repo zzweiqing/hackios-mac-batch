@@ -39,7 +39,6 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_${{ inputs.xcode }}.app/Contents/Developer
       UNIXNU_DEVICE: ${{ github.workspace }}/nabu-device
-      UNIXNU_IPSW: ${{ runner.temp }}/ipsw-21h16-small.zip
       DEFCONFIG: ${{ inputs.defconfig }}
     steps:
       - name: Check out this repository（nabu 设备层与工作流源）
@@ -69,7 +68,8 @@ jobs:
         run: |
           gh release download unixnu-source-inputs --repo "$PRIVATE_INPUTS_REPO" \
             --pattern 'ipsw-21h16-small.zip' --dir "$RUNNER_TEMP"
-          actual=$(shasum -a 256 "$UNIXNU_IPSW" | cut -d' ' -f1)
+          actual=$(shasum -a 256 "$RUNNER_TEMP/ipsw-21h16-small.zip" | cut -d' ' -f1)
+          echo "UNIXNU_IPSW=$RUNNER_TEMP/ipsw-21h16-small.zip" >> "$GITHUB_ENV"
           echo "ipsw subset sha256 $actual"
           [ "$actual" = "fce1ea205e571c3850e150404fc04f255f1192ba19c68e12497c19b8f87d8994" ] \
             || { echo "::error::ipsw subset hash mismatch"; exit 1; }
@@ -131,4 +131,4 @@ jobs:
 
       - name: Remove proprietary inputs
         if: always()
-        run: rm -f "$UNIXNU_IPSW"
+        run: rm -f "$RUNNER_TEMP/ipsw-21h16-small.zip"
