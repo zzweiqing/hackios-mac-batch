@@ -136,6 +136,8 @@ def main(argv: list[str] | None = None) -> int:
     shutil.copytree(source, output, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git"))
     apply_patch(output, patch, names)
     verify_applied(output)
+    console_patch = patch.with_name('nabu-ufs-inspect-console.patch')
+    apply_patch(output, console_patch, ['NativeUfs.cpp'])
     report = {
         "purpose": "nabu SM8150 read-only UFS board port, applied to a copy of the pinned source",
         "source": str(source),
@@ -144,6 +146,7 @@ def main(argv: list[str] | None = None) -> int:
         "source_tree_modified": False,
         "patch": str(patch),
         "patch_sha256": hashlib.sha256(patch.read_bytes()).hexdigest(),
+        "inspect_console_patch_sha256": hashlib.sha256(console_patch.read_bytes()).hexdigest(),
         "applied_files": names,
         "output": str(output),
         "compiled": False,
