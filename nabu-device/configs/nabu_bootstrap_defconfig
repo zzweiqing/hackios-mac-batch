@@ -1,0 +1,9 @@
+# Kernel configuration of the first nabu from-source bootstrap pass.
+# Example-shaped minimal set: no archive builders, no storage or owner-root paths.
+# CONFIG_XNU_<NAME> becomes XNU_<NAME> for the kernel build script.
+
+CONFIG_XNU_SOURCE_CORECRYPTO14=y
+CONFIG_XNU_SOURCE_PTHREAD=y
+CONFIG_XNU_ARM_DT_PLATFORM=y
+CONFIG_XNU_ARMCPU=y
+CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"

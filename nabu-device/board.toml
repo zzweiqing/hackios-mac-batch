@@ -1,0 +1,47 @@
+# Board description of the Xiaomi Pad 5 (nabu, SM8150), read by the unixnu build driver.
+#
+# Bootstrap revision (2026-10-24): the example-shaped minimal board for the first
+# from-source pass — corecrypto14/pthread/ArmDTPlatform/ArmCpu only, no archive
+# builders, no early security initializer, empty prelink roots. The full revision
+# (archives list, AMFI early_security_init at 0xfffffff005b70ae0, storage and
+# owner-root flags) is staged in configs/nabu_defconfig and the audit records and
+# is switched on after this bootstrap pass builds and prelinks cleanly.
+#
+# Target input: the user-provided iPad_10.2_17.7_21H16_Restore.ipsw (iPad7,11/12,
+# j171ap). CI never downloads the whole IPSW: UNIXNU_IPSW points at the private
+# subset container (BuildManifest + four small members, byte-identical to the
+# local original; member pins below). The OS/SystemOS DMGs join through the same
+# channel when the payload/userdata stages need them.
+
+[board]
+name = "nabu"
+soc = "SM8150"
+description = "Xiaomi Pad 5"
+kit = "nabu"                      # the package/ of this repository appears as kits/nabu in the build tree
+
+[ipsw]
+product = "iPad7,11"
+version = "17.7"
+build = "21H16"
+device_class = "j171ap"
+chip_id = 0x8010
+board_id = 0x1C
+fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache"]
+
+[ipsw.sha256]
+"kernelcache.release.ipad7c" = "2c395d03d21129d79f4ad9648fe30b1dd8fc62b17f180b79976604102a4678ba"
+"DeviceTree.j171ap.im4p" = "1d5ce5ee967b98df2b0017931d3a18b77add92f8902b42b12061ab5e21fd0ebb"
+"044-17597-018.dmg.trustcache" = "7640ab0933ba6a9048b6de8cf7e1e0d4806350c5eb2ccb3bc1284b79b1499e2d"
+"044-18090-018.dmg.trustcache" = "381d0eeb39949a4ed9cbca7f89ae3442fa37e9afcaaa5f1314465b43aaa46ea4"
+
+[kernel]
+defconfig = "nabu_bootstrap_defconfig"
+
+[kernel.prelink]
+tool = "kits/NativePrelink/emit_prelink.py"
+kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
+# sha256 of the locally decoded 21H16 arm64 kernelcache; compression_tool on the
+# runner must reproduce it exactly or this pin refuses the build.
+kernelcache_sha256 = "f7d1952c7a21633d212eccf288e77444fff0cc86976db5de292f6819c2ffa1b2"
+slide = "-0x1360000"               # the 21H16 slide established by the captured-build line
+roots = []

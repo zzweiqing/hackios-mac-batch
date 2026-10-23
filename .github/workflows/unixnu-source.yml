@@ -1,0 +1,134 @@
+name: unixnu source build
+
+on:
+  workflow_dispatch:
+    inputs:
+      unixnu_ref:
+        description: "UniXNU commit to build from"
+        required: true
+        default: "245aca1a9ec5b730b1cad80fade295800d2981f1"
+      defconfig:
+        description: "Defconfig (configs/ of nabu-device)"
+        required: true
+        default: "nabu_bootstrap_defconfig"
+      xcode:
+        description: "Xcode version of the macos-26 image"
+        required: true
+        default: "26.6"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unixnu-source-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+  HOMEBREW_NO_ENV_HINTS: 1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 360
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_${{ inputs.xcode }}.app/Contents/Developer
+      UNIXNU_DEVICE: ${{ github.workspace }}/nabu-device
+      UNIXNU_IPSW: ${{ runner.temp }}/ipsw-21h16-small.zip
+      DEFCONFIG: ${{ inputs.defconfig }}
+    steps:
+      - name: Check out this repository（nabu 设备层与工作流源）
+        uses: actions/checkout@v4
+
+      - name: Check out UniXNU at the pinned commit
+        run: |
+          git clone --quiet https://github.com/UniXNU/UniXNU.git unixnu
+          git -C unixnu checkout --quiet --detach "${{ inputs.unixnu_ref }}"
+          git -C unixnu log -1 --format='unixnu head %H'
+
+      - name: Check the inputs
+        env:
+          PRIVATE_INPUTS_REPO: ${{ vars.PRIVATE_INPUTS_REPO }}
+          PRIVATE_INPUTS_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          [ -f nabu-device/board.toml ] || fail "nabu-device/board.toml missing"
+          [ -f "nabu-device/configs/$DEFCONFIG" ] || fail "nabu-device/configs/$DEFCONFIG not found"
+          [ -d "$DEVELOPER_DIR" ] || fail "Xcode not found at $DEVELOPER_DIR"
+          [ -n "$PRIVATE_INPUTS_REPO" ] && [ -n "$PRIVATE_INPUTS_TOKEN" ] || fail "PRIVATE_INPUTS_REPO/TOKEN not configured"
+
+      - name: Fetch the private IPSW subset
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
+          PRIVATE_INPUTS_REPO: ${{ vars.PRIVATE_INPUTS_REPO }}
+        run: |
+          gh release download unixnu-source-inputs --repo "$PRIVATE_INPUTS_REPO" \
+            --pattern 'ipsw-21h16-small.zip' --dir "$RUNNER_TEMP"
+          actual=$(shasum -a 256 "$UNIXNU_IPSW" | cut -d' ' -f1)
+          echo "ipsw subset sha256 $actual"
+          [ "$actual" = "fce1ea205e571c3850e150404fc04f255f1192ba19c68e12497c19b8f87d8994" ] \
+            || { echo "::error::ipsw subset hash mismatch"; exit 1; }
+
+      - name: Install host tools
+        run: |
+          brew install llvm lld mtools dtc
+          if ! command -v unifdef >/dev/null; then
+            brew install unifdef
+            echo "$(brew --prefix unifdef)/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Report the runner toolchain
+        run: |
+          sw_vers
+          uname -m
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          python3 --version
+          missing=0
+          for tool in git make clang cmake ninja unifdef ld.lld mformat mcopy dtc xcodebuild compression_tool; do
+            path=$(command -v "$tool" || true)
+            printf '%-18s %s\n' "$tool" "${path:-MISSING}"
+            [ -n "$path" ] || missing=1
+          done
+          df -h "$GITHUB_WORKSPACE"
+          exit "$missing"
+
+      - name: Select the device
+        run: cd unixnu && ./unixnu defconfig "$DEFCONFIG"
+
+      - name: Build the kernel from source
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: cd unixnu && ./unixnu build kernel
+
+      - name: Record the outputs
+        if: always()
+        run: |
+          cd unixnu
+          ls -la out 2>/dev/null || true
+          find out -maxdepth 3 -type f \( -name '*.macho' -o -name '*.json' \) -exec shasum -a 256 {} \; 2>/dev/null || true
+
+      - name: Collect the text logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/logs"
+          cd unixnu && find out -name '*.log' -type f -exec cp {} "$RUNNER_TEMP/logs/" \; 2>/dev/null || true
+          echo "staged $(ls "$RUNNER_TEMP/logs" | wc -l | tr -d ' ') logs"
+
+      - name: Upload the build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unixnu-source-${{ github.run_id }}-logs
+          path: ${{ runner.temp }}/logs/*.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Remove proprietary inputs
+        if: always()
+        run: rm -f "$UNIXNU_IPSW"
