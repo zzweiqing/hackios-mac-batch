@@ -121,7 +121,7 @@ _apfs_mount_attempted: .quad 0
 Lapfs_name: .asciz "apfs"
 Lapfs_mountpoint: .asciz "/dev/apfs-offline"
 Lapfs_probe_path: .asciz "/dev/apfs-offline/probe.bin"
-Lapfs_device: .asciz "/dev/md1"
+Lapfs_device: .asciz "/dev/md1s1"
 .balign 8
 Lapfs_arguments:
   .quad Lapfs_device, 1

@@ -123,7 +123,7 @@
  		break;
  
  	case DKIOCGETBLOCKCOUNT:
-@@ -767,3 +839,31 @@
+@@ -767,3 +839,35 @@
  
  	return 0;
  }
@@ -147,6 +147,10 @@
 +	/* Explicit slots permit aliases; all bounds derive from the actual md0 KVA. */
 +	device = mdevadd(1, (base + offset) >> 12, (unsigned int)(size >> 12), 0);
 +	if (device == (dev_t)-1) {
++		return ENODEV;
++	}
++	/* APFS selects its volume index from the BSD slice suffix. */
++	if (devfs_make_link(mdev[1].mdbdevb, "md1s1") != 0) {
 +		return ENODEV;
 +	}
 +	mdev[1].mdFlags |= mdRO;
