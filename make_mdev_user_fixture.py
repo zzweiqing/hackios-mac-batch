@@ -11,6 +11,12 @@ import sys
 
 MD1_CHECKPOINT_LINE = "HACKIOS_MD1_READ_OK bytes=4096 NXSB=4096x8192\n"
 MD1_CHECKPOINT_LINE_BYTES = len(MD1_CHECKPOINT_LINE.encode("ascii"))
+APFS_FILE_OK_LINE = "HACKIOS_APFS_FILE_OK bytes=22 readonly=1\n"
+APFS_FILE_OK_LINE_BYTES = len(APFS_FILE_OK_LINE.encode("ascii"))
+APFS_FSTAT_BYTES = 256
+APFS_ST_MODE_OFFSET = 4
+APFS_ST_RDEV_OFFSET = 24
+APFS_BLOCK_NODE_MODE = 0x6180
 
 
 def build_md1_checkpoint_header(block_size=4096, block_count=8192):
@@ -181,6 +187,10 @@ APFS_PROBE = """
   mov x16, #345
   svc #0x80
   b.cs _failure_checkpoint
+  adrp x10, _apfs_statfs_flags@PAGE
+  add x10, x10, _apfs_statfs_flags@PAGEOFF
+  ldr w9, [x10]
+  tbz w9, #0, _failure_checkpoint
   adrp x0, Lapfs_probe_path@PAGE
   add x0, x0, Lapfs_probe_path@PAGEOFF
   mov x1, #0
@@ -200,6 +210,73 @@ APFS_PROBE = """
   str x0, [x21, #48]
   str x9, [x21, #56]
   b.cs _failure_checkpoint
+  cmp x0, #22
+  b.ne _failure_checkpoint
+  adrp x10, _apfs_probe_buffer@PAGE
+  add x10, x10, _apfs_probe_buffer@PAGEOFF
+  adrp x11, Lapfs_expected_probe@PAGE
+  add x11, x11, Lapfs_expected_probe@PAGEOFF
+  mov x12, #22
+Lapfs_probe_compare:
+  ldrb w13, [x10], #1
+  ldrb w14, [x11], #1
+  cmp w13, w14
+  b.ne _failure_checkpoint
+  subs x12, x12, #1
+  b.ne Lapfs_probe_compare
+  mov x0, x20
+  adrp x1, Lapfs_file_ok_line@PAGE
+  add x1, x1, Lapfs_file_ok_line@PAGEOFF
+  mov x2, #41
+  mov x16, #4
+  svc #0x80
+  mrs x9, nzcv
+  adrp x10, _apfs_file_write_result@PAGE
+  add x10, x10, _apfs_file_write_result@PAGEOFF
+  str x0, [x10]
+  str x9, [x10, #8]
+  tbnz x9, #29, _failure_checkpoint
+  cmp x0, #41
+  b.ne _failure_checkpoint
+  adrp x10, _apfs_file_write_completed@PAGE
+  add x10, x10, _apfs_file_write_completed@PAGEOFF
+  mov x9, #1
+  str x9, [x10]
+"""
+APFS_VOLUME_NODE_PROBE = """
+  adrp x10, _md1_open_result@PAGE
+  add x10, x10, _md1_open_result@PAGEOFF
+  ldr w0, [x10]
+  adrp x1, _apfs_fstat_buf@PAGE
+  add x1, x1, _apfs_fstat_buf@PAGEOFF
+  mov x16, #339
+  svc #0x80
+  mrs x9, nzcv
+  adrp x10, _apfs_fstat_result@PAGE
+  add x10, x10, _apfs_fstat_result@PAGEOFF
+  str x0, [x10]
+  str x9, [x10, #8]
+  tbnz x9, #29, _failure_checkpoint
+  cbnz x0, _failure_checkpoint
+  adrp x10, _apfs_fstat_buf@PAGE
+  add x10, x10, _apfs_fstat_buf@PAGEOFF
+  ldrh w9, [x10, #4]
+  and w9, w9, #0xf000
+  cmp w9, #0x6000
+  b.ne _failure_checkpoint
+  ldr w2, [x10, #24]
+  adrp x0, Lapfs_volume_device@PAGE
+  add x0, x0, Lapfs_volume_device@PAGEOFF
+  movz w1, #0x6180
+  mov x16, #14
+  svc #0x80
+  mrs x9, nzcv
+  adrp x10, _apfs_mknod_result@PAGE
+  add x10, x10, _apfs_mknod_result@PAGEOFF
+  str x0, [x10]
+  str x9, [x10, #8]
+  tbnz x9, #29, _failure_checkpoint
+  cbnz x0, _failure_checkpoint
 """
 
 APFS_DATA = """
@@ -216,10 +293,17 @@ _apfs_open_flags: .quad 0
 _apfs_read_result: .quad -1
 _apfs_read_flags: .quad 0
 _apfs_mount_attempted: .quad 0
+.global _apfs_file_write_result, _apfs_file_write_carry, _apfs_file_write_completed
+_apfs_file_write_result: .quad -1
+_apfs_file_write_carry: .quad 0
+_apfs_file_write_completed: .quad 0
 Lapfs_name: .asciz "apfs"
 Lapfs_mountpoint: .asciz "/dev/apfs-offline"
 Lapfs_probe_path: .asciz "/dev/apfs-offline/probe.bin"
 Lapfs_device: .asciz "/dev/md1"
+Lapfs_volume_device: .asciz "/dev/md1s1"
+Lapfs_expected_probe: .ascii "HACKIOS_APFS_PROBE_V1\\n"
+Lapfs_file_ok_line: .ascii "HACKIOS_APFS_FILE_OK bytes=22 readonly=1\\n"
 .balign 8
 Lapfs_arguments:
   .quad Lapfs_device, 1
@@ -238,9 +322,21 @@ _apfs_statfs_mountpoint: .space 1024, 0
   .space 1024 + 32, 0
 """
 
+APFS_VOLUME_NODE_DATA = """
+.data
+.balign 8
+.global _apfs_fstat_result, _apfs_fstat_carry, _apfs_mknod_result, _apfs_mknod_carry
+_apfs_fstat_result: .quad -1
+_apfs_fstat_carry: .quad 0
+_apfs_mknod_result: .quad -1
+_apfs_mknod_carry: .quad 0
+.balign 8
+_apfs_fstat_buf: .space 256, 0
+"""
+
 
 def build_fixture_source(device="/dev/md1", read_offset=0, write_open=False,
-                         apfs_mount=False, read_checkpoint=None):
+                         apfs_mount=False, apfs_volume_node=False, read_checkpoint=None):
     """Assemble fixture source without invoking the macOS compiler."""
     if device not in ("/dev/md0", "/dev/md1", "/dev/md1s1"):
         raise ValueError("unsupported mdev device")
@@ -248,6 +344,8 @@ def build_fixture_source(device="/dev/md1", read_offset=0, write_open=False,
         raise ValueError("read offset must be page aligned and fit 32 bits")
     if apfs_mount and (write_open or device != "/dev/md1" or read_offset):
         raise ValueError("APFS mount requires the ordinary md1 read instrument")
+    if apfs_volume_node and not apfs_mount:
+        raise ValueError("APFS volume node requires --apfs-mount")
     if read_checkpoint is None:
         read_checkpoint = (device == "/dev/md1" and read_offset == 0 and not write_open)
     if read_checkpoint and (write_open or device != "/dev/md1" or read_offset):
@@ -260,6 +358,8 @@ def build_fixture_source(device="/dev/md1", read_offset=0, write_open=False,
     if read_checkpoint:
         block_probe += md1_checkpoint_probe()
     if apfs_mount:
+        if apfs_volume_node:
+            block_probe += APFS_VOLUME_NODE_PROBE
         block_probe += APFS_PROBE
     if read_offset:
         seek = f"""
@@ -286,7 +386,12 @@ def build_fixture_source(device="/dev/md1", read_offset=0, write_open=False,
     if read_checkpoint:
         source += md1_checkpoint_data()
     if apfs_mount:
-        source += APFS_DATA
+        apfs_data = APFS_DATA
+        if apfs_volume_node:
+            apfs_data = apfs_data.replace(".quad Lapfs_device, 1",
+                                          ".quad Lapfs_volume_device, 1")
+            apfs_data += APFS_VOLUME_NODE_DATA
+        source += apfs_data
     return source
 
 
@@ -297,6 +402,8 @@ def main():
     parser.add_argument("--read-offset", type=lambda v: int(v, 0), default=0)
     parser.add_argument("--write-open", action="store_true", help="Expected-refusal control: try O_RDWR")
     parser.add_argument("--apfs-mount", action="store_true", help="21H16 APFS read-only data mount and file read")
+    parser.add_argument("--apfs-volume-node", action="store_true",
+                        help="Create /dev/md1s1 from the md1 fstat rdev before mounting")
     args = parser.parse_args()
     if sys.platform != "darwin":
         raise SystemExit("own EL0 fixture compilation requires macOS Actions")
@@ -309,6 +416,7 @@ def main():
     source = build_fixture_source(
         device=args.device, read_offset=args.read_offset,
         write_open=args.write_open, apfs_mount=args.apfs_mount,
+        apfs_volume_node=args.apfs_volume_node,
         read_checkpoint=read_checkpoint)
     assembly = out / "md1-user.S"
     assembly.write_text(source, encoding="ascii")
@@ -335,6 +443,12 @@ def main():
         if read_checkpoint:
             required += ["_md1_read_write_result", "_md1_read_write_carry",
                          "_md1_read_write_completed"]
+        if args.apfs_mount:
+            required += ["_apfs_file_write_result", "_apfs_file_write_carry",
+                         "_apfs_file_write_completed"]
+        if args.apfs_volume_node:
+            required += ["_apfs_fstat_result", "_apfs_fstat_carry",
+                         "_apfs_mknod_result", "_apfs_mknod_carry"]
         if not all(name in symbols for name in required):
             raise ValueError("own probe symbol table incomplete")
         contract = json.loads(json.dumps(BASE_CONTRACT))
@@ -360,6 +474,9 @@ def main():
             contract["memory"].update(checkpoint["memory"])
         if args.apfs_mount:
             contract["apfs_file_read_probe"] = True
+            contract["apfs_volume_node"] = args.apfs_volume_node
+            contract["apfs_file_success_line"] = APFS_FILE_OK_LINE
+            contract["apfs_file_success_line_bytes"] = APFS_FILE_OK_LINE_BYTES
             contract["memory"].update({
                 "_apfs_mkdir_result": {"width": 8, "value": 0},
                 "_apfs_mkdir_flags": {"width": 8, "value": 0, "mask": 0x20000000},
@@ -371,7 +488,29 @@ def main():
                 "_apfs_read_flags": {"width": 8, "value": 0, "mask": 0x20000000},
                 "_apfs_mount_attempted": {"width": 8, "value": 1},
                 "_apfs_statfs_flags": {"width": 4, "value": 1, "mask": 1},
+                "_apfs_file_write_result": {"width": 8, "value": APFS_FILE_OK_LINE_BYTES},
+                "_apfs_file_write_carry": {"width": 8, "value": 0, "mask": 1 << 29},
+                "_apfs_file_write_completed": {"width": 8, "value": 1},
             })
+            if args.apfs_volume_node:
+                contract["apfs_volume_node_contract"] = {
+                    "source_node": "/dev/md1",
+                    "node": "/dev/md1s1",
+                    "fstat_syscall": 339,
+                    "stat_bytes": APFS_FSTAT_BYTES,
+                    "st_mode_offset": APFS_ST_MODE_OFFSET,
+                    "st_rdev_offset": APFS_ST_RDEV_OFFSET,
+                    "expected_mode_type": "S_IFBLK",
+                    "mknod_syscall": 14,
+                    "mknod_mode": APFS_BLOCK_NODE_MODE,
+                    "fsindex_override": False,
+                }
+                contract["memory"].update({
+                    "_apfs_fstat_result": {"width": 8, "value": 0},
+                    "_apfs_fstat_carry": {"width": 8, "value": 0, "mask": 1 << 29},
+                    "_apfs_mknod_result": {"width": 8, "value": 0},
+                    "_apfs_mknod_carry": {"width": 8, "value": 0, "mask": 1 << 29},
+                })
             contract["buffers"] = {
                 "_apfs_probe_buffer": {"size": 22, "sha256": hashlib.sha256(b"HACKIOS_APFS_PROBE_V1\n").hexdigest()},
                 "_apfs_statfs_fstype": {"size": 5, "sha256": hashlib.sha256(b"apfs\0").hexdigest()},
