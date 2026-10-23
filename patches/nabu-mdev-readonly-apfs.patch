@@ -114,7 +114,20 @@
  	buf_setresid(bp, 0);                                                                    /* Nothing more to do */
  	buf_biodone(bp);                                                                        /* Say we've finished */
  }
-@@ -427,7 +499,7 @@
+@@ -387,6 +459,12 @@
+ 	if (devid >= NB_MAX_MDEVICES || devid < 0) {
+ 		return ENXIO;                                                                 /* Not valid */
+ 	}
++#if XNU_NABU_APFS_MD1
++	if (devid == 1 && mdev_apfs_md1_ready) {
++		printf("HACKIOS_MD1_IOCTL cmd=0x%08lx size=%lu char=%d\n",
++		    cmd, (unsigned long)IOCPARM_LEN(cmd), is_char);
++	}
++#endif
+ 	error = proc_suser(p);                  /* Are we superman? */
+ 	if (error) {
+ 		return error;                                                         /* Nope... */
+@@ -427,7 +505,7 @@
  		break;
  
  	case DKIOCISWRITABLE:
@@ -123,7 +136,19 @@
  		break;
  
  	case DKIOCGETBLOCKCOUNT:
-@@ -767,3 +839,31 @@
+@@ -455,6 +533,11 @@
+ 		break;
+ 
+ 	default:
++#if XNU_NABU_APFS_MD1
++		if (devid == 1 && mdev_apfs_md1_ready) {
++			printf("HACKIOS_MD1_IOCTL_UNHANDLED cmd=0x%08lx\n", cmd);
++		}
++#endif
+ 		error = ENOTTY;
+ 		break;
+ 	}
+@@ -767,3 +850,31 @@
  
  	return 0;
  }
