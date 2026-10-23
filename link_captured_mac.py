@@ -10,7 +10,8 @@ if not record.get('all_passed'):raise SystemExit('Compile batch incomplete')
 mode=record.get('crypto_bootstrap','source')
 if mode not in ('source','prelinked'):raise SystemExit('Unknown crypto bootstrap mode')
 expected=record.get('expected_objects')
-expected_count=(13 if mode=='prelinked' else 12)
+ufs=record.get('native_ufs',False)
+expected_count=(13 if mode=='prelinked' else 12)+(1 if ufs else 0)
 if expected is not None and ([r['object'] for r in record['records']]!=expected or len(expected)!=expected_count):raise SystemExit('Compile object closure incomplete')
 for r in record['records']:
     if r['returncode'] or (r.get('sha256') and hashlib.sha256(Path(r['output']).read_bytes()).hexdigest()!=r['sha256']):raise SystemExit('Compiled object failed or changed')
@@ -41,6 +42,14 @@ for archive in ('armdt-platform/libArmDTPlatform.a','armcpu/libArmCpu.a','libpth
     path=root/'build'/archive
     if not path.is_file():raise SystemExit('Missing exact source archive '+archive)
     command.append('-Wl,-force_load,'+str(path))
+if ufs:
+    if mode!='prelinked':raise SystemExit('UFS needs the prelinked storage provider')
+    ufs_dir=out/'native-ufs'
+    ufs_compile=json.loads((ufs_dir/'compile.json').read_text())
+    bindings=json.loads((ufs_dir/'bindings.json').read_text())
+    archive=ufs_dir/'libNativeUfs.a'
+    if not ufs_compile['compiled'] or bindings['slide']!=-0x1360000 or not archive.is_file():raise SystemExit('UFS compile/bindings incomplete')
+    command.append('-Wl,-force_load,'+str(archive))
 kernel=out/'nabu-mockfs-native-apple.macho'
 if kernel.exists():raise SystemExit('Refuse to overwrite existing kernel')
 command+=['-o',str(kernel)]
@@ -62,5 +71,11 @@ if not required.issubset(names):raise SystemExit('Required PRNG/prelink symbols 
 if mode=='prelinked' and names & {'_source_corecrypto14_bootstrap','_source_corecrypto14_status'}:raise SystemExit('Source provider startup still linked')
 linked=json.loads((out/'link.json').read_text())
 linked.update(finalization_passed=True,kernel_sha256=hashlib.sha256(kernel.read_bytes()).hexdigest(),undefined_symbol_count=0,required_symbols_present=True,source_bootstrap_absent=mode=='prelinked',objects=[r['object'] for r in record['records']])
+if ufs:
+    required_ufs={'__ZTV14NativeUfsBlock','__ZN9NativeUfs10gMetaClassE','_native_ufs_probe_calls'}
+    if not required_ufs.issubset(names):raise SystemExit('UFS was not retained in the kernel')
+    linked.update(native_ufs_linked=True,ufs_archive=str(archive),storage_slide=bindings['slide'],personality_installed=True)
+    ufs_compile.update(linked=True,personality_installed=True,iostorage_bindings_connected=True)
+    (ufs_dir/'compile.json').write_text(json.dumps(ufs_compile,indent=2)+'\n')
 (out/'link.json').write_text(json.dumps(linked,indent=2)+'\n')
 print(kernel)

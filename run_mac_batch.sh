@@ -15,14 +15,23 @@ case "$MODE" in
     xcrun clang -print-resource-dir >> "$KIT/output/preflight.log"
     python3 "$KIT/check_batch_inputs.py" >> "$KIT/output/preflight.log"
     ;;
-  --build-captured|--build-prelinked)
+  --build-captured|--build-prelinked|--build-integrated-ufs)
     test "$(uname -s)" = Darwin || { echo 'Run on the newly authorized Mac' >&2; exit 1; }
     ROOT=${2:?Usage: --build-captured NEW_EMPTY_PRIVATE_ROOT}
     bash "$KIT/run_mac_batch.sh" --preflight
     python3 "$KIT/prepare_mac_workspace.py" "$ROOT"
     CRYPTO_MODE=source
-    if [ "$MODE" = --build-prelinked ]; then CRYPTO_MODE=prelinked; fi
-    python3 "$KIT/compile_captured_mac.py" "$ROOT" --crypto-bootstrap "$CRYPTO_MODE"
+    if [ "$MODE" != --build-captured ]; then CRYPTO_MODE=prelinked; fi
+    if [ "$MODE" = --build-integrated-ufs ]; then
+      python3 "$KIT/compile_captured_mac.py" "$ROOT" --crypto-bootstrap "$CRYPTO_MODE" --native-ufs
+    else
+      python3 "$KIT/compile_captured_mac.py" "$ROOT" --crypto-bootstrap "$CRYPTO_MODE"
+    fi
+    if [ "$MODE" = --build-integrated-ufs ]; then
+      UFS_SOURCE=${3:?Supply the prepared pinned NativeUfs source}
+      python3 "$KIT/compile_native_ufs.py" "$ROOT" --source "$UFS_SOURCE"
+      python3 "$KIT/native_ufs_bindings.py" --object "$ROOT/mac-batch-output/native-ufs/NativeUfs.o" --output-dir "$ROOT/mac-batch-output/native-ufs"
+    fi
     python3 "$KIT/link_captured_mac.py" "$ROOT"
     ;;
   --archive-corecrypto)

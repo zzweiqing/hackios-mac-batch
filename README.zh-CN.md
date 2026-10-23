@@ -23,6 +23,11 @@
 
 `build-prelinked` 在同一清单上增加原生 `prng_random.o`，共 13 对象；
 源码 provider 重复启动入口在编译时移除，原始组件仍由后续预链步骤加入。
+`build-integrated-ufs` 重编 14 个底座对象（增加 KernelConfigTables），保留捕获的
+匹配表并追加默认关闭的 UFS root/nub personalities；固定 nabu 驱动对象和
+11 个 21H16 IOStorageFamily 绑定组成归档，再 force-load 进内核。
+绑定要求后续原始组件预链 slide 为 `-0x1360000`，本模式不执行 MMIO。
+`build-native-ufs` 保留为独立对象编译模式。
 `apfs-fixture` 在 macOS 制作小型未加密 APFS 镜像；
 `mdev-fixture` 编译、签名自有 EL0 块读/挂载测试程序。
 这两个 fixture 模式不下载 batch 输入，产物只保存在私有

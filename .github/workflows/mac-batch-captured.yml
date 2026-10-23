@@ -12,6 +12,7 @@ on:
           - build-captured
           - build-prelinked
           - build-native-ufs
+          - build-integrated-ufs
           - apfs-fixture
           - mdev-fixture
 
@@ -86,8 +87,8 @@ jobs:
         shell: bash
         run: bash run_mac_batch.sh --build-prelinked "$RUNNER_TEMP/batch-work"
 
-      - name: Compile the pinned nabu UFS object (no link or hardware access)
-        if: ${{ inputs.mode == 'build-native-ufs' }}
+      - name: Prepare the pinned nabu UFS source
+        if: ${{ inputs.mode == 'build-native-ufs' || inputs.mode == 'build-integrated-ufs' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -97,7 +98,15 @@ jobs:
           git -C "$SOURCE" fetch --depth 1 origin af785c1777161a62931425c2faaa536ce0bebd5b
           git -C "$SOURCE" checkout --detach FETCH_HEAD
           python3 prepare_nabu_ufs_source.py --source "$SOURCE" --output-dir "$RUNNER_TEMP/NativeUfs-nabu" --patch "$GITHUB_WORKSPACE/patches/nabu-nativeufs-board.patch"
-          python3 compile_native_ufs.py "$RUNNER_TEMP/batch-work" --source "$RUNNER_TEMP/NativeUfs-nabu"
+
+      - name: Compile the UFS object separately
+        if: ${{ inputs.mode == 'build-native-ufs' }}
+        run: python3 compile_native_ufs.py "$RUNNER_TEMP/batch-work" --source "$RUNNER_TEMP/NativeUfs-nabu"
+
+      - name: Rebuild 14 objects and link the bound UFS archive and personalities
+        if: ${{ inputs.mode == 'build-integrated-ufs' }}
+        shell: bash
+        run: bash run_mac_batch.sh --build-integrated-ufs "$RUNNER_TEMP/batch-work" "$RUNNER_TEMP/NativeUfs-nabu"
 
       - name: Create small unencrypted APFS fixture
         if: ${{ inputs.mode == 'apfs-fixture' }}
@@ -178,7 +187,7 @@ jobs:
           gh release upload "$TAG" "$ARCHIVE" --repo "$PRIVATE_INPUTS_REPO" --clobber
 
       - name: Upload full build outputs to private inputs repo
-        if: ${{ always() && (inputs.mode == 'build-captured' || inputs.mode == 'build-prelinked' || inputs.mode == 'build-native-ufs') }}
+        if: ${{ always() && (inputs.mode == 'build-captured' || inputs.mode == 'build-prelinked' || inputs.mode == 'build-native-ufs' || inputs.mode == 'build-integrated-ufs') }}
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
