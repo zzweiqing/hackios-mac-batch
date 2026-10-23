@@ -93,7 +93,7 @@ def main():
         container = info.get("APFSContainerReference")
         if not container:
             raise ValueError("physical store has no APFSContainerReference")
-        run(["diskutil", "apfs", "addVolume", container, "APFS", "HackiosProbe",
+        run(["sudo", "diskutil", "apfs", "addVolume", container, "APFS", "HackiosProbe",
              "-mountpoint", str(mountpoint)])
         topology = run(["diskutil", "apfs", "list", "-plist", container], parse=True)
         containers = topology.get("Containers", [])
@@ -110,6 +110,7 @@ def main():
         volume_uuid = volume_info.get("VolumeUUID")
         if not volume_uuid:
             raise ValueError("volume UUID is absent")
+        run(["sudo", "chown", f"{os.getuid()}:{os.getgid()}", str(mountpoint)])
         probe = mountpoint / "probe.bin"
         probe.write_bytes(PROBE)
         os.sync()
