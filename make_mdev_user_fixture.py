@@ -335,8 +335,19 @@ _apfs_fstat_buf: .space 256, 0
 """
 
 
+def apfs_kernel_volume_contract():
+    return {
+        "node": "/dev/md1s1",
+        "parent_slot": 1,
+        "slot": 2,
+        "minor": 2,
+        "fsindex_override": False,
+    }
+
+
 def build_fixture_source(device="/dev/md1", read_offset=0, write_open=False,
-                         apfs_mount=False, apfs_volume_node=False, read_checkpoint=None):
+                         apfs_mount=False, apfs_volume_node=False,
+                         apfs_kernel_volume=False, read_checkpoint=None):
     """Assemble fixture source without invoking the macOS compiler."""
     if device not in ("/dev/md0", "/dev/md1", "/dev/md1s1"):
         raise ValueError("unsupported mdev device")
@@ -346,6 +357,10 @@ def build_fixture_source(device="/dev/md1", read_offset=0, write_open=False,
         raise ValueError("APFS mount requires the ordinary md1 read instrument")
     if apfs_volume_node and not apfs_mount:
         raise ValueError("APFS volume node requires --apfs-mount")
+    if apfs_kernel_volume and not apfs_mount:
+        raise ValueError("APFS kernel volume requires --apfs-mount")
+    if apfs_volume_node and apfs_kernel_volume:
+        raise ValueError("mknod and kernel-volume fixtures are mutually exclusive")
     if read_checkpoint is None:
         read_checkpoint = (device == "/dev/md1" and read_offset == 0 and not write_open)
     if read_checkpoint and (write_open or device != "/dev/md1" or read_offset):
@@ -387,9 +402,10 @@ def build_fixture_source(device="/dev/md1", read_offset=0, write_open=False,
         source += md1_checkpoint_data()
     if apfs_mount:
         apfs_data = APFS_DATA
-        if apfs_volume_node:
+        if apfs_volume_node or apfs_kernel_volume:
             apfs_data = apfs_data.replace(".quad Lapfs_device, 1",
                                           ".quad Lapfs_volume_device, 1")
+        if apfs_volume_node:
             apfs_data += APFS_VOLUME_NODE_DATA
         source += apfs_data
     return source
@@ -404,6 +420,8 @@ def main():
     parser.add_argument("--apfs-mount", action="store_true", help="21H16 APFS read-only data mount and file read")
     parser.add_argument("--apfs-volume-node", action="store_true",
                         help="Create /dev/md1s1 from the md1 fstat rdev before mounting")
+    parser.add_argument("--apfs-kernel-volume", action="store_true",
+                        help="Mount the kernel-registered /dev/md1s1 slot directly")
     args = parser.parse_args()
     if sys.platform != "darwin":
         raise SystemExit("own EL0 fixture compilation requires macOS Actions")
@@ -417,6 +435,7 @@ def main():
         device=args.device, read_offset=args.read_offset,
         write_open=args.write_open, apfs_mount=args.apfs_mount,
         apfs_volume_node=args.apfs_volume_node,
+        apfs_kernel_volume=args.apfs_kernel_volume,
         read_checkpoint=read_checkpoint)
     assembly = out / "md1-user.S"
     assembly.write_text(source, encoding="ascii")
@@ -475,6 +494,7 @@ def main():
         if args.apfs_mount:
             contract["apfs_file_read_probe"] = True
             contract["apfs_volume_node"] = args.apfs_volume_node
+            contract["apfs_kernel_volume"] = args.apfs_kernel_volume
             contract["apfs_file_success_line"] = APFS_FILE_OK_LINE
             contract["apfs_file_success_line_bytes"] = APFS_FILE_OK_LINE_BYTES
             contract["memory"].update({
@@ -511,6 +531,8 @@ def main():
                     "_apfs_mknod_result": {"width": 8, "value": 0},
                     "_apfs_mknod_carry": {"width": 8, "value": 0, "mask": 1 << 29},
                 })
+            if args.apfs_kernel_volume:
+                contract["apfs_kernel_volume_contract"] = apfs_kernel_volume_contract()
             contract["buffers"] = {
                 "_apfs_probe_buffer": {"size": 22, "sha256": hashlib.sha256(b"HACKIOS_APFS_PROBE_V1\n").hexdigest()},
                 "_apfs_statfs_fstype": {"size": 5, "sha256": hashlib.sha256(b"apfs\0").hexdigest()},

@@ -1,6 +1,6 @@
 --- a/bsd/dev/memdev.c
 +++ b/bsd/dev/memdev.c
-@@ -173,6 +173,18 @@
+@@ -173,6 +173,26 @@
  #define mdRO            0x02    /* This device is read-only */
  #define mdPhys          0x04    /* This device is in physical memory */
  
@@ -14,17 +14,25 @@
 +volatile uint64_t mdev_apfs_md1_read_failures;
 +volatile uint64_t mdev_apfs_md1_writes;
 +volatile uint64_t mdev_apfs_md1_write_failures;
++volatile dev_t mdev_apfs_md1s1_bdev = (dev_t)-1;
++static int mdev_apfs_s1_alias_slot = -1;
++
++static int
++mdev_apfs_md1_family(int devid)
++{
++	return mdev_apfs_md1_ready && (devid == 1 || devid == 2);
++}
 +#endif
 +
  int mdevBMajor = -1;
  int mdevCMajor = -1;
  
-@@ -199,6 +211,13 @@
+@@ -199,6 +219,13 @@
  	if (devid >= NB_MAX_MDEVICES || devid < 0) {
  		return ENXIO;                                                                 /* Not valid */
  	}
 +#if XNU_NABU_APFS_MD1
-+	if (devid == 1 && mdev_apfs_md1_ready && (flags & FWRITE)) {
++	if (mdev_apfs_md1_family(devid) && (flags & FWRITE)) {
 +		mdev_apfs_md1_writes++;
 +		mdev_apfs_md1_write_failures++;
 +		return EROFS;
@@ -33,12 +41,12 @@
  	if ((flags & FWRITE) && (mdev[devid].mdFlags & mdRO)) {
  		return EACCES;                                                /* Currently mounted RO */
  	}
-@@ -228,6 +247,20 @@
+@@ -228,6 +255,20 @@
  	if (uio_resid(uio) < 0) {
  		return EINVAL;
  	}
 +#if XNU_NABU_APFS_MD1
-+	if (devid == 1 && mdev_apfs_md1_ready) {
++	if (mdev_apfs_md1_family(devid)) {
 +		if (uio->uio_rw != UIO_READ) {
 +			mdev_apfs_md1_writes++;
 +			mdev_apfs_md1_write_failures++;
@@ -54,12 +62,12 @@
  	mdata = ((addr64_t)mdev[devid].mdBase << 12) + uio->uio_offset; /* Point to the area in "file" */
  
  	saveflag = uio->uio_segflg;                                                     /* Remember what the request is */
-@@ -249,6 +282,16 @@
+@@ -249,6 +290,16 @@
  	}
  
  	status = uiomove64(mdata, count, uio);     /* Move the data */
 +#if XNU_NABU_APFS_MD1
-+	if (devid == 1 && mdev_apfs_md1_ready) {
++	if (mdev_apfs_md1_family(devid)) {
 +		if (status) {
 +			mdev_apfs_md1_read_failures++;
 +		} else if (count) {
@@ -71,12 +79,12 @@
  	uio->uio_segflg = saveflag;                                                     /* Restore the flag */
  
  	return status;
-@@ -265,6 +308,29 @@
+@@ -265,6 +316,29 @@
  
  	devid = minor(buf_device(bp));                                                  /* Get minor device number */
  
 +#if XNU_NABU_APFS_MD1
-+	if (devid == 1 && mdev_apfs_md1_ready) {
++	if (mdev_apfs_md1_family(devid)) {
 +		uint64_t block = (uint64_t)buf_blkno(bp);
 +		uint64_t sector = mdev[devid].mdSecsize;
 +		uint64_t capacity = mdev_apfs_md1_capacity_bytes;
@@ -101,12 +109,12 @@
  	if ((mdev[devid].mdFlags & mdInited) == 0) {            /* Have we actually been defined yet? */
  		buf_seterror(bp, ENXIO);
  		buf_biodone(bp);
-@@ -356,6 +422,12 @@
+@@ -356,6 +430,12 @@
  	 */
  	buf_unmap(bp);
  
 +#if XNU_NABU_APFS_MD1
-+	if (devid == 1 && mdev_apfs_md1_ready && buf_count(bp)) {
++	if (mdev_apfs_md1_family(devid) && buf_count(bp)) {
 +		mdev_apfs_md1_reads++;
 +		mdev_apfs_md1_read_bytes += buf_count(bp);
 +	}
@@ -114,7 +122,7 @@
  	buf_setresid(bp, 0);                                                                    /* Nothing more to do */
  	buf_biodone(bp);                                                                        /* Say we've finished */
  }
-@@ -427,7 +499,7 @@
+@@ -427,7 +507,7 @@
  		break;
  
  	case DKIOCISWRITABLE:
@@ -123,7 +131,64 @@
  		break;
  
  	case DKIOCGETBLOCKCOUNT:
-@@ -767,3 +839,31 @@
+@@ -635,6 +715,10 @@
+ mdevadd(int devid, uint64_t base, unsigned int size, int phys)
+ {
+ 	int i;
++	int display_id;
++	const char *name_suffix = "";
++	const char *block_format = "md%d";
++	const char *char_format = "rmd%d";
+ 
+ 	if (devid < 0) {
+ 		devid = -1;
+@@ -659,6 +743,15 @@
+ 		if (mdev[devid].mdFlags & mdInited) {                    /* Already there? */
+ 			panic("mdevadd: attempt to explicitly add a previously defined memory device: %08X", devid);
+ 		}
+ 	}
++	display_id = devid;
++#if XNU_NABU_APFS_MD1
++	if (devid == mdev_apfs_s1_alias_slot) {
++		display_id = 1;
++		name_suffix = "s1";
++		block_format = "md%ds1";
++		char_format = "rmd%ds1";
++	}
++#endif
+ 
+ 	if (mdevBMajor < 0) {                                                            /* Have we gotten a major number yet? */
+@@ -680,7 +773,7 @@
+ 	mdev[devid].mdBDev = makedev(mdevBMajor, devid);        /* Get the device number */
+ 	mdev[devid].mdbdevb = devfs_make_node(mdev[devid].mdBDev, DEVFS_BLOCK,  /* Make the node */
+ 	    UID_ROOT, GID_OPERATOR,
+-	    0600, "md%d", devid);
++	    0600, block_format, display_id);
+ 	if (mdev[devid].mdbdevb == NULL) {                                      /* Did we make one? */
+ 		printf("mdevadd: devfs_make_node for block failed!\n");
+ 		return -1;                                                                              /* Nope... */
+@@ -689,7 +782,7 @@
+ 	mdev[devid].mdCDev = makedev(mdevCMajor, devid);        /* Get the device number */
+ 	mdev[devid].mdcdevb = devfs_make_node(mdev[devid].mdCDev, DEVFS_CHAR,           /* Make the node */
+ 	    UID_ROOT, GID_OPERATOR,
+-	    0600, "rmd%d", devid);
++	    0600, char_format, display_id);
+ 	if (mdev[devid].mdcdevb == NULL) {                                      /* Did we make one? */
+ 		printf("mdevadd: devfs_make_node for character failed!\n");
+ 		return -1;                                                                              /* Nope... */
+@@ -702,8 +795,9 @@
+ 		mdev[devid].mdFlags |= mdPhys;                          /* Show that we are in physical memory */
+ 	}
+ 	mdev[devid].mdFlags |= mdInited;                                        /* Show we are all set up */
+-	printf("Added memory device md%x/rmd%x (%08X/%08X) at %016llX for %016llX\n",
+-	    devid, devid, mdev[devid].mdBDev, mdev[devid].mdCDev, base << 12, (uint64_t)size << 12);
++	printf("Added memory device md%x%s/rmd%x%s (%08X/%08X) at %016llX for %016llX\n",
++	    display_id, name_suffix, display_id, name_suffix,
++	    mdev[devid].mdBDev, mdev[devid].mdCDev, base << 12, (uint64_t)size << 12);
+ 	return mdev[devid].mdBDev;
+ }
+ 
+@@ -767,3 +861,40 @@
  
  	return 0;
  }
@@ -134,8 +199,9 @@
 +mdev_apfs_md1_register(uint64_t offset, uint64_t size)
 +{
 +	uint64_t base, capacity;
-+	dev_t device;
-+	if (mdev_apfs_md1_ready || (mdev[1].mdFlags & mdInited)) {
++	dev_t device, device2;
++	if (mdev_apfs_md1_ready || (mdev[1].mdFlags & mdInited) ||
++	    (mdev[2].mdFlags & mdInited)) {
 +		return EBUSY;
 +	}
 +	if (offset == 0 || size == 0 || size >= (64ULL << 20) ||
@@ -150,6 +216,14 @@
 +		return ENODEV;
 +	}
 +	mdev[1].mdFlags |= mdRO;
++	mdev_apfs_s1_alias_slot = 2;
++	device2 = mdevadd(2, (base + offset) >> 12, (unsigned int)(size >> 12), 0);
++	mdev_apfs_s1_alias_slot = -1;
++	if (device2 == (dev_t)-1 || device2 == device || minor(device2) != 2) {
++		return ENODEV;
++	}
++	mdev[2].mdFlags |= mdRO;
++	mdev_apfs_md1s1_bdev = device2;
 +	mdev_apfs_md1_capacity_bytes = size;
 +	mdev_apfs_md1_ready = 1;
 +	return 0;

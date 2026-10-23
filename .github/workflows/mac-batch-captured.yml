@@ -99,6 +99,7 @@ jobs:
           python3 make_mdev_user_fixture.py --output-dir "$RUNNER_TEMP/apfs-fixture/md1-write-user" --write-open
           python3 make_mdev_user_fixture.py --output-dir "$RUNNER_TEMP/apfs-fixture/apfs-user" --apfs-mount
           python3 make_mdev_user_fixture.py --output-dir "$RUNNER_TEMP/apfs-fixture/apfs-volume-user" --apfs-mount --apfs-volume-node
+          python3 make_mdev_user_fixture.py --output-dir "$RUNNER_TEMP/apfs-fixture/apfs-kernel-volume-user" --apfs-mount --apfs-kernel-volume
 
       - name: Collect summary
         if: ${{ always() }}
