@@ -55,6 +55,7 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", choices=("/dev/md0", "/dev/md1"), default="/dev/md1")
     parser.add_argument("--read-offset", type=lambda v: int(v, 0), default=0)
+    parser.add_argument("--write-open", action="store_true", help="Expected-refusal control: try O_RDWR")
     args = parser.parse_args()
     if sys.platform != "darwin":
         raise SystemExit("own EL0 fixture compilation requires macOS Actions")
@@ -63,6 +64,8 @@ def main():
     if not 0 <= args.read_offset <= 0xffffffff or args.read_offset % 4096:
         raise ValueError("read offset must be page aligned and fit 32 bits")
     block_probe = BLOCK_PROBE
+    if args.write_open:
+        block_probe = block_probe.replace("  mov x1, #0\n  mov x2, #0", "  mov x1, #2\n  mov x2, #0")
     if args.read_offset:
         seek = f"""
   mov x22, x0
@@ -112,6 +115,7 @@ def main():
             "description": "Own static PID1: core syscall regression plus actual md1 read of block 0",
             "mdev_block_read_probe": True, "apfs_mount_tested": False, "apple_userspace_used": False,
             "mdev_device": args.device, "mdev_read_offset": args.read_offset, "source": "md1-user.S",
+            "mdev_write_open": args.write_open,
         })
         contract["memory"].update({
             "_md1_open_result": {"width": 8, "predicate": "nonnegative_signed"},
