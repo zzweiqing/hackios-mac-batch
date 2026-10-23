@@ -47,6 +47,8 @@ jobs:
       - name: Check out UniXNU at the pinned commit
         run: |
           git clone --quiet https://github.com/UniXNU/UniXNU.git unixnu
+          # The pin may no longer be reachable from a moved main; fetch it explicitly.
+          git -C unixnu fetch --quiet origin "${{ inputs.unixnu_ref }}"
           git -C unixnu checkout --quiet --detach "${{ inputs.unixnu_ref }}"
           git -C unixnu log -1 --format='unixnu head %H'
 
