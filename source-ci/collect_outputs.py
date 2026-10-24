@@ -88,7 +88,7 @@ def selected_files(upstream):
         for path in sorted(directory.rglob('*')):
             if path.is_dir():
                 continue
-            if path.suffix == '.a' or path.name in report_names or path.name in ('namespace.h', 'inputs.S'):
+            if path.suffix == '.a' or path.name in report_names or path.name in ('namespace.h', 'inputs.S', 'NativeVirtioBlock.cpp'):
                 add(path, path.relative_to(work))
 
     add(work / '.config', Path('.config'))

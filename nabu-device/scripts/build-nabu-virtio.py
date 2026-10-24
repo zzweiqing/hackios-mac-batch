@@ -41,7 +41,21 @@ def main():
                 '-I', str(root / '.cache/xnu-work/osfmk')]
     verified = os.environ.get('XNU_OWNER_ROOT_TRUST') == '1'
     if verified:
-        command += ['-DNATIVE_VERIFIED_BLOCK=1', '-I', str(root / 'kits/VerifiedRoot/include')]
+        # The optional UFS backend is absent from this QEMU profile. Kernel
+        # linking still requires its weak import unless the call is compiled out.
+        text = source.read_text(encoding='utf-8').replace(
+            '      if (!block) {\n        if (native_ufs_block_authenticates) {',
+            '      if (!block) {\n#if XNU_NATIVE_UFS\n        if (native_ufs_block_authenticates) {')
+        text = text.replace('        continue;\n      }\n      authenticated = block->',
+                            '#endif\n        continue;\n      }\n      authenticated = block->')
+        patched = out / 'NativeVirtioBlock.cpp'
+        patched.write_text(text, encoding='utf-8')
+        command = platform.compile_command(record, patched, obj)
+        command += ['-I', str(root / 'build/storage-abi/include'),
+                    '-I', str(root / '.cache/xnu-work/osfmk'),
+                    '-DNATIVE_VERIFIED_BLOCK=1',
+                    '-DXNU_NATIVE_UFS=' + os.environ.get('XNU_NATIVE_UFS', '0'),
+                    '-I', str(root / 'kits/VerifiedRoot/include')]
     (out / 'compile-command.json').write_text(json.dumps(command, indent=2) + '\n')
     subprocess.run(command, cwd=record['directory'], check=True)
     assembly = out / 'original-bindings.S'
