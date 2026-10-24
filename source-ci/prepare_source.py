@@ -216,6 +216,13 @@ def main():
         text = text.replace('9846FE78-2910-4297-AF97-D59BB6F8FC16',
                             'D374ACD3-75FE-4FAD-B02E-FC3C9A86DA11')
         carrier.write_text(text, encoding='utf-8')
+    owner_manifest = owner_root and 'CONFIG_XNU_OWNER_BOOT_MANIFEST=y' in options
+    if owner_manifest:
+        # The existing publisher authenticates these actual mounted devices.
+        mount = args.upstream / 'patches/xnu/offline-owner-systemos-mount.patch'
+        text = mount.read_text(encoding='utf-8').replace(
+            '04769D26-2CA0-4825-B443-E2E5F88300F2', ROOT_VOLUME_UUID)
+        mount.write_text(text, encoding='utf-8')
     path.write_bytes(result)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps({
@@ -227,6 +234,9 @@ def main():
         'owner_policy': OWNER_POLICY if args.profile == 'nabu_qemu_root_defconfig' else None,
         'systemos_policy': SYSTEMOS_POLICY if args.profile == 'nabu_qemu_root_defconfig' else None,
         'second_static_trust_cache': second_static,
+        'owner_boot_manifest': ({'domain': 'VerifiedRoot.OwnerBootSet.v1',
+                                 'root_volume_uuid': ROOT_VOLUME_UUID,
+                                 'cache_volume_uuid': CACHE_VOLUME_UUID} if owner_manifest else None),
         'owner_cache_carrier': ({'root_volume_uuid': ROOT_VOLUME_UUID,
                                  'cache_volume_uuid': CACHE_VOLUME_UUID} if owner_carrier else None),
     }, indent=2) + '\n', encoding='utf-8')
