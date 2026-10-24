@@ -102,6 +102,13 @@ def select_storage_profile(device, upstream, owner_root=False):
         'if [ "$CRYPTO_BOOTSTRAP_MODE" != prelinked ] || [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; then\n'
         "    echo 'NativeVirtioBlock requires the original crypto/storage prelink closure' >&2")
     if owner_root:
+        # The pinned capability header is not visible to every compile unit in
+        # this board build. State the selected CPU feature on the command line
+        # so user-copy and context-switch code agree on PAN.
+        marker = 'if [ "$NATIVE_PAN" = 1 ]; then\n'
+        text = text.replace(
+            marker,
+            marker + '  EXTRA_CFLAGS="$EXTRA_CFLAGS -D__ARM_PAN_AVAILABLE__=1"\n', 1)
         # Root binding consumes the real verifier/transport, not the optional
         # crypto diagnostic and its four sample blocks.
         text = text.replace('if [ "$OWNER_ROOT_AUDIT" = 1 ] && [ "$OWNER_ROOT_PROBE" != 1 ]; then',
