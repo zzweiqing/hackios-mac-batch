@@ -55,7 +55,7 @@ def selected_files(upstream):
     files = []
     selected_xnu_names = {'link.filelist', 'all-alias.exp', 'startup.o.json',
                           'prng_random.o.json', 'IOPlatformExpert.cpo.json'}
-    report_names = {'report.json', 'compile-command.json', 'compile-command-namespaced.json',
+    report_names = {'report.json', 'bindings.json', 'compile-command.json', 'compile-command-namespaced.json',
                     'build-report.json', 'build-report-namespaced.json',
                     'link-survey.json', 'link-survey-namespaced.json'}
 
@@ -80,7 +80,8 @@ def selected_files(upstream):
         for path in sorted(xnu_obj.rglob('*')):
             if path.is_file() and path.name in selected_xnu_names:
                 add(path, path.relative_to(work))
-    for relative in ('corecrypto-2023', 'armdt-platform', 'armcpu', 'libpthread-kernel'):
+    for relative in ('corecrypto-2023', 'armdt-platform', 'armcpu', 'libpthread-kernel',
+                     'native-virtio-block'):
         directory = build / relative
         if not directory.is_dir():
             continue
@@ -102,8 +103,10 @@ def selected_sources(device):
     sources = [
         (device / 'board.toml', 'device/board.toml'),
         (device / 'configs/nabu_bootstrap_defconfig', 'device/configs/nabu_bootstrap_defconfig'),
+        (device / 'configs/nabu_qemu_storage_defconfig', 'device/configs/nabu_qemu_storage_defconfig'),
         (device / 'LICENSE', 'device/LICENSE'),
         (device / 'scripts/build-nabu-platform.py', 'device/scripts/build-nabu-platform.py'),
+        (device / 'scripts/build-nabu-virtio.py', 'device/scripts/build-nabu-virtio.py'),
         (source_dir / 'prepare_source.py', 'source-ci/prepare_source.py'),
         (source_dir / 'collect_outputs.py', 'source-ci/collect_outputs.py'),
         (workflow_dir / 'unixnu-source.yml', '.github/workflows/unixnu-source.yml'),
@@ -131,8 +134,9 @@ def main():
     args = p.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     files = selected_files(args.upstream)
+    prepared = json.loads(args.prepare_report.read_text()) if args.prepare_report.is_file() else {}
     identity = {'run_id': args.run_id, 'run_attempt': args.attempt, 'head_sha': args.head_sha,
-                'upstream_commit': UPSTREAM, 'profile': 'nabu_bootstrap_defconfig',
+                'upstream_commit': UPSTREAM, 'profile': prepared.get('profile', 'nabu_bootstrap_defconfig'),
                 'inputs_release': 'unixnu-source-inputs', 'inputs_asset': 'ipsw-21h16-small.zip',
                 'inputs_sha256': args.input_sha256 or None,
                 'input_verified': args.input_sha256 == INPUT_SHA256,

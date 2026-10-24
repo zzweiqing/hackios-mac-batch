@@ -7,7 +7,7 @@ on:
         required: true
         default: "245aca1a9ec5b730b1cad80fade295800d2981f1"
       defconfig:
-        description: Explicit G0 profile (system profiles are not implemented)
+        description: Source bootstrap or QEMU read-only disk transport (not Apple PID 1)
         required: true
         default: "nabu_bootstrap_defconfig"
       xcode:
@@ -38,18 +38,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Validate the exact source profile
+      - name: Prepare the selected source profile
         env:
           REQUESTED_REF: ${{ inputs.unixnu_ref }}
           REQUESTED_CONFIG: ${{ inputs.defconfig }}
         run: |
           test "$REQUESTED_REF" = 245aca1a9ec5b730b1cad80fade295800d2981f1
-          test "$REQUESTED_CONFIG" = nabu_bootstrap_defconfig
           test -d "$DEVELOPER_DIR"
           git clone --quiet --no-checkout https://github.com/UniXNU/UniXNU.git unixnu
           git -C unixnu fetch --quiet origin "$REQUESTED_REF"
           git -C unixnu checkout --quiet --detach "$REQUESTED_REF"
-          python3 source-ci/prepare_source.py --upstream unixnu --device nabu-device --report "$RUNNER_TEMP/source-prepare.json"
+          python3 source-ci/prepare_source.py --upstream unixnu --device nabu-device --profile "$REQUESTED_CONFIG" --report "$RUNNER_TEMP/source-prepare.json"
       - name: Fetch the pinned private small input
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
@@ -72,13 +71,14 @@ jobs:
           fi
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
-      - name: Build and prelink G0 from source
+      - name: Build and prelink the selected profile from source
         id: kernel
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          REQUESTED_CONFIG: ${{ inputs.defconfig }}
         run: |
           cd unixnu
-          ./unixnu defconfig nabu_bootstrap_defconfig
+          ./unixnu defconfig "$REQUESTED_CONFIG"
           ./unixnu build kernel
       - name: Preserve candidate and build evidence
         if: always()
