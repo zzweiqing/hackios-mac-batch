@@ -22,7 +22,8 @@ CACHE_VOLUME_UUID = 'C374ACD3-75FE-4FAD-B02E-FC3C9A86DA11'
 AMFI_INIT = 'com.apple.driver.AppleMobileFileIntegrity=0xfffffff005b70ae0'
 ROOT_COMPONENTS = ['com.apple.filesystems.apfs',
                    'com.apple.AppleFSCompression.AppleFSCompressionTypeZlib',
-                   'com.apple.driver.AppleMobileFileIntegrity']
+                   'com.apple.driver.AppleMobileFileIntegrity',
+                   'com.apple.security.sandbox']
 
 SECOND_STATIC_TRUST_CACHE_PATCH = '''--- a/config/MASTER.arm64
 +++ b/config/MASTER.arm64
