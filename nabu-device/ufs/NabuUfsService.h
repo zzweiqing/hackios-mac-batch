@@ -33,6 +33,16 @@ static bool nabuUfsFailure(const char *reason)
 {
   native_ufs_readonly_failure = reason;
   IOLog("NABU UFS READONLY stage=%u failed: %s\n", native_ufs_readonly_stage, reason);
+  // Cached fields only: failure reporting must not probe a wedged bus again.
+  IOLog("UFS CACHED GCC gdsc=%08x axi=%08x ahb=%08x\n",
+        native_ufs_readonly_gdsc, native_ufs_readonly_axi, native_ufs_readonly_ahb);
+  IOLog("UFS CACHED phase=%s cap=%08x ver=%08x dma=%llx\n", gRootDiagnostic.stage,
+        gRootDiagnostic.cap, gRootDiagnostic.version, static_cast<unsigned long long>(gRootDiagnostic.dma));
+  IOLog("UFS CACHED result=%08x ocs=%x polls=%u dbSeen=%x isSeen=%x\n",
+        gRootDiagnostic.result, gRootDiagnostic.ocs, gRootDiagnostic.polls,
+        gRootDiagnostic.dbSeen, gRootDiagnostic.isSeen);
+  IOLog("UFS CACHED SMMU id1=%08x id2=%08x slot=%u\n",
+        gRootDiagnostic.smmuId1, gRootDiagnostic.smmuId2, gRootDiagnostic.smmuSlot);
   return false;
 }
 
