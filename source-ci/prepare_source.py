@@ -16,6 +16,8 @@ OWNER_POLICY = {'release': 'nabu-owner-os-21h16-v1', 'asset': 'os-policy.tar.gz'
                 'sha256': '478b9adc9dd57d98a007eb1fa04fd07ff62c1bf2bdec6087fa3997ed11c01452'}
 SYSTEMOS_POLICY = {'release': 'nabu-owner-systemos-21h16-v1', 'asset': 'systemos-policy.tar.gz',
                    'sha256': 'e56a28b5921f33ee8d5125ac700bd3564e2f1d73208bfa7bd6aa007ec7f130c3'}
+ROOT_VOLUME_UUID = 'F577F6BD-3BB9-4864-BBDF-972FC2E94AE3'
+CACHE_VOLUME_UUID = 'C374ACD3-75FE-4FAD-B02E-FC3C9A86DA11'
 # Original j171ap/21H16 security initializer, before the declared prelink slide.
 AMFI_INIT = 'com.apple.driver.AppleMobileFileIntegrity=0xfffffff005b70ae0'
 ROOT_COMPONENTS = ['com.apple.filesystems.apfs',
@@ -199,11 +201,20 @@ def main():
         raise SystemExit('Unexpected UniXNU source revision')
     path = args.upstream / PATCH
     result = fixed_patch(path.read_bytes()) + NABU_TEXT_PATCH.encode()
-    second_static = (args.profile == 'nabu_qemu_root_defconfig' and
-                     'CONFIG_XNU_SECOND_STATIC_TRUST_CACHE=y' in
-                     (args.device / 'configs' / args.profile).read_text().splitlines())
+    options = (args.device / 'configs' / args.profile).read_text().splitlines()
+    owner_root = args.profile == 'nabu_qemu_root_defconfig'
+    second_static = owner_root and 'CONFIG_XNU_SECOND_STATIC_TRUST_CACHE=y' in options
     if second_static:
         result += SECOND_STATIC_TRUST_CACHE_PATCH.encode()
+    owner_carrier = owner_root and 'CONFIG_XNU_OWNER_CACHE_CARRIER=y' in options
+    if owner_carrier:
+        # Keep the upstream volume/parent checks, bound to these signed 21H16 inputs.
+        carrier = args.upstream / 'patches/xnu/offline-owner-cache-carrier.patch'
+        text = carrier.read_text().replace('04769D26-2CA0-4825-B443-E2E5F88300F2', ROOT_VOLUME_UUID)
+        text = text.replace('8846FE78-2910-4297-AF97-D59BB6F8FC16', CACHE_VOLUME_UUID)
+        text = text.replace('9846FE78-2910-4297-AF97-D59BB6F8FC16',
+                            'D374ACD3-75FE-4FAD-B02E-FC3C9A86DA11')
+        carrier.write_text(text, encoding='utf-8')
     path.write_bytes(result)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps({
@@ -215,6 +226,8 @@ def main():
         'owner_policy': OWNER_POLICY if args.profile == 'nabu_qemu_root_defconfig' else None,
         'systemos_policy': SYSTEMOS_POLICY if args.profile == 'nabu_qemu_root_defconfig' else None,
         'second_static_trust_cache': second_static,
+        'owner_cache_carrier': ({'root_volume_uuid': ROOT_VOLUME_UUID,
+                                 'cache_volume_uuid': CACHE_VOLUME_UUID} if owner_carrier else None),
     }, indent=2) + '\n', encoding='utf-8')
 
 

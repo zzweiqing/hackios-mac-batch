@@ -151,6 +151,7 @@ def main():
                 'owner_policy': prepared.get('owner_policy'),
                 'systemos_policy': prepared.get('systemos_policy'),
                 'second_static_trust_cache': prepared.get('second_static_trust_cache', False),
+                'owner_cache_carrier': prepared.get('owner_cache_carrier'),
                 'hardware_tested': False, 'apple_launchd_executed': False}
     summary = dict(identity, candidate_present=False, candidate_validated=False)
     manifest = dict(identity)
