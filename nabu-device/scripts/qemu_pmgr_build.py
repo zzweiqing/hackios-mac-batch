@@ -1,5 +1,6 @@
 """Build the QEMU AON backend against the selected original 21H16 PMGR."""
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -73,7 +74,7 @@ def build(root, record, out, compile_command, original_kernel):
     bindings = original_bindings(original_kernel.read_bytes(), native_prelink)
     assembly = out / 'original-bindings.S'
     assembly.write_text(binding_assembly(bindings), encoding='utf-8')
-    source = root / 'kits/nabu/platform/QemuBootPMGR.cpp'
+    source = Path(os.environ['UNIXNU_DEVICE']) / 'platform/QemuBootPMGR.cpp'
     obj = out / 'QemuBootPMGR.o'
     command = compile_command(record, source, obj)
     command += ['-I', str(out), '-I', str(root / '.cache/xnu-work/osfmk')]
