@@ -14,6 +14,11 @@ INPUT_SHA256 = 'fce1ea205e571c3850e150404fc04f255f1192ba19c68e12497c19b8f87d8994
 PROFILES = ('nabu_bootstrap_defconfig', 'nabu_qemu_storage_defconfig', 'nabu_qemu_root_defconfig')
 OWNER_POLICY = {'release': 'nabu-owner-os-21h16-v1', 'asset': 'os-policy.tar.gz',
                 'sha256': '478b9adc9dd57d98a007eb1fa04fd07ff62c1bf2bdec6087fa3997ed11c01452'}
+# Original j171ap/21H16 security initializer, before the declared prelink slide.
+AMFI_INIT = 'com.apple.driver.AppleMobileFileIntegrity=0xfffffff005b70ae0'
+ROOT_COMPONENTS = ['com.apple.filesystems.apfs',
+                   'com.apple.AppleFSCompression.AppleFSCompressionTypeZlib',
+                   'com.apple.driver.AppleMobileFileIntegrity']
 
 # Native console only: no BootProgress archives or system policy changes.
 NABU_TEXT_PATCH = (
@@ -84,8 +89,8 @@ def select_storage_profile(device, upstream, owner_root=False):
                         '  "build-libpthread-kernel.py",\n' + builders)
     if owner_root:
         text = text.replace('roots = ["com.apple.filesystems.apfs"]',
-                            'roots = ["com.apple.filesystems.apfs", '
-                            '"com.apple.AppleFSCompression.AppleFSCompressionTypeZlib"]')
+                            f'roots = {json.dumps(ROOT_COMPONENTS)}\n'
+                            f'early_security_init = "{AMFI_INIT}"')
     path.write_text(text, encoding='utf-8')
     # VirtIO imports IOStorageFamily and SHA256, not NativeAES. Keep the real
     # original-crypto prerequisite rather than the old sheng feature coupling.
@@ -129,11 +134,12 @@ def validate_profile(device):
     name = board['kernel']['defconfig']
     if name not in PROFILES or board['ipsw']['build'] != '21H16':
         raise ValueError('Only the explicit nabu/21H16 profiles are supported')
-    roots = ['com.apple.filesystems.apfs']
-    if name == 'nabu_qemu_root_defconfig':
-        roots.append('com.apple.AppleFSCompression.AppleFSCompressionTypeZlib')
+    owner_root = name == 'nabu_qemu_root_defconfig'
+    roots = ROOT_COMPONENTS if owner_root else ['com.apple.filesystems.apfs']
     if board['kernel']['prelink']['roots'] != roots:
         raise ValueError('Profile requires its declared original-component closure')
+    if board['kernel']['prelink'].get('early_security_init') != (AMFI_INIT if owner_root else None):
+        raise ValueError('Profile requires its declared original security initializer')
     config = (device / 'configs' / name).read_text(encoding='utf-8')
     disabled_features = ['BOOT_PROGRESS', 'NATIVE_UFS', 'NATIVE_AES',
                          'SOURCE_MOCKFS', 'NATIVE_LEGACY_DISPLAY', 'SHENG_PMGR']
