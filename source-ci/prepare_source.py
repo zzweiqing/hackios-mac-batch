@@ -82,6 +82,10 @@ def select_storage_profile(device, upstream, owner_root=False):
     builders = ('  "build-nabu-owner-root.py",\n' if owner_root else '') + '  "build-nabu-virtio.py",'
     text = text.replace('  "build-libpthread-kernel.py",',
                         '  "build-libpthread-kernel.py",\n' + builders)
+    if owner_root:
+        text = text.replace('roots = ["com.apple.filesystems.apfs"]',
+                            'roots = ["com.apple.filesystems.apfs", '
+                            '"com.apple.AppleFSCompression.AppleFSCompressionTypeZlib"]')
     path.write_text(text, encoding='utf-8')
     # VirtIO imports IOStorageFamily and SHA256, not NativeAES. Keep the real
     # original-crypto prerequisite rather than the old sheng feature coupling.
@@ -125,8 +129,11 @@ def validate_profile(device):
     name = board['kernel']['defconfig']
     if name not in PROFILES or board['ipsw']['build'] != '21H16':
         raise ValueError('Only the explicit nabu/21H16 profiles are supported')
-    if board['kernel']['prelink']['roots'] != ['com.apple.filesystems.apfs']:
-        raise ValueError('G0 requires the declared APFS/original-crypto closure')
+    roots = ['com.apple.filesystems.apfs']
+    if name == 'nabu_qemu_root_defconfig':
+        roots.append('com.apple.AppleFSCompression.AppleFSCompressionTypeZlib')
+    if board['kernel']['prelink']['roots'] != roots:
+        raise ValueError('Profile requires its declared original-component closure')
     config = (device / 'configs' / name).read_text(encoding='utf-8')
     disabled_features = ['BOOT_PROGRESS', 'NATIVE_UFS', 'NATIVE_AES',
                          'SOURCE_MOCKFS', 'NATIVE_LEGACY_DISPLAY', 'SHENG_PMGR']
