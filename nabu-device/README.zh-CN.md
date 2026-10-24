@@ -1,21 +1,13 @@
-# nabu-device（UniXNU 设备层：Xiaomi Pad 5 / SM8150）
+# nabu G0 源码构建输入
 
-本目录是 UniXNU 构建驱动的 nabu 设备仓库层，随 hackios-mac-batch 仓库一起分发。
-目标输入：用户提供的本地 `iPad_10.2_17.7_21H16_Restore.ipsw`（iPad7,11/12，j171ap，
-17.7 / 21H16）；CI 通过 `UNIXNU_IPSW` 使用私有仓库中的小成员子集容器，不下载整包。
+本目录只描述 UniXNU 固定源码与 iPadOS 17.7 / 21H16 输入下的 G0 构建候选。
+它编译并预链 XNU、原始 CoreCrypto 注册/APFS 依赖闭包及平台/pthread 归档；不包含系统卷、
+Apple launchd、UFS 真机访问、显示或可启动 iPadOS 包。
 
-## 状态（2026-10-24）
+`nabu_bootstrap_defconfig` 有意关闭 BootProgress、mockfs、物理存储、AES、VirtIO 和显示。
+构建成功只证明源码候选通过链接和静态预链；仍须用候选绑定的 QEMU 回归，才能确认所选
+XNU/原始 crypto 检查点。它不是 Apple 用户态启动证据。
 
-- `nabu_bootstrap_defconfig`：首个从源码 bootstrap pass（corecrypto14 / pthread /
-  ArmDTPlatform / ArmCpu，无归档构建器）。board.toml 为配套最小形态。
-- `nabu_defconfig`：完整目标配置（存储 + 原始用户态链），待 bootstrap 通过后
-  连同归档构建器清单、AMFI `early_security_init`（21H16 已审计为
-  `0xfffffff005b70ae0`）与 package 组件一起启用。
-- `scripts/build-arm-driver.py`：逐字复制自 UniXNU-sheng `251b291a`（BSD-2）。
-- 完整依赖与输入清单、21H16 ABI 审计记录见 hackios 主仓库
-  `project_audit/unixnu-nabu-port-20261023/` 与 `.../unixnu-nabu-port-20261024/`。
-
-## 许可
-
-`LICENSE` 为上游 UniXNU 的 BSD-2-Clause-Patent 文本；`build-arm-driver.py`
-来自 UniXNU-sheng，同许可。
+根目录 `board.toml` 固定 21H16 kernelcache、slide 与 APFS root 闭包；
+`scripts/build-nabu-platform.py` 从当前 XNU 编译记录产生 ArmDTPlatform 和 ArmCpu 归档。
+构建身份、日志、候选及有限文件集保存在私有产物；公开 artifact 仅含有界摘要。

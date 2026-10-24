@@ -1,14 +1,22 @@
-# Kernel configuration of the first nabu from-source bootstrap pass.
-# Example-shaped minimal set plus the two link requirements of this pinned tree:
-# BUILD_ARCHIVES with the corecrypto builders (the non-bootstrap pass tests for
-# the namespaced corecrypto archive) and BOOT_PROGRESS (its archive provides the
-# stub for the offline display probe hook that bsd_init references in
-# DEVELOPMENT builds). CONFIG_XNU_<NAME> becomes XNU_<NAME> for the build script.
-
+# G0 stops at kernel/platform/original crypto/APFS registration or root wait.
+# No mockfs PID 1, physical storage, verified system root, display or Apple launchd.
+CONFIG_XNU_BUILD_ARCHIVES=y
 CONFIG_XNU_SOURCE_CORECRYPTO14=y
 CONFIG_XNU_SOURCE_PTHREAD=y
 CONFIG_XNU_ARM_DT_PLATFORM=y
 CONFIG_XNU_ARMCPU=y
+CONFIG_XNU_NATIVE_ARCH_TIMER=y
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
-CONFIG_XNU_BOOT_PROGRESS=y
-CONFIG_XNU_BUILD_ARCHIVES=y
+CONFIG_XNU_BOOT_PROGRESS=n
+CONFIG_XNU_SOURCE_MOCKFS=n
+CONFIG_XNU_NATIVE_UFS=n
+CONFIG_XNU_NATIVE_AES=n
+CONFIG_XNU_NATIVE_VIRTIO_BLOCK=n
+CONFIG_XNU_NATIVE_RAM_BLOCK=n
+CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
+CONFIG_XNU_NATIVE_LEGACY_DISPLAY=n
+CONFIG_XNU_NATIVE_ADRENO=n
+CONFIG_XNU_OWNER_ROOT_AUDIT=n
+CONFIG_XNU_OWNER_ROOT_TRUST=n
+CONFIG_XNU_VERIFIED_ROOT_PROBE=n
+CONFIG_XNU_SHENG_PMGR=n

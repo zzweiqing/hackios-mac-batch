@@ -1,23 +1,9 @@
-# Board description of the Xiaomi Pad 5 (nabu, SM8150), read by the unixnu build driver.
-#
-# Bootstrap revision (2026-10-24): the example-shaped minimal board for the first
-# from-source pass — corecrypto14/pthread/ArmDTPlatform/ArmCpu only, no archive
-# builders, no early security initializer, empty prelink roots. The full revision
-# (archives list, AMFI early_security_init at 0xfffffff005b70ae0, storage and
-# owner-root flags) is staged in configs/nabu_defconfig and the audit records and
-# is switched on after this bootstrap pass builds and prelinks cleanly.
-#
-# Target input: the user-provided iPad_10.2_17.7_21H16_Restore.ipsw (iPad7,11/12,
-# j171ap). CI never downloads the whole IPSW: UNIXNU_IPSW points at the private
-# subset container (BuildManifest + four small members, byte-identical to the
-# local original; member pins below). The OS/SystemOS DMGs join through the same
-# channel when the payload/userdata stages need them.
-
+# G0: source-built kernel/crypto/platform checkpoint, not an iPadOS system root.
 [board]
 name = "nabu"
 soc = "SM8150"
-description = "Xiaomi Pad 5"
-kit = "nabu"                      # the package/ of this repository appears as kits/nabu in the build tree
+description = "Xiaomi Pad 5 source bootstrap"
+kit = "nabu"
 
 [ipsw]
 product = "iPad7,11"
@@ -39,13 +25,15 @@ defconfig = "nabu_bootstrap_defconfig"
 archives = [
   "build-corecrypto-14.py",
   "build-corecrypto-14.py --namespace",
+  "build-nabu-platform.py ArmDTPlatform",
+  "build-nabu-platform.py ArmCpu",
+  "build-libpthread-kernel.py",
 ]
 
 [kernel.prelink]
 tool = "kits/NativePrelink/emit_prelink.py"
 kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
-# sha256 of the locally decoded 21H16 arm64 kernelcache; compression_tool on the
-# runner must reproduce it exactly or this pin refuses the build.
 kernelcache_sha256 = "f7d1952c7a21633d212eccf288e77444fff0cc86976db5de292f6819c2ffa1b2"
-slide = "-0x1360000"               # the 21H16 slide established by the captured-build line
-roots = []
+slide = "-0x1360000"
+# Includes original corecrypto through the APFS dependency closure. No AMFI/UI claim.
+roots = ["com.apple.filesystems.apfs"]
