@@ -13,6 +13,63 @@ PATCH_SHA256 = '1f228c5c6d8387b13cd8e0964ddeb56c858a5dae16478f3ed2baae8a2e4da1e9
 INPUT_SHA256 = 'fce1ea205e571c3850e150404fc04f255f1192ba19c68e12497c19b8f87d8994'
 PROFILES = ('nabu_bootstrap_defconfig', 'nabu_qemu_storage_defconfig')
 
+# Native console only: no BootProgress archives or system policy changes.
+NABU_TEXT_PATCH = r'''--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -525,7 +525,9 @@
+ 	 */
+ 	check_for_panic_log();
+ 
+-	if (PE_state.video.v_display) {
++	int nabu_source_text = 0;
++	PE_parse_boot_argn("nabu-source-text", &nabu_source_text, sizeof(nabu_source_text));
++	if (PE_state.video.v_display && !nabu_source_text) {
+ 		PE_initialize_console(&PE_state.video, kPEGraphicsMode);
+ 	} else {
+ 		PE_initialize_console(&PE_state.video, kPETextMode);
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -43,6 +43,11 @@
+ #include <vm/pmap.h>
+ #include <vm/vm_map.h>
+ #include <pexpert/pexpert.h>
++
++extern "C" {
++extern volatile uint32_t armdt_platform_configured, armcpu_gic_ready;
++extern volatile uint64_t armcpu_timer_interrupts;
++}
+ #include <kern/clock.h>
+ #if CONFIG_KDP_INTERACTIVE_DEBUGGING
+ #include <kern/debug.h>
+@@ -690,6 +695,15 @@
+ 	static int          mountAttempts = 0;
+ 
+ 	int xchar, dchar;
++	int nabu_source_text = 0;
++	PE_parse_boot_argn("nabu-source-text", &nabu_source_text, sizeof(nabu_source_text));
++	if (nabu_source_text) {
++		PE_initialize_console(NULL, kPETextScreen);
++		PE_initialize_console(NULL, kPEEnableScreen);
++		IOLog("NABU SOURCE V2 ROOT_SEARCH platform=%u gic=%u timer=%llu\n",
++		    armdt_platform_configured, armcpu_gic_ready,
++		    (unsigned long long)armcpu_timer_interrupts);
++	}
+ 
+ 	// stall here for anyone matching on the IOBSD resource to finish (filesystems)
+ 	matching = IOService::serviceMatching(gIOResourcesKey);
+@@ -897,6 +911,10 @@
+ #if !XNU_TARGET_OS_OSX || !defined(__arm64__)
+ 			PE_display_icon( 0, "noroot");
+ 			IOLog( "Still waiting for root device\n" );
++			if (nabu_source_text) {
++				IOLog("NABU SOURCE V2 ROOT_WAIT timer=%llu\n",
++				    (unsigned long long)armcpu_timer_interrupts);
++			}
+ #endif
+ 
+ 			if (!debugInfoPrintedOnce) {
+'''
+
 
 def select_storage_profile(device, upstream):
     path = device / 'board.toml'
@@ -87,7 +144,7 @@ def main():
     if head != UPSTREAM:
         raise SystemExit('Unexpected UniXNU source revision')
     path = args.upstream / PATCH
-    result = fixed_patch(path.read_bytes())
+    result = fixed_patch(path.read_bytes()) + NABU_TEXT_PATCH.encode()
     path.write_bytes(result)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps({
