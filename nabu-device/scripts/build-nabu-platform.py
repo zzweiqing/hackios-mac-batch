@@ -8,6 +8,60 @@ import struct
 import subprocess
 
 
+def instrument_armcpu(text):
+    """Expose the existing GIC failure path without adding register accesses."""
+    text = text.replace('volatile uint32_t armcpu_registered = 0;', '''volatile uint32_t armcpu_registered = 0;
+static const char *volatile nabu_gic_stage = "not probed";
+static volatile uint32_t nabu_gic_pidr2, nabu_gic_last_offset, nabu_gic_last_value;
+static volatile uint32_t nabu_gic_typer_affinity;''')
+    text = text.replace('while ((read32 (base, offset) & mask) != 0) {',
+                        'nabu_gic_last_offset = offset;\n'
+                        '  while (((nabu_gic_last_value = read32 (base, offset)) & mask) != 0) {')
+    stages = [
+        ('IOService *ArmCpu::probe (IOService *provider, SInt32 *score)\n{', 'CPU probe'),
+        ('bool ArmCpu::start (IOService *provider)\n{', 'CPU start'),
+        ('bool ArmCpu::mapGic (void)\n{', 'DT nodes'),
+        ('  OSData *ranges = OSDynamicCast (OSData, soc->getProperty ("ranges"));', 'DT properties'),
+        ('  for (unsigned index = 0; index < 4; index += 2) {', 'DT address range'),
+        ('  OSSharedPtr<IOMemoryDescriptor> distMemory (IOMemoryDescriptor::withPhysicalAddress (', 'MMIO allocation'),
+        ('  distributor = OSSharedPtr<IOMemoryMap> (distMemory->map', 'MMIO mapping'),
+        ('  dist = static_cast<uintptr_t> (distributor->getVirtualAddress ());', 'GICD PIDR2'),
+        ('  write32 (dist, 0, ctl & ~3U);', 'GICD disable RWP'),
+        ('  write32 (dist, 0, (ctl & ~3U) | 16U);', 'GICD ARE RWP'),
+        ('  unsigned interrupts = ((read32 (dist, 4) & 31) + 1) * 32;', 'GICD SPI mask'),
+        ('bool ArmCpu::wakeRedistributor (bool local)\n{', 'GICR affinity'),
+        ('  write32 (redist, 0x14, read32 (redist, 0x14) & ~2U);', 'GICR WAKER'),
+        ('  return waitClear (redist, 0, 8);', 'GICR RWP'),
+        ('  gGicShared = 1;', 'CPU registration'),
+        ('  controller = new IOCPUInterruptController;', 'IRQ controller'),
+        ('  armcpu_gic_ready = 1;', 'ready'),
+    ]
+    for marker, stage in stages:
+        insertion = f'  nabu_gic_stage = "{stage}";'
+        if marker.endswith('\n{'):
+            text = text.replace(marker, marker + '\n' + insertion)
+        else:
+            text = text.replace(marker, insertion + '\n' + marker)
+    text = text.replace('  if (((read32 (dist, 0xffe8) >> 4) & 15) != 3) {',
+                        '  nabu_gic_pidr2 = read32 (dist, 0xffe8);\n'
+                        '  if (((nabu_gic_pidr2 >> 4) & 15) != 3) {')
+    text = text.replace('    armcpu_gic_typer_probe[1] = static_cast<uint32_t> (typer);',
+                        '    armcpu_gic_typer_probe[1] = static_cast<uint32_t> (typer);\n'
+                        '    nabu_gic_typer_affinity = static_cast<uint32_t> (typer >> 32);')
+    text += '''
+extern "C" void nabu_armcpu_report (void)
+{
+  IOLog ("NABU GIC stage=%s registered=%u pidr2=%08x\\n",
+      nabu_gic_stage, armcpu_registered, nabu_gic_pidr2);
+  IOLog ("NABU GIC last[%x]=%08x mpidr=%08x scan=%x typer=%08x:%08x stride=%x\\n",
+      nabu_gic_last_offset, nabu_gic_last_value, armcpu_boot_mpidr,
+      armcpu_gic_typer_probe[0], nabu_gic_typer_affinity,
+      armcpu_gic_typer_probe[1], armcpu_gic_stride);
+}
+'''
+    return text
+
+
 def compile_command(record, source, output):
     arguments = record['arguments']
     command = []
@@ -53,6 +107,10 @@ def main():
     source = root / 'drivers' / args.component / (args.component + '.cpp')
     out = root / 'build' / {'ArmDTPlatform': 'armdt-platform', 'ArmCpu': 'armcpu'}[args.component]
     out.mkdir(parents=True, exist_ok=True)
+    if args.component == 'ArmCpu':
+        original = source.read_text(encoding='utf-8')
+        source = out / 'ArmCpu.cpp'
+        source.write_text(instrument_armcpu(original), encoding='utf-8')
     obj = out / (args.component + '.o')
     command = compile_command(record, source, obj)
     command += ['-I', str(root / '.cache/xnu-work/osfmk')]
