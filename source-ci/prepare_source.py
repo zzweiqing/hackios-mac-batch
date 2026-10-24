@@ -22,6 +22,19 @@ ROOT_COMPONENTS = ['com.apple.filesystems.apfs',
                    'com.apple.AppleFSCompression.AppleFSCompressionTypeZlib',
                    'com.apple.driver.AppleMobileFileIntegrity']
 
+SECOND_STATIC_TRUST_CACHE_PATCH = '''--- a/config/MASTER.arm64
++++ b/config/MASTER.arm64
+@@ -72,7 +72,7 @@
+ #  VM_DEV =         [ VM_BASE dynamic_codesigning pgzalloc]
+ #  VM_DEBUG =       [ VM_BASE dynamic_codesigning pgzalloc]
+ #  VM_KASAN =       [ VM_BASE dynamic_codesigning kernel_tagging kernel_tbi config_kasan config_ubsan config_kcov config_ksancov ]
+-#  SECURITY_BASE =    [ config_macf kernel_integrity config_secure_bsd_root ]
++#  SECURITY_BASE =    [ config_macf kernel_integrity config_secure_bsd_root second_static_trust_cache ]
+ #  SECURITY_RELEASE = [ SECURITY_BASE ]
+ #  SECURITY_DEV =     [ SECURITY_BASE config_setuid config_kas_info ]
+ #  SECURITY_DEBUG =   [ SECURITY_BASE config_setuid config_kas_info ]
+'''
+
 # Native console only: no BootProgress archives or system policy changes.
 NABU_TEXT_PATCH = (
     '--- a/pexpert/arm/pe_init.c\n'
@@ -186,6 +199,11 @@ def main():
         raise SystemExit('Unexpected UniXNU source revision')
     path = args.upstream / PATCH
     result = fixed_patch(path.read_bytes()) + NABU_TEXT_PATCH.encode()
+    second_static = (args.profile == 'nabu_qemu_root_defconfig' and
+                     'CONFIG_XNU_SECOND_STATIC_TRUST_CACHE=y' in
+                     (args.device / 'configs' / args.profile).read_text().splitlines())
+    if second_static:
+        result += SECOND_STATIC_TRUST_CACHE_PATCH.encode()
     path.write_bytes(result)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps({
@@ -196,6 +214,7 @@ def main():
         'input_sha256': INPUT_SHA256, 'runtime_qualified': False,
         'owner_policy': OWNER_POLICY if args.profile == 'nabu_qemu_root_defconfig' else None,
         'systemos_policy': SYSTEMOS_POLICY if args.profile == 'nabu_qemu_root_defconfig' else None,
+        'second_static_trust_cache': second_static,
     }, indent=2) + '\n', encoding='utf-8')
 
 
