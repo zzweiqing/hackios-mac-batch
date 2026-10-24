@@ -14,61 +14,62 @@ INPUT_SHA256 = 'fce1ea205e571c3850e150404fc04f255f1192ba19c68e12497c19b8f87d8994
 PROFILES = ('nabu_bootstrap_defconfig', 'nabu_qemu_storage_defconfig')
 
 # Native console only: no BootProgress archives or system policy changes.
-NABU_TEXT_PATCH = r'''--- a/pexpert/arm/pe_init.c
-+++ b/pexpert/arm/pe_init.c
-@@ -525,7 +525,9 @@
- 	 */
- 	check_for_panic_log();
- 
--	if (PE_state.video.v_display) {
-+	int nabu_source_text = 0;
-+	PE_parse_boot_argn("nabu-source-text", &nabu_source_text, sizeof(nabu_source_text));
-+	if (PE_state.video.v_display && !nabu_source_text) {
- 		PE_initialize_console(&PE_state.video, kPEGraphicsMode);
- 	} else {
- 		PE_initialize_console(&PE_state.video, kPETextMode);
---- a/iokit/bsddev/IOKitBSDInit.cpp
-+++ b/iokit/bsddev/IOKitBSDInit.cpp
-@@ -43,6 +43,11 @@
- #include <vm/pmap.h>
- #include <vm/vm_map.h>
- #include <pexpert/pexpert.h>
-+
-+extern "C" {
-+extern volatile uint32_t armdt_platform_configured, armcpu_gic_ready;
-+extern volatile uint64_t armcpu_timer_interrupts;
-+}
- #include <kern/clock.h>
- #if CONFIG_KDP_INTERACTIVE_DEBUGGING
- #include <kern/debug.h>
-@@ -690,6 +695,15 @@
- 	static int          mountAttempts = 0;
- 
- 	int xchar, dchar;
-+	int nabu_source_text = 0;
-+	PE_parse_boot_argn("nabu-source-text", &nabu_source_text, sizeof(nabu_source_text));
-+	if (nabu_source_text) {
-+		PE_initialize_console(NULL, kPETextScreen);
-+		PE_initialize_console(NULL, kPEEnableScreen);
-+		IOLog("NABU SOURCE V2 ROOT_SEARCH platform=%u gic=%u timer=%llu\n",
-+		    armdt_platform_configured, armcpu_gic_ready,
-+		    (unsigned long long)armcpu_timer_interrupts);
-+	}
- 
- 	// stall here for anyone matching on the IOBSD resource to finish (filesystems)
- 	matching = IOService::serviceMatching(gIOResourcesKey);
-@@ -897,6 +911,10 @@
- #if !XNU_TARGET_OS_OSX || !defined(__arm64__)
- 			PE_display_icon( 0, "noroot");
- 			IOLog( "Still waiting for root device\n" );
-+			if (nabu_source_text) {
-+				IOLog("NABU SOURCE V2 ROOT_WAIT timer=%llu\n",
-+				    (unsigned long long)armcpu_timer_interrupts);
-+			}
- #endif
- 
- 			if (!debugInfoPrintedOnce) {
-'''
+NABU_TEXT_PATCH = (
+    '--- a/pexpert/arm/pe_init.c\n'
+    '+++ b/pexpert/arm/pe_init.c\n'
+    '@@ -525,7 +525,9 @@\n'
+    ' \t */\n'
+    ' \tcheck_for_panic_log();\n'
+    ' \n'
+    '-\tif (PE_state.video.v_display) {\n'
+    '+\tint nabu_source_text = 0;\n'
+    '+\tPE_parse_boot_argn("nabu-source-text", &nabu_source_text, sizeof(nabu_source_text));\n'
+    '+\tif (PE_state.video.v_display && !nabu_source_text) {\n'
+    ' \t\tPE_initialize_console(&PE_state.video, kPEGraphicsMode);\n'
+    ' \t} else {\n'
+    ' \t\tPE_initialize_console(&PE_state.video, kPETextMode);\n'
+    '--- a/iokit/bsddev/IOKitBSDInit.cpp\n'
+    '+++ b/iokit/bsddev/IOKitBSDInit.cpp\n'
+    '@@ -43,6 +43,11 @@\n'
+    ' #include <vm/pmap.h>\n'
+    ' #include <vm/vm_map.h>\n'
+    ' #include <pexpert/pexpert.h>\n'
+    '+\n'
+    '+extern "C" {\n'
+    '+extern volatile uint32_t armdt_platform_configured, armcpu_gic_ready;\n'
+    '+extern volatile uint64_t armcpu_timer_interrupts;\n'
+    '+}\n'
+    ' #include <kern/clock.h>\n'
+    ' #if CONFIG_KDP_INTERACTIVE_DEBUGGING\n'
+    ' #include <kern/debug.h>\n'
+    '@@ -690,6 +695,15 @@\n'
+    ' \tstatic int          mountAttempts = 0;\n'
+    ' \n'
+    ' \tint xchar, dchar;\n'
+    '+\tint nabu_source_text = 0;\n'
+    '+\tPE_parse_boot_argn("nabu-source-text", &nabu_source_text, sizeof(nabu_source_text));\n'
+    '+\tif (nabu_source_text) {\n'
+    '+\t\tPE_initialize_console(NULL, kPETextScreen);\n'
+    '+\t\tPE_initialize_console(NULL, kPEEnableScreen);\n'
+    '+\t\tIOLog("NABU SOURCE V2 ROOT_SEARCH platform=%u gic=%u timer=%llu\\n",\n'
+    '+\t\t    armdt_platform_configured, armcpu_gic_ready,\n'
+    '+\t\t    (unsigned long long)armcpu_timer_interrupts);\n'
+    '+\t}\n'
+    ' \n'
+    ' \t// stall here for anyone matching on the IOBSD resource to finish (filesystems)\n'
+    ' \tmatching = IOService::serviceMatching(gIOResourcesKey);\n'
+    '@@ -897,6 +911,10 @@\n'
+    ' #if !XNU_TARGET_OS_OSX || !defined(__arm64__)\n'
+    ' \t\t\tPE_display_icon( 0, "noroot");\n'
+    ' \t\t\tIOLog( "Still waiting for root device\\n" );\n'
+    '+\t\t\tif (nabu_source_text) {\n'
+    '+\t\t\t\tIOLog("NABU SOURCE V2 ROOT_WAIT timer=%llu\\n",\n'
+    '+\t\t\t\t    (unsigned long long)armcpu_timer_interrupts);\n'
+    '+\t\t\t}\n'
+    ' #endif\n'
+    ' \n'
+    ' \t\t\tif (!debugInfoPrintedOnce) {\n'
+)
 
 
 def select_storage_profile(device, upstream):
