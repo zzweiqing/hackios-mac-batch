@@ -14,6 +14,8 @@ INPUT_SHA256 = 'fce1ea205e571c3850e150404fc04f255f1192ba19c68e12497c19b8f87d8994
 PROFILES = ('nabu_bootstrap_defconfig', 'nabu_qemu_storage_defconfig', 'nabu_qemu_root_defconfig')
 OWNER_POLICY = {'release': 'nabu-owner-os-21h16-v1', 'asset': 'os-policy.tar.gz',
                 'sha256': '478b9adc9dd57d98a007eb1fa04fd07ff62c1bf2bdec6087fa3997ed11c01452'}
+SYSTEMOS_POLICY = {'release': 'nabu-owner-systemos-21h16-v1', 'asset': 'systemos-policy.tar.gz',
+                   'sha256': 'e56a28b5921f33ee8d5125ac700bd3564e2f1d73208bfa7bd6aa007ec7f130c3'}
 # Original j171ap/21H16 security initializer, before the declared prelink slide.
 AMFI_INIT = 'com.apple.driver.AppleMobileFileIntegrity=0xfffffff005b70ae0'
 ROOT_COMPONENTS = ['com.apple.filesystems.apfs',
@@ -102,13 +104,6 @@ def select_storage_profile(device, upstream, owner_root=False):
         'if [ "$CRYPTO_BOOTSTRAP_MODE" != prelinked ] || [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; then\n'
         "    echo 'NativeVirtioBlock requires the original crypto/storage prelink closure' >&2")
     if owner_root:
-        # The pinned capability header is not visible to every compile unit in
-        # this board build. State the selected CPU feature on the command line
-        # so user-copy and context-switch code agree on PAN.
-        marker = 'if [ "$NATIVE_PAN" = 1 ]; then\n'
-        text = text.replace(
-            marker,
-            marker + '  EXTRA_CFLAGS="$EXTRA_CFLAGS -D__ARM_PAN_AVAILABLE__=1"\n', 1)
         # Root binding consumes the real verifier/transport, not the optional
         # crypto diagnostic and its four sample blocks.
         text = text.replace('if [ "$OWNER_ROOT_AUDIT" = 1 ] && [ "$OWNER_ROOT_PROBE" != 1 ]; then',
@@ -200,6 +195,7 @@ def main():
         'input_release': 'unixnu-source-inputs', 'input_asset': 'ipsw-21h16-small.zip',
         'input_sha256': INPUT_SHA256, 'runtime_qualified': False,
         'owner_policy': OWNER_POLICY if args.profile == 'nabu_qemu_root_defconfig' else None,
+        'systemos_policy': SYSTEMOS_POLICY if args.profile == 'nabu_qemu_root_defconfig' else None,
     }, indent=2) + '\n', encoding='utf-8')
 
 

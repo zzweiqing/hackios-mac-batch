@@ -40,6 +40,7 @@ def main():
     command += ['-I', str(root / 'build/storage-abi/include'),
                 '-I', str(root / '.cache/xnu-work/osfmk')]
     verified = os.environ.get('XNU_OWNER_ROOT_TRUST') == '1'
+    multi_policy = bool(os.environ.get('UNIXNU_OWNER_POLICY_SYSTEMOS'))
     if verified:
         # The optional UFS backend is absent from this QEMU profile. Kernel
         # linking still requires its weak import unless the call is compiled out.
@@ -53,7 +54,9 @@ def main():
         command = platform.compile_command(record, patched, obj)
         command += ['-I', str(root / 'build/storage-abi/include'),
                     '-I', str(root / '.cache/xnu-work/osfmk'),
+                    '-I', str(source.parent),
                     '-DNATIVE_VERIFIED_BLOCK=1',
+                    '-DNATIVE_VERIFIED_BLOCK_MULTI_POLICY=' + ('1' if multi_policy else '0'),
                     '-DXNU_NATIVE_UFS=' + os.environ.get('XNU_NATIVE_UFS', '0'),
                     '-I', str(root / 'kits/VerifiedRoot/include')]
     (out / 'compile-command.json').write_text(json.dumps(command, indent=2) + '\n')
@@ -71,6 +74,7 @@ def main():
         'bindings': {name: hex(value) for name, value in BINDINGS.items()},
         'transport': 'modern-mmio', 'read_only': True,
         'verified_root_enabled': verified, 'runtime_qualified': False,
+        'multi_policy_enabled': multi_policy,
     }, indent=2) + '\n')
 
 

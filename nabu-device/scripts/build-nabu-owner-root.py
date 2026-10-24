@@ -33,10 +33,41 @@ def read_policy(policy_dir):
     }
 
 
+def policy_assembly(policy, systemos=None):
+    text = (
+        '.section __DATA_CONST,__const\n'
+        '.balign 8\n.globl _verified_root_manifest\n'
+        '_verified_root_manifest:\n'
+        f'.incbin "{policy["manifest"].as_posix()}"\n'
+        '.balign 8\n.globl _verified_root_manifest_bytes\n'
+        f'_verified_root_manifest_bytes:\n.quad {policy["manifest_bytes"]}\n'
+        '.balign 8\n.globl _verified_root_key\n'
+        '_verified_root_key:\n'
+        f'.incbin "{policy["trusted_key"].as_posix()}"\n')
+    if systemos:
+        text += (
+            '.balign 8\n.globl _verified_root_manifest_systemos\n'
+            '_verified_root_manifest_systemos:\n'
+            f'.incbin "{systemos["manifest"].as_posix()}"\n'
+            '.balign 8\n.globl _verified_root_manifest_systemos_bytes\n'
+            f'_verified_root_manifest_systemos_bytes:\n.quad {systemos["manifest_bytes"]}\n'
+            '.balign 8\n.globl _verified_root_policies\n'
+            '_verified_root_policies:\n'
+            f'.quad _verified_root_manifest, {policy["manifest_bytes"]}\n'
+            f'.quad _verified_root_manifest_systemos, {systemos["manifest_bytes"]}\n'
+            '.balign 8\n.globl _verified_root_policy_count\n'
+            '_verified_root_policy_count:\n.quad 2\n')
+    return text
+
+
 def main():
     root = Path(__file__).resolve().parents[1]
     policy_dir = Path(os.environ['UNIXNU_OWNER_POLICY']).resolve()
     policy = read_policy(policy_dir)
+    systemos_dir = os.environ.get('UNIXNU_OWNER_POLICY_SYSTEMOS')
+    systemos = read_policy(Path(systemos_dir).resolve()) if systemos_dir else None
+    if systemos and policy['trusted_key'].read_bytes() != systemos['trusted_key'].read_bytes():
+        raise SystemExit('OS and SystemOS policies must use the same owner trust anchor')
 
     recipe_path = root / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/bsd_init.o.json'
     record = json.loads(recipe_path.read_text().strip().rstrip(','))
@@ -67,21 +98,7 @@ def main():
         objects.append(obj)
 
     assembly = out / 'inputs.S'
-    assembly.write_text(
-        '.section __DATA_CONST,__const\n'
-        '.balign 8\n'
-        '.globl _verified_root_manifest\n'
-        '_verified_root_manifest:\n'
-        f'.incbin "{policy["manifest"].as_posix()}"\n'
-        '.balign 8\n'
-        '.globl _verified_root_manifest_bytes\n'
-        '_verified_root_manifest_bytes:\n'
-        f'.quad {policy["manifest_bytes"]}\n'
-        '.balign 8\n'
-        '.globl _verified_root_key\n'
-        '_verified_root_key:\n'
-        f'.incbin "{policy["trusted_key"].as_posix()}"\n',
-        encoding='utf-8')
+    assembly.write_text(policy_assembly(policy, systemos), encoding='utf-8')
     inputs_obj = out / 'inputs.o'
     assembly_command = ['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-c',
                         str(assembly), '-o', str(inputs_obj)]
@@ -104,6 +121,12 @@ def main():
             'block_count': policy['block_count'],
             'volume_uuid': policy['volume_uuid'],
             'generation': policy['generation'],
+        },
+        'systemos_policy': None if not systemos else {
+            'image_bytes': systemos['image_bytes'],
+            'block_count': systemos['block_count'],
+            'volume_uuid': systemos['volume_uuid'],
+            'generation': systemos['generation'],
         },
         'architecture': 'arm64',
         'deployment': 'iOS 17.0',
