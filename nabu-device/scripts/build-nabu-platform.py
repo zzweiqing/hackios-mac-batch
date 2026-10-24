@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -53,6 +54,12 @@ def main():
     source = root / 'drivers' / args.component / (args.component + '.cpp')
     out = root / 'build' / {'ArmDTPlatform': 'armdt-platform', 'ArmCpu': 'armcpu'}[args.component]
     out.mkdir(parents=True, exist_ok=True)
+    original_armio = args.component == 'ArmDTPlatform' and os.environ.get('XNU_OWNER_ROOT_TRUST') == '1'
+    if original_armio:
+        from armdt_original_provider import patch_source
+        patched = out / 'ArmDTPlatform.cpp'
+        patched.write_text(patch_source(source.read_text(encoding='utf-8')), encoding='utf-8')
+        source = patched
     obj = out / (args.component + '.o')
     command = compile_command(record, source, obj)
     command += ['-I', str(root / '.cache/xnu-work/osfmk')]
@@ -72,6 +79,7 @@ def main():
         'component': args.component, 'source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
         'recipe_sha256': hashlib.sha256(recipe_bytes).hexdigest(),
         'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
+        'original_armio_factory_enabled': original_armio,
         'architecture': 'arm64', 'deployment': 'iOS 17.0', 'runtime_qualified': False,
     }, indent=2) + '\n', encoding='utf-8')
 
