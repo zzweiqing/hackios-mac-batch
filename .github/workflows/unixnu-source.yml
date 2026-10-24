@@ -1,0 +1,137 @@
+name: unixnu source build
+on:
+  workflow_dispatch:
+    inputs:
+      unixnu_ref:
+        description: Pinned UniXNU source revision
+        required: true
+        default: "245aca1a9ec5b730b1cad80fade295800d2981f1"
+      defconfig:
+        description: Bootstrap, passive/read-only UFS, QEMU transport or owner-verified root (not boot qualification)
+        required: true
+        default: "nabu_bootstrap_defconfig"
+      xcode:
+        description: Xcode on macos-26
+        required: true
+        default: "26.6"
+permissions:
+  contents: read
+concurrency:
+  group: unixnu-source-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+  HOMEBREW_NO_ENV_HINTS: 1
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_${{ inputs.xcode }}.app/Contents/Developer
+      UNIXNU_DEVICE: ${{ github.workspace }}/nabu-device
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Prepare the selected source profile
+        env:
+          REQUESTED_REF: ${{ inputs.unixnu_ref }}
+          REQUESTED_CONFIG: ${{ inputs.defconfig }}
+        run: |
+          test "$REQUESTED_REF" = 245aca1a9ec5b730b1cad80fade295800d2981f1
+          test -d "$DEVELOPER_DIR"
+          git clone --quiet --no-checkout https://github.com/UniXNU/UniXNU.git unixnu
+          git -C unixnu fetch --quiet origin "$REQUESTED_REF"
+          git -C unixnu checkout --quiet --detach "$REQUESTED_REF"
+          python3 source-ci/prepare_source.py --upstream unixnu --device nabu-device --profile "$REQUESTED_CONFIG" --report "$RUNNER_TEMP/source-prepare.json"
+      - name: Fetch the pinned private small input
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
+          PRIVATE_INPUTS_REPO: ${{ vars.PRIVATE_INPUTS_REPO }}
+        run: |
+          test -n "$GH_TOKEN" && test -n "$PRIVATE_INPUTS_REPO"
+          # Refuse to export proprietary outputs to a public repository.
+          test "$(gh api "repos/$PRIVATE_INPUTS_REPO" --jq .private)" = true
+          gh release download unixnu-source-inputs --repo "$PRIVATE_INPUTS_REPO" --pattern ipsw-21h16-small.zip --dir "$RUNNER_TEMP"
+          actual=$(shasum -a 256 "$RUNNER_TEMP/ipsw-21h16-small.zip" | cut -d' ' -f1)
+          test "$actual" = fce1ea205e571c3850e150404fc04f255f1192ba19c68e12497c19b8f87d8994
+          echo "SOURCE_INPUT_SHA256=$actual" >> "$GITHUB_ENV"
+          echo "UNIXNU_IPSW=$RUNNER_TEMP/ipsw-21h16-small.zip" >> "$GITHUB_ENV"
+      - name: Fetch the private 21H16 OS owner policy
+        if: inputs.defconfig == 'nabu_qemu_root_defconfig'
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
+          PRIVATE_INPUTS_REPO: ${{ vars.PRIVATE_INPUTS_REPO }}
+        run: |
+          mkdir "$RUNNER_TEMP/owner-policy-download" "$RUNNER_TEMP/owner-policy"
+          gh release download nabu-owner-os-21h16-v1 --repo "$PRIVATE_INPUTS_REPO" --pattern os-policy.tar.gz --dir "$RUNNER_TEMP/owner-policy-download"
+          expected=$(python3 -c 'import sys; sys.path.insert(0,"source-ci"); from prepare_source import OWNER_POLICY; print(OWNER_POLICY["sha256"])')
+          actual=$(shasum -a 256 "$RUNNER_TEMP/owner-policy-download/os-policy.tar.gz" | cut -d' ' -f1)
+          test "$actual" = "$expected"
+          tar -xzf "$RUNNER_TEMP/owner-policy-download/os-policy.tar.gz" -C "$RUNNER_TEMP/owner-policy"
+          echo "UNIXNU_OWNER_POLICY=$RUNNER_TEMP/owner-policy" >> "$GITHUB_ENV"
+      - name: Fetch the private 21H16 SystemOS owner policy
+        if: inputs.defconfig == 'nabu_qemu_root_defconfig'
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
+          PRIVATE_INPUTS_REPO: ${{ vars.PRIVATE_INPUTS_REPO }}
+        run: |
+          mkdir "$RUNNER_TEMP/systemos-policy-download" "$RUNNER_TEMP/systemos-policy"
+          gh release download nabu-owner-systemos-21h16-v1 --repo "$PRIVATE_INPUTS_REPO" --pattern systemos-policy.tar.gz --dir "$RUNNER_TEMP/systemos-policy-download"
+          expected=$(python3 -c 'import sys; sys.path.insert(0,"source-ci"); from prepare_source import SYSTEMOS_POLICY; print(SYSTEMOS_POLICY["sha256"])')
+          actual=$(shasum -a 256 "$RUNNER_TEMP/systemos-policy-download/systemos-policy.tar.gz" | cut -d' ' -f1)
+          test "$actual" = "$expected"
+          tar -xzf "$RUNNER_TEMP/systemos-policy-download/systemos-policy.tar.gz" -C "$RUNNER_TEMP/systemos-policy"
+          echo "UNIXNU_OWNER_POLICY_SYSTEMOS=$RUNNER_TEMP/systemos-policy" >> "$GITHUB_ENV"
+      - name: Install host tools
+        run: |
+          brew install llvm lld mtools dtc
+          if ! command -v unifdef >/dev/null; then
+            brew install unifdef
+            echo "$(brew --prefix unifdef)/bin" >> "$GITHUB_PATH"
+          fi
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+      - name: Build and prelink the selected profile from source
+        id: kernel
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REQUESTED_CONFIG: ${{ inputs.defconfig }}
+        run: |
+          cd unixnu
+          ./unixnu defconfig "$REQUESTED_CONFIG"
+          ./unixnu build kernel
+      - name: Preserve candidate and build evidence
+        if: always()
+        env:
+          BUILD_OUTCOME: ${{ steps.kernel.outcome }}
+        run: |
+          python3 source-ci/collect_outputs.py --upstream unixnu --device nabu-device \
+            --output "$RUNNER_TEMP/source-output" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --head-sha "$GITHUB_SHA" --build-outcome "$BUILD_OUTCOME" \
+            --input-sha256 "${SOURCE_INPUT_SHA256:-}" --prepare-report "$RUNNER_TEMP/source-prepare.json"
+      - name: Upload private output (including failed builds)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
+          PRIVATE_INPUTS_REPO: ${{ vars.PRIVATE_INPUTS_REPO }}
+        run: |
+          TAG="source-$GITHUB_RUN_ID-attempt-$GITHUB_RUN_ATTEMPT"
+          ARCHIVE="$RUNNER_TEMP/source-output/$TAG.tar.gz"
+          test -f "$ARCHIVE" || exit 0
+          test "$(gh api "repos/$PRIVATE_INPUTS_REPO" --jq .private)" = true
+          gh release create "$TAG" "$ARCHIVE" --repo "$PRIVATE_INPUTS_REPO" \
+            --title "$TAG" --notes "Private source-build evidence for public run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT; not boot-qualified."
+      - name: Publish only bounded identity summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-summary-${{ github.run_id }}
+          path: ${{ runner.temp }}/source-output/summary.json
+          if-no-files-found: error
+          retention-days: 30
