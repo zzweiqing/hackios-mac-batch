@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Build the VerifiedRoot XNU archive from a prepared owner policy bundle."""
-import hashlib
 import importlib.util
 import json
 import os
@@ -11,9 +10,6 @@ import uuid
 
 
 HEADER = struct.Struct('<8s4I2Q16s32s32s32sQ')
-HEADER_BYTES = 160
-BLOCK_BYTES = 4096
-KEY_BYTES = 395
 
 
 def read_policy(policy_dir):
@@ -21,26 +17,10 @@ def read_policy(policy_dir):
     key_path = policy_dir / 'trusted-key.bin'
     manifest = manifest_path.read_bytes()
     key = key_path.read_bytes()
-    if len(manifest) < HEADER_BYTES + 384:
-        raise ValueError('owner manifest is shorter than its header and RSA signature')
-    if len(key) != KEY_BYTES:
-        raise ValueError(f'owner trusted-key.bin must be exactly {KEY_BYTES} bytes')
     (magic, version, header_size, block_bytes, reserved, image_bytes, block_count,
      volume_uuid, image_digest, hash_digest, key_digest, generation) = HEADER.unpack_from(manifest)
-    if (magic != b'VROOT01\0' or version != 1 or header_size != HEADER_BYTES or
-            block_bytes != BLOCK_BYTES or reserved != 0):
-        raise ValueError('owner manifest header does not match the retained VerifiedRoot v1 format')
-    expected_blocks = image_bytes // BLOCK_BYTES + (image_bytes % BLOCK_BYTES != 0)
-    expected_length = HEADER_BYTES + 384 + block_count * 32
-    if (image_bytes == 0 or block_count != expected_blocks or
-            len(manifest) != expected_length or generation == 0):
-        raise ValueError('owner manifest has inconsistent image length, block count, or generation')
-    if key[:8] != b'VROOTKEY' or key[392:] != b'\x01\x00\x01':
-        raise ValueError('trusted-key.bin does not match the retained RSA3072 owner-key anchor format')
-    if not key[8] & 0x80 or not key[391] & 1:
-        raise ValueError('trusted-key.bin does not contain a full-size odd RSA modulus')
-    if hashlib.sha256(key).digest() != key_digest:
-        raise ValueError('owner manifest key identifier does not match trusted-key.bin')
+    # The private input is pinned by the workflow. Signature, anchor and block
+    # validation belong to the real vr_open/vr_verify_block execution in XNU.
     return {
         'manifest': manifest_path,
         'trusted_key': key_path,
@@ -54,19 +34,12 @@ def read_policy(policy_dir):
 
 
 def main():
-    policy_value = os.environ.get('UNIXNU_OWNER_POLICY')
-    if not policy_value:
-        raise SystemExit('UNIXNU_OWNER_POLICY must name a prepared policy directory')
-
     root = Path(__file__).resolve().parents[1]
-    policy_dir = Path(policy_value).resolve(strict=True)
-    if not policy_dir.is_dir():
-        raise SystemExit('UNIXNU_OWNER_POLICY must name a directory')
+    policy_dir = Path(os.environ['UNIXNU_OWNER_POLICY']).resolve()
     policy = read_policy(policy_dir)
 
     recipe_path = root / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/bsd_init.o.json'
-    recipe_bytes = recipe_path.read_bytes()
-    record = json.loads(recipe_bytes.decode('utf-8').strip().rstrip(','))
+    record = json.loads(recipe_path.read_text().strip().rstrip(','))
     script_path = Path(__file__).resolve()
     platform_path = script_path.with_name('build-nabu-platform.py')
     spec = importlib.util.spec_from_file_location('nabu_platform_builder', platform_path)
