@@ -2,6 +2,7 @@
 """Build modern read-only VirtIO MMIO against the 21H16 storage class."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -38,6 +39,9 @@ def main():
     command = platform.compile_command(record, source, obj)
     command += ['-I', str(root / 'build/storage-abi/include'),
                 '-I', str(root / '.cache/xnu-work/osfmk')]
+    verified = os.environ.get('XNU_OWNER_ROOT_TRUST') == '1'
+    if verified:
+        command += ['-DNATIVE_VERIFIED_BLOCK=1', '-I', str(root / 'kits/VerifiedRoot/include')]
     (out / 'compile-command.json').write_text(json.dumps(command, indent=2) + '\n')
     subprocess.run(command, cwd=record['directory'], check=True)
     assembly = out / 'original-bindings.S'
@@ -52,7 +56,7 @@ def main():
         'original_build': '21H16', 'slide': -0x1360000,
         'bindings': {name: hex(value) for name, value in BINDINGS.items()},
         'transport': 'modern-mmio', 'read_only': True,
-        'verified_root_enabled': False, 'runtime_qualified': False,
+        'verified_root_enabled': verified, 'runtime_qualified': False,
     }, indent=2) + '\n')
 
 

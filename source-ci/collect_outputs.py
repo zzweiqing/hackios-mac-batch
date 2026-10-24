@@ -81,14 +81,14 @@ def selected_files(upstream):
             if path.is_file() and path.name in selected_xnu_names:
                 add(path, path.relative_to(work))
     for relative in ('corecrypto-2023', 'armdt-platform', 'armcpu', 'libpthread-kernel',
-                     'native-virtio-block'):
+                     'native-virtio-block', 'verified-root-xnu'):
         directory = build / relative
         if not directory.is_dir():
             continue
         for path in sorted(directory.rglob('*')):
             if path.is_dir():
                 continue
-            if path.suffix == '.a' or path.name in report_names or path.name == 'namespace.h':
+            if path.suffix == '.a' or path.name in report_names or path.name in ('namespace.h', 'inputs.S'):
                 add(path, path.relative_to(work))
 
     add(work / '.config', Path('.config'))
@@ -104,9 +104,11 @@ def selected_sources(device):
         (device / 'board.toml', 'device/board.toml'),
         (device / 'configs/nabu_bootstrap_defconfig', 'device/configs/nabu_bootstrap_defconfig'),
         (device / 'configs/nabu_qemu_storage_defconfig', 'device/configs/nabu_qemu_storage_defconfig'),
+        (device / 'configs/nabu_qemu_root_defconfig', 'device/configs/nabu_qemu_root_defconfig'),
         (device / 'LICENSE', 'device/LICENSE'),
         (device / 'scripts/build-nabu-platform.py', 'device/scripts/build-nabu-platform.py'),
         (device / 'scripts/build-nabu-virtio.py', 'device/scripts/build-nabu-virtio.py'),
+        (device / 'scripts/build-nabu-owner-root.py', 'device/scripts/build-nabu-owner-root.py'),
         (source_dir / 'prepare_source.py', 'source-ci/prepare_source.py'),
         (source_dir / 'collect_outputs.py', 'source-ci/collect_outputs.py'),
         (workflow_dir / 'unixnu-source.yml', '.github/workflows/unixnu-source.yml'),
@@ -141,6 +143,7 @@ def main():
                 'inputs_sha256': args.input_sha256 or None,
                 'input_verified': args.input_sha256 == INPUT_SHA256,
                 'build_step_outcome': args.build_outcome, 'runtime_qualified': False,
+                'owner_policy': prepared.get('owner_policy'),
                 'hardware_tested': False, 'apple_launchd_executed': False}
     summary = dict(identity, candidate_present=False, candidate_validated=False)
     manifest = dict(identity)

@@ -11,7 +11,9 @@ UPSTREAM = '245aca1a9ec5b730b1cad80fade295800d2981f1'
 PATCH = 'patches/xnu/offline-component-load-probes.patch'
 PATCH_SHA256 = '1f228c5c6d8387b13cd8e0964ddeb56c858a5dae16478f3ed2baae8a2e4da1e9'
 INPUT_SHA256 = 'fce1ea205e571c3850e150404fc04f255f1192ba19c68e12497c19b8f87d8994'
-PROFILES = ('nabu_bootstrap_defconfig', 'nabu_qemu_storage_defconfig')
+PROFILES = ('nabu_bootstrap_defconfig', 'nabu_qemu_storage_defconfig', 'nabu_qemu_root_defconfig')
+OWNER_POLICY = {'release': 'nabu-owner-os-21h16-v1', 'asset': 'os-policy.tar.gz',
+                'sha256': '478b9adc9dd57d98a007eb1fa04fd07ff62c1bf2bdec6087fa3997ed11c01452'}
 
 # Native console only: no BootProgress archives or system policy changes.
 NABU_TEXT_PATCH = (
@@ -72,13 +74,14 @@ NABU_TEXT_PATCH = (
 )
 
 
-def select_storage_profile(device, upstream):
+def select_storage_profile(device, upstream, owner_root=False):
     path = device / 'board.toml'
     text = path.read_text(encoding='utf-8')
-    text = text.replace('defconfig = "nabu_bootstrap_defconfig"',
-                        'defconfig = "nabu_qemu_storage_defconfig"')
+    profile = 'nabu_qemu_root_defconfig' if owner_root else 'nabu_qemu_storage_defconfig'
+    text = text.replace('defconfig = "nabu_bootstrap_defconfig"', f'defconfig = "{profile}"')
+    builders = ('  "build-nabu-owner-root.py",\n' if owner_root else '') + '  "build-nabu-virtio.py",'
     text = text.replace('  "build-libpthread-kernel.py",',
-                        '  "build-libpthread-kernel.py",\n  "build-nabu-virtio.py",')
+                        '  "build-libpthread-kernel.py",\n' + builders)
     path.write_text(text, encoding='utf-8')
     # VirtIO imports IOStorageFamily and SHA256, not NativeAES. Keep the real
     # original-crypto prerequisite rather than the old sheng feature coupling.
@@ -89,6 +92,17 @@ def select_storage_profile(device, upstream):
         "    echo 'NativeVirtioBlock currently requires the qualified NativeAES/original-storage prelink baseline' >&2",
         'if [ "$CRYPTO_BOOTSTRAP_MODE" != prelinked ] || [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; then\n'
         "    echo 'NativeVirtioBlock requires the original crypto/storage prelink closure' >&2")
+    if owner_root:
+        # Root binding consumes the real verifier/transport, not the optional
+        # crypto diagnostic and its four sample blocks.
+        text = text.replace('if [ "$OWNER_ROOT_AUDIT" = 1 ] && [ "$OWNER_ROOT_PROBE" != 1 ]; then',
+                            'if [ "$OWNER_ROOT_AUDIT" = 1 ] && [ "${XNU_NATIVE_VIRTIO_BLOCK:-0}" != 1 ]; then')
+        text = text.replace('if [ "$OWNER_ROOT_PROBE" = 1 ] && {',
+                            'if { [ "$OWNER_ROOT_PROBE" = 1 ] || [ "${XNU_OWNER_ROOT_AUDIT:-0}" = 1 ]; } && {')
+        text = text.replace('  if [ "$OWNER_ROOT_PROBE" = 1 ]; then\n    VERIFIED_ROOT_ARCHIVE=',
+                            '  if [ "$OWNER_ROOT_PROBE" = 1 ] || [ "$OWNER_ROOT_AUDIT" = 1 ]; then\n    VERIFIED_ROOT_ARCHIVE=')
+        text = text.replace('  "$OWNER_ROOT_PROBE" "${XNU_VERIFIED_ROOT_ARCHIVE:',
+                            '  "$((OWNER_ROOT_PROBE | OWNER_ROOT_AUDIT))" "${XNU_VERIFIED_ROOT_ARCHIVE:')
     build.write_text(text, encoding='utf-8')
 
 
@@ -124,7 +138,9 @@ def validate_profile(device):
     expected = ['build-corecrypto-14.py', 'build-corecrypto-14.py --namespace',
                 'build-nabu-platform.py ArmDTPlatform', 'build-nabu-platform.py ArmCpu',
                 'build-libpthread-kernel.py']
-    if name == 'nabu_qemu_storage_defconfig':
+    if name == 'nabu_qemu_root_defconfig':
+        expected.append('build-nabu-owner-root.py')
+    if name != 'nabu_bootstrap_defconfig':
         expected.append('build-nabu-virtio.py')
     if board['kernel']['archives'] != expected:
         raise ValueError('G0 archive producer list changed; re-audit the profile')
@@ -138,8 +154,8 @@ def main():
     p.add_argument('--report', type=Path, required=True)
     p.add_argument('--profile', choices=PROFILES, default=PROFILES[0])
     args = p.parse_args()
-    if args.profile == 'nabu_qemu_storage_defconfig':
-        select_storage_profile(args.device, args.upstream)
+    if args.profile != 'nabu_bootstrap_defconfig':
+        select_storage_profile(args.device, args.upstream, args.profile == 'nabu_qemu_root_defconfig')
     board = validate_profile(args.device)
     head = subprocess.check_output(['git', '-C', str(args.upstream), 'rev-parse', 'HEAD'], text=True).strip()
     if head != UPSTREAM:
@@ -154,6 +170,7 @@ def main():
         'after_sha256': hashlib.sha256(result).hexdigest(),
         'input_release': 'unixnu-source-inputs', 'input_asset': 'ipsw-21h16-small.zip',
         'input_sha256': INPUT_SHA256, 'runtime_qualified': False,
+        'owner_policy': OWNER_POLICY if args.profile == 'nabu_qemu_root_defconfig' else None,
     }, indent=2) + '\n', encoding='utf-8')
 
 

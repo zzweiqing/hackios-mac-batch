@@ -7,7 +7,7 @@ on:
         required: true
         default: "245aca1a9ec5b730b1cad80fade295800d2981f1"
       defconfig:
-        description: Source bootstrap or QEMU read-only disk transport (not Apple PID 1)
+        description: Source bootstrap, QEMU disk transport or owner-verified OS root (not Apple PID 1)
         required: true
         default: "nabu_bootstrap_defconfig"
       xcode:
@@ -62,6 +62,19 @@ jobs:
           test "$actual" = fce1ea205e571c3850e150404fc04f255f1192ba19c68e12497c19b8f87d8994
           echo "SOURCE_INPUT_SHA256=$actual" >> "$GITHUB_ENV"
           echo "UNIXNU_IPSW=$RUNNER_TEMP/ipsw-21h16-small.zip" >> "$GITHUB_ENV"
+      - name: Fetch the private 21H16 OS owner policy
+        if: inputs.defconfig == 'nabu_qemu_root_defconfig'
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
+          PRIVATE_INPUTS_REPO: ${{ vars.PRIVATE_INPUTS_REPO }}
+        run: |
+          mkdir "$RUNNER_TEMP/owner-policy-download" "$RUNNER_TEMP/owner-policy"
+          gh release download nabu-owner-os-21h16-v1 --repo "$PRIVATE_INPUTS_REPO" --pattern os-policy.tar.gz --dir "$RUNNER_TEMP/owner-policy-download"
+          expected=$(python3 -c 'import sys; sys.path.insert(0,"source-ci"); from prepare_source import OWNER_POLICY; print(OWNER_POLICY["sha256"])')
+          actual=$(shasum -a 256 "$RUNNER_TEMP/owner-policy-download/os-policy.tar.gz" | cut -d' ' -f1)
+          test "$actual" = "$expected"
+          tar -xzf "$RUNNER_TEMP/owner-policy-download/os-policy.tar.gz" -C "$RUNNER_TEMP/owner-policy"
+          echo "UNIXNU_OWNER_POLICY=$RUNNER_TEMP/owner-policy" >> "$GITHUB_ENV"
       - name: Install host tools
         run: |
           brew install llvm lld mtools dtc
