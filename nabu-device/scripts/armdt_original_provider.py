@@ -14,7 +14,15 @@ FACTORY = '''static IOService *createOriginalArmIONub (IORegistryEntry *entry)
 
 '''
 
-NUB = '''    bool originalArmIO = entry->getProperty ("armdt,apple-arm-io") != nullptr;
+NUB = '''    if (entry->getProperty ("armdt,qemu-boot-pmgr") != nullptr) {
+      if (!qemu_boot_pmgr_publish (this, entry)) {
+        iterator->release ();
+        return false;
+      }
+      count++;
+      continue;
+    }
+    bool originalArmIO = entry->getProperty ("armdt,apple-arm-io") != nullptr;
     IOService *nub = originalArmIO ? createOriginalArmIONub (entry) : createNub (entry);
     if (nub == nullptr) {
       if (originalArmIO) {
@@ -53,4 +61,5 @@ def patch_source(text):
     text = text[:first] + NUB + text[last:]
     text = text.replace(method, FACTORY + method, 1)
     return text.replace('extern "C" {\n',
-                        'extern "C" {\nvolatile uint64_t armdt_platform_original_armio_registry_id = 0;\n', 1)
+                        'extern "C" {\nbool qemu_boot_pmgr_publish (IOService *, IORegistryEntry *);\n'
+                        'volatile uint64_t armdt_platform_original_armio_registry_id = 0;\n', 1)

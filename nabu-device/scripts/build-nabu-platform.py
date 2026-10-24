@@ -71,10 +71,15 @@ def main():
     if result.returncode:
         raise SystemExit(result.stderr.decode('utf-8', errors='replace')[-4000:])
     check_object(obj.read_bytes())
+    objects = [obj]
+    if original_armio:
+        from qemu_pmgr_build import build
+        objects += build(root, record, out / 'qemu-pmgr', compile_command,
+                         Path(os.environ['UNIXNU_KERNELCACHE']))
     archive = out / ('lib' + args.component + '.a')
     if archive.exists():
         raise SystemExit('Refuse to reuse an existing platform archive; use a fresh build')
-    subprocess.run(['xcrun', 'ar', 'rcs', str(archive), str(obj)], check=True)
+    subprocess.run(['xcrun', 'ar', 'rcs', str(archive), *map(str, objects)], check=True)
     (out / 'build-report.json').write_text(json.dumps({
         'component': args.component, 'source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
         'recipe_sha256': hashlib.sha256(recipe_bytes).hexdigest(),

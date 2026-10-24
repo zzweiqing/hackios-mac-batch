@@ -113,6 +113,15 @@ def select_storage_profile(device, upstream, owner_root=False):
         text = text.replace('  "$OWNER_ROOT_PROBE" "${XNU_VERIFIED_ROOT_ARCHIVE:',
                             '  "$((OWNER_ROOT_PROBE | OWNER_ROOT_AUDIT))" "${XNU_VERIFIED_ROOT_ARCHIVE:')
     build.write_text(text, encoding='utf-8')
+    if owner_root:
+        # The native PMGR subclass binds to this exact original kext. Decode the
+        # same private input before archive compilation; prelink reuses it.
+        kernel = upstream / 'scripts/unixnu/kernel.py'
+        text = kernel.read_text(encoding='utf-8')
+        text = text.replace('    build_archives(ctx, env)\n',
+                            "    env['UNIXNU_KERNELCACHE'] = str(ipsw.kernelcache(ctx, ipsw.Ipsw(ctx)))\n"
+                            '    build_archives(ctx, env)\n', 1)
+        kernel.write_text(text, encoding='utf-8')
 
 
 def fixed_patch(data):
