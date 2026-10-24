@@ -5,12 +5,14 @@ The captured-line preparation and ABI helpers are byte-identical payload copies;
 tools/test_nabu_ufs_source_ci.py checks that they cannot silently drift apart.
 This builder deliberately cannot enable controller access via its environment.
 """
+import argparse
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import subprocess
+import struct
 import sys
 
 import native_ufs_bindings as bindings
@@ -27,7 +29,11 @@ volatile uint32_t native_ufs_passive_probe = 0;
 volatile uint32_t native_ufs_passive_root = 0;
 volatile uint32_t native_ufs_passive_blocked = 0;
 '''
-PASSIVE_START = '''#if NABU_UFS_PASSIVE_ONLY
+PASSIVE_START = '''#if !defined(NABU_UFS_PASSIVE_ONLY) || NABU_UFS_PASSIVE_ONLY != 1
+#error "This prepared artifact requires passive-only UFS compilation"
+#endif
+#if NABU_UFS_PASSIVE_ONLY
+  (void)provider;
   unsigned probe = 0, rootMode = 0;
   PE_parse_boot_argn ("native-ufs-probe", &probe, sizeof (probe));
   PE_parse_boot_argn ("native-ufs-root", &rootMode, sizeof (rootMode));
@@ -61,6 +67,22 @@ def source_flags():
     # No caller-selectable active mode in this milestone. Keep unused verifier
     # and BootProgress out of the archive's real dependency closure.
     return ['-DNABU_UFS_PASSIVE_ONLY=1', '-DNATIVE_VERIFIED_BLOCK=0']
+
+
+def check_passive_candidate(obj, candidate, plan):
+    report = bindings.check_candidate(obj, candidate, plan)
+    required = {'__ZN9NativeUfs5startEP9IOService', '__ZN9NativeUfs10gMetaClassE',
+                '_native_ufs_passive_abi', '_native_ufs_passive_starts',
+                '_native_ufs_passive_probe', '_native_ufs_passive_root',
+                '_native_ufs_passive_blocked'}
+    if not required <= candidate.names.keys():
+        raise ValueError('Final candidate lacks linked passive UFS symbols: ' +
+                         ', '.join(sorted(required - candidate.names.keys())))
+    if struct.unpack('<I', candidate.read(candidate.names['_native_ufs_passive_abi'], 4))[0] != 1:
+        raise ValueError('Final candidate has the wrong passive UFS ABI marker')
+    if any(name == '_boot_progress_poll' and kind == 1 for name, _, kind in obj.symbols):
+        raise ValueError('Passive UFS must not import the disabled BootProgress feature')
+    return dict(report, passive_abi=1, linked_symbols=sorted(required), runtime_qualified=False)
 
 
 def main():
@@ -107,10 +129,27 @@ def main():
         'recipe_sha256': hashlib.sha256(recipe_bytes).hexdigest(),
         'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
         'object_sha256': hashlib.sha256(obj.read_bytes()).hexdigest(),
+        'source_flags': source_flags(),
         'compiled': True, 'linked': False, 'passive_only': True,
         'verified_root_enabled': False, 'runtime_qualified': False, 'hardware_tested': False,
     }, indent=2) + '\n', encoding='utf-8')
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--check-candidate', type=Path)
+    parser.add_argument('--object', type=Path)
+    parser.add_argument('--prelink-report', type=Path)
+    parser.add_argument('--output-dir', type=Path)
+    args = parser.parse_args()
+    if args.check_candidate:
+        if not all((args.object, args.prelink_report, args.output_dir)):
+            parser.error('Candidate check requires object, prelink report and output directory')
+        report = check_passive_candidate(bindings.MachO(args.object), bindings.MachO(args.check_candidate),
+                                         json.loads(args.prelink_report.read_text(encoding='utf-8')))
+        (args.output_dir / 'candidate-bindings.json').write_text(json.dumps(report, indent=2) + '\n',
+                                                               encoding='utf-8')
+    else:
+        if any((args.object, args.prelink_report, args.output_dir)):
+            parser.error('Object/report/output are only valid with --check-candidate')
+        main()

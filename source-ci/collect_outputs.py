@@ -145,12 +145,13 @@ def check_ufs_candidate(upstream, device, candidate, report):
     if (built.get('source_commit') != 'af785c1777161a62931425c2faaa536ce0bebd5b'
             or built.get('passive_only') is not True
             or built.get('verified_root_enabled') is not False
+            or built.get('source_flags') != ['-DNABU_UFS_PASSIVE_ONLY=1', '-DNATIVE_VERIFIED_BLOCK=0']
             or built.get('object_sha256') != sha256(out / 'NativeUfs.o')
             or built.get('archive_sha256') != sha256(out / 'libNativeUfs.a')):
         raise ValueError('UFS object/archive is not bound to this passive build')
     result = subprocess.run([
-        sys.executable, str(device / 'scripts/native_ufs_bindings.py'),
-        '--object', str(out / 'NativeUfs.o'), '--candidate', str(candidate),
+        sys.executable, str(device / 'scripts/build-nabu-ufs.py'),
+        '--object', str(out / 'NativeUfs.o'), '--check-candidate', str(candidate),
         '--prelink-report', str(report), '--output-dir', str(out),
     ], capture_output=True, text=True)
     if result.returncode:
