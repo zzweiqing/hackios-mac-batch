@@ -64,7 +64,29 @@ diff --git a/SmmuTakeover.h b/SmmuTakeover.h
      } else if (ourBank) {
        p.slot = i; p.smr = smr; p.s2cr = s2cr;
        p.error = "reserved context bank already used"; return p;
-@@ -103,14 +116,40 @@
+@@ -89,7 +102,20 @@
+   enum {kBankAttempts = 8};
+   UfsSmmuPlan first = planUfsSmmuBank(stream, dma, bytes, read, 0, mapBytes);
+   if (!first.error) return first;
+-  // "conflicting" is retried too: our own stream may already sit on a lower bank from an earlier run that had to fall back.
++  // Firmware can place this exact stream below the reserved-bank search window.
++  // Locate that bank directly, then run the SAME mask, exclusivity, geometry and
++  // bypass checks. Do not retarget a live translation or relax a shared mapping.
++  if (!__builtin_strcmp(first.error, "conflicting UFS stream mapping") &&
++      (first.smr & 0x80000000U) && !((first.smr >> 16) & 0x7fffU) &&
++      ((first.s2cr >> 16) & 3U) == 0) {
++    unsigned existingBank = first.s2cr & 255U;
++    if (existingBank > 0 && existingBank < first.contextBanks) {
++      UfsSmmuPlan existing = planUfsSmmuBank(stream, dma, bytes, read,
++        first.contextBanks - 1 - existingBank, mapBytes);
++      if (!existing.error) return existing;
++    }
++  }
++  // The ordinary bounded allocation fallback still checks the top banks.
+   auto retryable = [](const char *e) {
+     return !__builtin_strcmp(e, "reserved context bank already used") || !__builtin_strcmp(e, "reserved context bank not bypass") ||
+            !__builtin_strcmp(e, "conflicting UFS stream mapping");
+@@ -103,14 +129,40 @@
    return first;
  }
  
@@ -108,7 +130,7 @@ diff --git a/SmmuTakeover.h b/SmmuTakeover.h
    if (!p.reuse) write(cb, 0);
    if (read(cb) != 0) return "SMMU bypass disable readback";
    // Set VA64 before exposing a newly allocated stream. Repair an exclusive
-@@ -122,10 +161,15 @@
+@@ -122,10 +174,15 @@
    if (!p.reuse) {
      write(0xc00 + 4 * p.slot, p.bank);
      if (read(0xc00 + 4 * p.slot) != p.bank) return "SMMU stream context readback";

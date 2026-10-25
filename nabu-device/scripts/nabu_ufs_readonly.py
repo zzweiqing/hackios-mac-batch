@@ -36,13 +36,31 @@ SMMU_FUNCTION = '''static bool smmuBypassStream (uint16_t stream, OSSharedPtr<IO
   gRootDiagnostic.smmuId1 = read(0x24);
   gRootDiagnostic.smmuId2 = read(0x28);
   gRootDiagnostic.smmuSlot = plan.slot;
-  if (plan.error) { *why = plan.error; return false; }
+  gRootDiagnostic.smr = plan.smr;
+  gRootDiagnostic.s2cr = plan.s2cr;
+  // Preserve the observed route, even when planning refuses it. Inspect only
+  // a valid translating group's bank within the already validated geometry.
+  unsigned observedBank = plan.s2cr & 255U;
+  if ((plan.smr & 0x80000000U) && ((plan.s2cr >> 16) & 3U) == 0 &&
+      observedBank < plan.contextBanks && plan.pages &&
+      (plan.pages + observedBank + 1U) * 4096U <= nabu_ufs::kBoard.smmuBytes) {
+    gRootDiagnostic.cbar = read(0x1000 + 4 * observedBank);
+    gRootDiagnostic.cba2r = read(0x1800 + 4 * observedBank);
+    gRootDiagnostic.sctlr = read((plan.pages + observedBank) * 4096);
+  }
+  if (plan.error) {
+    gRootDiagnostic.result = static_cast<uint32_t>(kIOReturnNotReady);
+    *why = plan.error; return false;
+  }
   const char *failure = configureUfsSmmu(plan, stream, read,
     [smmu](unsigned offset, uint32_t value) {
       write32(smmu, offset, value);
       __asm__ volatile ("dsb sy" ::: "memory");
     });
-  if (failure) { *why = failure; return false; }
+  if (failure) {
+    gRootDiagnostic.result = static_cast<uint32_t>(kIOReturnNotReady);
+    *why = failure; return false;
+  }
   report[0] = plan.slot | (plan.bank << 16);
   report[1] = read(0x1000 + 4 * plan.bank);
   report[2] = read((plan.pages + plan.bank) * 4096);

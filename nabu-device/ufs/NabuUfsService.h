@@ -43,6 +43,9 @@ static bool nabuUfsFailure(const char *reason)
         gRootDiagnostic.dbSeen, gRootDiagnostic.isSeen);
   IOLog("UFS CACHED SMMU id1=%08x id2=%08x slot=%u\n",
         gRootDiagnostic.smmuId1, gRootDiagnostic.smmuId2, gRootDiagnostic.smmuSlot);
+  IOLog("UFS CACHED ROUTE smr=%08x s2cr=%08x cbar=%08x sctlr=%08x cba2r=%08x\n",
+        gRootDiagnostic.smr, gRootDiagnostic.s2cr, gRootDiagnostic.cbar,
+        gRootDiagnostic.sctlr, gRootDiagnostic.cba2r);
   return false;
 }
 
