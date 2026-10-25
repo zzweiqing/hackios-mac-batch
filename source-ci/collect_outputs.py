@@ -203,6 +203,7 @@ def main():
                 'systemos_policy': prepared.get('systemos_policy'),
                 'second_static_trust_cache': prepared.get('second_static_trust_cache', False),
                 'owner_cache_carrier': prepared.get('owner_cache_carrier'),
+                'owner_boot_manifest': prepared.get('owner_boot_manifest'),
                 'ufs_passive_only': prepared.get('ufs_passive_only', False),
                 'ufs_read_only': prepared.get('ufs_read_only', False),
                 'hardware_tested': False, 'apple_launchd_executed': False}
