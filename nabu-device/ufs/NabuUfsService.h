@@ -68,10 +68,13 @@ bool NativeUfs::start(IOService *provider)
       !nabuUfsResourcesMatch(r)) return nabuUfsFailure("provider resource contract");
   native_ufs_readonly_stage = 2;
   IOLog("NABU UFS READONLY v1 provider accepted; checking GCC before HC\n");
+  IOLog("NABU UFS TRACE gcc-map begin\n");
   OSSharedPtr<IOMemoryMap> clockMap;
   uintptr_t gcc = mapPhys(r.gcc[0], r.gcc[1], clockMap);
   if (!gcc) return nabuUfsFailure("GCC map");
+  IOLog("NABU UFS TRACE gcc-map ok\n");
   native_ufs_readonly_stage = 3;
+  IOLog("NABU UFS TRACE gcc-read begin\n");
   const auto &b = nabu_ufs::kBoard;
   uint32_t gdsc = read32(gcc, b.gdscr - 0x77000);
   native_ufs_readonly_gdsc = gdsc;
@@ -79,7 +82,9 @@ bool NativeUfs::start(IOService *provider)
   native_ufs_readonly_axi = axi;
   uint32_t ahb = read32(gcc, b.ahbEnable - 0x77000);
   native_ufs_readonly_ahb = ahb;
+  IOLog("NABU UFS TRACE gcc-read gdsc=%08x axi=%08x ahb=%08x\n", gdsc, axi, ahb);
   if (!nabuUfsClocksReady(gdsc, axi, ahb)) return nabuUfsFailure("UFS power/bus clocks unavailable");
+  IOLog("NABU UFS TRACE clocks-ready; startReadOnly\n");
   native_ufs_readonly_stage = 4;
   return startReadOnly(provider);
 }
