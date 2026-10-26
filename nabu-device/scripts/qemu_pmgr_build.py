@@ -66,7 +66,9 @@ def binding_assembly(bindings):
     return text
 
 
-def build(root, record, out, compile_command, original_kernel):
+def build(root, record, out, compile_command, original_kernel,
+          source_name='QemuBootPMGR.cpp', prefix='QemuBootPMGR',
+          aon_storage='volatile QEMU boot-session state'):
     sys.path.insert(0, str(root / 'kits/NativePrelink'))
     import native_prelink
     out.mkdir(parents=True, exist_ok=False)
@@ -74,16 +76,16 @@ def build(root, record, out, compile_command, original_kernel):
     bindings = original_bindings(original_kernel.read_bytes(), native_prelink)
     assembly = out / 'original-bindings.S'
     assembly.write_text(binding_assembly(bindings), encoding='utf-8')
-    source = Path(os.environ['UNIXNU_DEVICE']) / 'platform/QemuBootPMGR.cpp'
-    obj = out / 'QemuBootPMGR.o'
+    source = Path(os.environ['UNIXNU_DEVICE']) / 'platform' / source_name
+    obj = out / (prefix + '.o')
     command = compile_command(record, source, obj)
     command += ['-I', str(out), '-I', str(root / '.cache/xnu-work/osfmk')]
     (out / 'compile-command.json').write_text(json.dumps(command, indent=2) + '\n', encoding='utf-8')
     subprocess.run(command, cwd=record['directory'], check=True)
     # Register the subclass only after the original parent kext has started.
-    late = out / 'QemuBootPMGR.late.o'
+    late = out / (prefix + '.late.o')
     subprocess.run(['llvm-objcopy', '--remove-section=__DATA,__mod_init_func',
-                    '--globalize-symbol=__GLOBAL__sub_I_QemuBootPMGR.cpp', str(obj), str(late)], check=True)
+                    '--globalize-symbol=__GLOBAL__sub_I_' + source_name, str(obj), str(late)], check=True)
     alias_obj = out / 'original-bindings.o'
     subprocess.run(['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-c',
                     str(assembly), '-o', str(alias_obj)], check=True)
@@ -92,7 +94,8 @@ def build(root, record, out, compile_command, original_kernel):
         'original_kernel': str(original_kernel),
         'bindings': {name: hex(address) if isinstance(address, int) else address
                      for name, address in bindings.items()},
-        'aon_slots': [320, 321], 'aon_storage': 'volatile QEMU boot-session state',
+        'aon_slots': [320, 321], 'aon_storage': aon_storage,
         'hardware_power_implemented': False, 'runtime_qualified': False,
+        'source': source_name,
     }, indent=2) + '\n', encoding='utf-8')
     return [late, alias_obj]

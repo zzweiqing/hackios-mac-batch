@@ -7,13 +7,23 @@ from pathlib import Path
 import re
 import subprocess
 import tomllib
+from nabu_graphics_startup import LEGACY_PATCH, retime_graphics_patches
+from nabu_data_skeleton import prepare_data_skeleton
+from nabu_logging_build import enable_logging
 
 UPSTREAM = '245aca1a9ec5b730b1cad80fade295800d2981f1'
 PATCH = 'patches/xnu/offline-component-load-probes.patch'
 PATCH_SHA256 = '1f228c5c6d8387b13cd8e0964ddeb56c858a5dae16478f3ed2baae8a2e4da1e9'
 INPUT_SHA256 = 'fce1ea205e571c3850e150404fc04f255f1192ba19c68e12497c19b8f87d8994'
+CPU_UI_PROFILE = 'nabu_ufs_cpu_ui_defconfig'
 PROFILES = ('nabu_bootstrap_defconfig', 'nabu_qemu_storage_defconfig', 'nabu_qemu_root_defconfig',
-            'nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig')
+            'nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig',
+            'nabu_ufs_root_defconfig', 'nabu_ufs_data_defconfig', CPU_UI_PROFILE)
+OWNER_PROFILES = ('nabu_qemu_root_defconfig', 'nabu_ufs_root_defconfig',
+                  'nabu_ufs_data_defconfig', CPU_UI_PROFILE)
+UFS_OWNER_PROFILES = ('nabu_ufs_root_defconfig', 'nabu_ufs_data_defconfig', CPU_UI_PROFILE)
+UFS_PROFILES = ('nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig',
+                'nabu_ufs_root_defconfig')
 OWNER_POLICY = {'release': 'nabu-owner-os-21h16-v1', 'asset': 'os-policy.tar.gz',
                 'sha256': '478b9adc9dd57d98a007eb1fa04fd07ff62c1bf2bdec6087fa3997ed11c01452'}
 SYSTEMOS_POLICY = {'release': 'nabu-owner-systemos-21h16-v1', 'asset': 'systemos-policy.tar.gz',
@@ -26,6 +36,13 @@ ROOT_COMPONENTS = ['com.apple.filesystems.apfs',
                    'com.apple.AppleFSCompression.AppleFSCompressionTypeZlib',
                    'com.apple.driver.AppleMobileFileIntegrity',
                    'com.apple.security.sandbox']
+# The CPU UI profile stages the original display family and IOSurface as
+# prelink roots.  The first milestone keeps NATIVE_LEGACY_DISPLAY disabled so
+# the closure and the pass-1 reference candidate can be audited before any
+# display archive is linked.
+GRAPHICS_ROOTS = ['com.apple.iokit.IOSurface',
+                  'com.apple.iokit.IOMobileGraphicsFamily']
+CPU_UI_ROOTS = ROOT_COMPONENTS + GRAPHICS_ROOTS
 
 SECOND_STATIC_TRUST_CACHE_PATCH = '''--- a/config/MASTER.arm64
 +++ b/config/MASTER.arm64
@@ -99,49 +116,140 @@ NABU_TEXT_PATCH = (
 )
 
 
-def select_storage_profile(device, upstream, owner_root=False):
+def owner_ufs_archives(data=False):
+    """Archive producers shared by the hardware UFS owner profiles."""
+    archives = ['build-nabu-owner-root.py', 'build-nabu-virtio.py',
+                'build-nabu-ufs-root.py']
+    if data:
+        archives.append('build-nabu-ram-block.py')
+    return archives
+
+
+def _select_owner_ufs_board(device, profile, roots, data):
+    """Rewrite the bootstrap board for a UFS owner profile."""
+    path = device / 'board.toml'
+    text = path.read_text(encoding='utf-8')
+    old = 'defconfig = "nabu_bootstrap_defconfig"'
+    archive = '  "build-libpthread-kernel.py",'
+    root_line = 'roots = ["com.apple.filesystems.apfs"]'
+    if any(text.count(marker) != 1 for marker in (old, archive, root_line)):
+        raise ValueError('Expected unmodified bootstrap board for UFS owner selection')
+    builders = ''.join(f'\n  "{name}",' for name in owner_ufs_archives(data))
+    text = text.replace(old, f'defconfig = "{profile}"', 1)
+    text = text.replace(archive, archive + builders, 1)
+    text = text.replace(root_line,
+                        f'roots = {json.dumps(roots)}\n'
+                        f'early_security_init = "{AMFI_INIT}"', 1)
+    path.write_text(text, encoding='utf-8')
+
+
+def _apply_owner_ufs_build(upstream, data=False, nabu_pmgr=False):
+    """Apply the pinned hardware-owner build gates to the upstream tree."""
+    build = upstream / 'scripts/build-xnu-4k-baseline.sh'
+    text = build.read_text(encoding='utf-8')
+    replacements = [
+        ('if [ "${XNU_NATIVE_AES:-0}" != 1 ]; then\n'
+         "    echo 'NativeVirtioBlock currently requires the qualified NativeAES/original-storage prelink baseline' >&2",
+         'if [ "$CRYPTO_BOOTSTRAP_MODE" != prelinked ] || [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; then\n'
+         "    echo 'NativeVirtioBlock requires the original crypto/storage prelink closure' >&2"),
+        ('if [ "$OWNER_ROOT_AUDIT" = 1 ] && [ "$OWNER_ROOT_PROBE" != 1 ]; then',
+         'if [ "$OWNER_ROOT_AUDIT" = 1 ] && [ "${XNU_NATIVE_VIRTIO_BLOCK:-0}" != 1 ]; then'),
+        ('if [ "$OWNER_ROOT_PROBE" = 1 ] && {',
+         'if { [ "$OWNER_ROOT_PROBE" = 1 ] || [ "${XNU_OWNER_ROOT_AUDIT:-0}" = 1 ]; } && {'),
+        ('  if [ "$OWNER_ROOT_PROBE" = 1 ]; then\n    VERIFIED_ROOT_ARCHIVE=',
+         '  if [ "$OWNER_ROOT_PROBE" = 1 ] || [ "$OWNER_ROOT_AUDIT" = 1 ]; then\n    VERIFIED_ROOT_ARCHIVE='),
+        ('  "$OWNER_ROOT_PROBE" "${XNU_VERIFIED_ROOT_ARCHIVE:',
+         '  "$((OWNER_ROOT_PROBE | OWNER_ROOT_AUDIT))" "${XNU_VERIFIED_ROOT_ARCHIVE:'),
+    ]
+    if data:
+        # NativeRamBlock only uses libkern SHA-256; this board has the original
+        # prelinked crypto closure, not the optional NativeAES diagnostic.
+        replacements.append((
+            'if [ "${XNU_NATIVE_AES:-0}" != 1 ]; then\n'
+            "    echo 'NativeRamBlock requires the qualified original storage/AES prelink closure' >&2",
+            'if [ "$CRYPTO_BOOTSTRAP_MODE" != prelinked ] || [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; then\n'
+            "    echo 'NativeRamBlock requires the original crypto/storage prelink closure' >&2"))
+    for old, new in replacements:
+        if text.count(old) != 1:
+            raise ValueError(f'Expected one pinned build anchor: {old.splitlines()[0]}')
+        text = text.replace(old, new, 1)
+    build.write_text(text, encoding='utf-8')
+    # Decode the original PMGR kext for the hardware boot-session provider and
+    # expose the selected kernelcache to archive builders.
+    kernel = upstream / 'scripts/unixnu/kernel.py'
+    text = kernel.read_text(encoding='utf-8')
+    anchor = '    build_archives(ctx, env)\n'
+    if text.count(anchor) != 1:
+        raise ValueError('Expected one build_archives anchor in kernel.py')
+    env = "    env['UNIXNU_KERNELCACHE'] = str(ipsw.kernelcache(ctx, ipsw.Ipsw(ctx)))\n"
+    if nabu_pmgr:
+        env += "    env['NABU_BOOT_PMGR'] = '1'\n"
+    kernel.write_text(text.replace(anchor, env + anchor, 1), encoding='utf-8')
+
+
+def select_storage_profile(device, upstream, owner_root=False, data=False):
+    if data:
+        _select_owner_ufs_board(device, 'nabu_ufs_data_defconfig',
+                                ROOT_COMPONENTS, data=True)
+        _apply_owner_ufs_build(upstream, data=True, nabu_pmgr=False)
+        return
     path = device / 'board.toml'
     text = path.read_text(encoding='utf-8')
     profile = 'nabu_qemu_root_defconfig' if owner_root else 'nabu_qemu_storage_defconfig'
-    text = text.replace('defconfig = "nabu_bootstrap_defconfig"', f'defconfig = "{profile}"')
-    builders = ('  "build-nabu-owner-root.py",\n' if owner_root else '') + '  "build-nabu-virtio.py",'
-    text = text.replace('  "build-libpthread-kernel.py",',
-                        '  "build-libpthread-kernel.py",\n' + builders)
+    old = 'defconfig = "nabu_bootstrap_defconfig"'
+    archive = '  "build-libpthread-kernel.py",'
+    root_line = 'roots = ["com.apple.filesystems.apfs"]'
+    if any(text.count(marker) != 1 for marker in (old, archive, root_line)):
+        raise ValueError('Expected unmodified bootstrap board for storage selection')
+    builders = (['build-nabu-owner-root.py'] if owner_root else []) + ['build-nabu-virtio.py']
+    text = text.replace(old, f'defconfig = "{profile}"', 1)
+    text = text.replace(archive,
+                        archive + ''.join(f'\n  "{name}",' for name in builders), 1)
     if owner_root:
-        text = text.replace('roots = ["com.apple.filesystems.apfs"]',
+        text = text.replace(root_line,
                             f'roots = {json.dumps(ROOT_COMPONENTS)}\n'
-                            f'early_security_init = "{AMFI_INIT}"')
+                            f'early_security_init = "{AMFI_INIT}"', 1)
     path.write_text(text, encoding='utf-8')
-    # VirtIO imports IOStorageFamily and SHA256, not NativeAES. Keep the real
-    # original-crypto prerequisite rather than the old sheng feature coupling.
     build = upstream / 'scripts/build-xnu-4k-baseline.sh'
     text = build.read_text(encoding='utf-8')
+    old = ('if [ "${XNU_NATIVE_AES:-0}" != 1 ]; then\n'
+           "    echo 'NativeVirtioBlock currently requires the qualified NativeAES/original-storage prelink baseline' >&2")
+    if text.count(old) != 1:
+        raise ValueError('Expected one NativeVirtioBlock crypto gate')
     text = text.replace(
-        'if [ "${XNU_NATIVE_AES:-0}" != 1 ]; then\n'
-        "    echo 'NativeVirtioBlock currently requires the qualified NativeAES/original-storage prelink baseline' >&2",
+        old,
         'if [ "$CRYPTO_BOOTSTRAP_MODE" != prelinked ] || [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; then\n'
-        "    echo 'NativeVirtioBlock requires the original crypto/storage prelink closure' >&2")
+        "    echo 'NativeVirtioBlock requires the original crypto/storage prelink closure' >&2", 1)
+    build.write_text(text, encoding='utf-8')
     if owner_root:
         # Root binding consumes the real verifier/transport, not the optional
         # crypto diagnostic and its four sample blocks.
-        text = text.replace('if [ "$OWNER_ROOT_AUDIT" = 1 ] && [ "$OWNER_ROOT_PROBE" != 1 ]; then',
-                            'if [ "$OWNER_ROOT_AUDIT" = 1 ] && [ "${XNU_NATIVE_VIRTIO_BLOCK:-0}" != 1 ]; then')
-        text = text.replace('if [ "$OWNER_ROOT_PROBE" = 1 ] && {',
-                            'if { [ "$OWNER_ROOT_PROBE" = 1 ] || [ "${XNU_OWNER_ROOT_AUDIT:-0}" = 1 ]; } && {')
-        text = text.replace('  if [ "$OWNER_ROOT_PROBE" = 1 ]; then\n    VERIFIED_ROOT_ARCHIVE=',
-                            '  if [ "$OWNER_ROOT_PROBE" = 1 ] || [ "$OWNER_ROOT_AUDIT" = 1 ]; then\n    VERIFIED_ROOT_ARCHIVE=')
-        text = text.replace('  "$OWNER_ROOT_PROBE" "${XNU_VERIFIED_ROOT_ARCHIVE:',
-                            '  "$((OWNER_ROOT_PROBE | OWNER_ROOT_AUDIT))" "${XNU_VERIFIED_ROOT_ARCHIVE:')
-    build.write_text(text, encoding='utf-8')
-    if owner_root:
+        text = build.read_text(encoding='utf-8')
+        for old, new in (
+            ('if [ "$OWNER_ROOT_AUDIT" = 1 ] && [ "$OWNER_ROOT_PROBE" != 1 ]; then',
+             'if [ "$OWNER_ROOT_AUDIT" = 1 ] && [ "${XNU_NATIVE_VIRTIO_BLOCK:-0}" != 1 ]; then'),
+            ('if [ "$OWNER_ROOT_PROBE" = 1 ] && {',
+             'if { [ "$OWNER_ROOT_PROBE" = 1 ] || [ "${XNU_OWNER_ROOT_AUDIT:-0}" = 1 ]; } && {'),
+            ('  if [ "$OWNER_ROOT_PROBE" = 1 ]; then\n    VERIFIED_ROOT_ARCHIVE=',
+             '  if [ "$OWNER_ROOT_PROBE" = 1 ] || [ "$OWNER_ROOT_AUDIT" = 1 ]; then\n    VERIFIED_ROOT_ARCHIVE='),
+            ('  "$OWNER_ROOT_PROBE" "${XNU_VERIFIED_ROOT_ARCHIVE:',
+             '  "$((OWNER_ROOT_PROBE | OWNER_ROOT_AUDIT))" "${XNU_VERIFIED_ROOT_ARCHIVE:'),
+        ):
+            if text.count(old) != 1:
+                raise ValueError('Expected one pinned owner-root build anchor')
+            text = text.replace(old, new, 1)
+        build.write_text(text, encoding='utf-8')
         # The native PMGR subclass binds to this exact original kext. Decode the
         # same private input before archive compilation; prelink reuses it.
         kernel = upstream / 'scripts/unixnu/kernel.py'
         text = kernel.read_text(encoding='utf-8')
-        text = text.replace('    build_archives(ctx, env)\n',
-                            "    env['UNIXNU_KERNELCACHE'] = str(ipsw.kernelcache(ctx, ipsw.Ipsw(ctx)))\n"
-                            '    build_archives(ctx, env)\n', 1)
-        kernel.write_text(text, encoding='utf-8')
+        anchor = '    build_archives(ctx, env)\n'
+        if text.count(anchor) != 1:
+            raise ValueError('Expected one build_archives anchor in kernel.py')
+        kernel.write_text(text.replace(
+            anchor,
+            "    env['UNIXNU_KERNELCACHE'] = str(ipsw.kernelcache(ctx, ipsw.Ipsw(ctx)))\n" + anchor,
+            1), encoding='utf-8')
 
 
 def select_ufs_profile(device, read_only=False):
@@ -156,6 +264,23 @@ def select_ufs_profile(device, read_only=False):
     text = text.replace(old, f'defconfig = "{profile}"', 1)
     text = text.replace(archive, archive + f'\n  "{builder}",', 1)
     path.write_text(text, encoding='utf-8')
+
+
+def select_ufs_root_profile(device, upstream):
+    """Hardware UFS windows plus the full owner-verified userland closure."""
+    _select_owner_ufs_board(device, 'nabu_ufs_root_defconfig',
+                            ROOT_COMPONENTS, data=False)
+    _apply_owner_ufs_build(upstream, data=False, nabu_pmgr=True)
+
+
+def select_ufs_cpu_ui_profile(device, upstream):
+    """Owner UFS/Data plus the staged original graphics closure.
+
+    NATIVE_LEGACY_DISPLAY stays disabled in this profile until the 21H16 ABI
+    generator has produced and qualified the display archive.
+    """
+    _select_owner_ufs_board(device, CPU_UI_PROFILE, CPU_UI_ROOTS, data=True)
+    _apply_owner_ufs_build(upstream, data=True, nabu_pmgr=True)
 
 
 def select_ufs_personality(upstream):
@@ -201,20 +326,49 @@ def validate_profile(device):
     name = board['kernel']['defconfig']
     if name not in PROFILES or board['ipsw']['build'] != '21H16':
         raise ValueError('Only the explicit nabu/21H16 profiles are supported')
-    owner_root = name == 'nabu_qemu_root_defconfig'
-    ufs_profile = name in ('nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig')
-    roots = ROOT_COMPONENTS if owner_root else ['com.apple.filesystems.apfs']
+    owner_root = name in OWNER_PROFILES
+    ufs_profile = name in UFS_PROFILES
+    ufs_root = name == 'nabu_ufs_root_defconfig'
+    ufs_data = name == 'nabu_ufs_data_defconfig'
+    ufs_cpu_ui = name == CPU_UI_PROFILE
+    ufs_owner = name in UFS_OWNER_PROFILES
+    roots = (CPU_UI_ROOTS if ufs_cpu_ui else
+             ROOT_COMPONENTS if owner_root else ['com.apple.filesystems.apfs'])
     if board['kernel']['prelink']['roots'] != roots:
         raise ValueError('Profile requires its declared original-component closure')
     if board['kernel']['prelink'].get('early_security_init') != (AMFI_INIT if owner_root else None):
         raise ValueError('Profile requires its declared original security initializer')
     config = (device / 'configs' / name).read_text(encoding='utf-8')
+    lines = config.splitlines()
     disabled_features = ['BOOT_PROGRESS', 'NATIVE_AES',
                          'SOURCE_MOCKFS', 'NATIVE_LEGACY_DISPLAY', 'SHENG_PMGR']
-    if not ufs_profile:
-        disabled_features.append('NATIVE_UFS')
-    else:
-        assignments = [line.split('=', 1)[0] for line in config.splitlines() if line.startswith('CONFIG_')]
+    if ufs_owner:
+        # The hardware profile is the union of the verified owner closure and
+        # both storage symbols; it must not silently lose either side.
+        required = ['CONFIG_XNU_NATIVE_UFS=y', 'CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y',
+                    'CONFIG_XNU_OWNER_ROOT_AUDIT=y', 'CONFIG_XNU_OWNER_ROOT_TRUST=y',
+                    'CONFIG_XNU_TRUST_CACHE_RUNTIME=y', 'CONFIG_XNU_SECOND_STATIC_TRUST_CACHE=y',
+                    'CONFIG_XNU_NATIVE_CS_HASH_CACHE=y', 'CONFIG_XNU_NATIVE_PAN=y',
+                    'CONFIG_XNU_OWNER_CACHE_MOUNT=y', 'CONFIG_XNU_OWNER_CACHE_STARTUP=y',
+                    'CONFIG_XNU_OWNER_BOOT_MANIFEST=y', 'CONFIG_XNU_OWNER_CACHE_CARRIER=y',
+                    'CONFIG_XNU_SOURCE_CORECRYPTO14=y', 'CONFIG_XNU_BUILD_ARCHIVES=y',
+                    'CONFIG_XNU_SOURCE_PTHREAD=y', 'CONFIG_XNU_ARM_DT_PLATFORM=y',
+                    'CONFIG_XNU_ARMCPU=y', 'CONFIG_XNU_NATIVE_ARCH_TIMER=y',
+                    'CONFIG_XNU_DT_PANIC_REGION=y', 'CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"']
+        if ufs_data or ufs_cpu_ui:
+            required += ['CONFIG_XNU_NATIVE_RAM_BLOCK=y', 'CONFIG_XNU_OWNER_DATA_MOUNT=y']
+            uuids = [line for line in lines if line.startswith('CONFIG_XNU_OWNER_DATA_VOLUME_UUID="')]
+            if len(uuids) != 1 or uuids[0] in ('CONFIG_XNU_OWNER_DATA_VOLUME_UUID=""',
+                                               'CONFIG_XNU_OWNER_DATA_VOLUME_UUID="0"'):
+                raise ValueError('UFS Data requires the actual seed APFS volume UUID')
+        if any(line not in lines for line in required):
+            raise ValueError('UFS root requires the full owner closure and both transports')
+        if ufs_root:
+            disabled_features += ['NATIVE_RAM_BLOCK', 'NATIVE_MOBILE_DISPLAY', 'NATIVE_ADRENO']
+        else:
+            disabled_features += ['NATIVE_MOBILE_DISPLAY', 'NATIVE_ADRENO']
+    elif ufs_profile:
+        assignments = [line.split('=', 1)[0] for line in lines if line.startswith('CONFIG_')]
         if len(assignments) != len(set(assignments)):
             raise ValueError('Passive UFS config has duplicate assignments')
         required = ['CONFIG_XNU_NATIVE_UFS=y', 'CONFIG_XNU_SOURCE_CORECRYPTO14=y',
@@ -222,21 +376,27 @@ def validate_profile(device):
                     'CONFIG_XNU_ARM_DT_PLATFORM=y', 'CONFIG_XNU_ARMCPU=y',
                     'CONFIG_XNU_NATIVE_ARCH_TIMER=y', 'CONFIG_XNU_DT_PANIC_REGION=y',
                     'CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"']
-        if any(line not in config.splitlines() for line in required):
+        if any(line not in lines for line in required):
             raise ValueError('Passive UFS requires its enabled class and original crypto closure')
         disabled_features += ['OWNER_ROOT_AUDIT', 'OWNER_ROOT_TRUST', 'VERIFIED_ROOT_PROBE',
                               'NATIVE_RAM_BLOCK', 'NATIVE_MOBILE_DISPLAY', 'NATIVE_ADRENO']
-    if name == 'nabu_bootstrap_defconfig' or ufs_profile:
+    else:
+        disabled_features.append('NATIVE_UFS')
+    if name in ('nabu_bootstrap_defconfig', 'nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig'):
         disabled_features.append('NATIVE_VIRTIO_BLOCK')
     for disabled in disabled_features:
-        if f'CONFIG_XNU_{disabled}=n' not in config.splitlines():
+        if f'CONFIG_XNU_{disabled}=n' not in lines:
             raise ValueError(f'G0 must leave {disabled} disabled')
     expected = ['build-corecrypto-14.py', 'build-corecrypto-14.py --namespace',
                 'build-nabu-platform.py ArmDTPlatform', 'build-nabu-platform.py ArmCpu',
                 'build-libpthread-kernel.py']
-    if name == 'nabu_qemu_root_defconfig':
+    if owner_root:
         expected.append('build-nabu-owner-root.py')
-    if ufs_profile:
+    if ufs_data or ufs_cpu_ui:
+        expected += ['build-nabu-virtio.py', 'build-nabu-ufs-root.py', 'build-nabu-ram-block.py']
+    elif ufs_root:
+        expected += ['build-nabu-virtio.py', 'build-nabu-ufs-root.py']
+    elif ufs_profile:
         expected.append('build-nabu-ufs-readonly.py' if name == 'nabu_ufs_readonly_defconfig' else 'build-nabu-ufs.py')
     elif name != 'nabu_bootstrap_defconfig':
         expected.append('build-nabu-virtio.py')
@@ -251,8 +411,17 @@ def main():
     p.add_argument('--device', type=Path, required=True)
     p.add_argument('--report', type=Path, required=True)
     p.add_argument('--profile', choices=PROFILES, default=PROFILES[0])
+    p.add_argument('--capture-logs', action='store_true', help='Build the explicit RAM/ESP logging capability; writes remain opt-in')
     args = p.parse_args()
-    if args.profile in ('nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig'):
+    if args.capture_logs and args.profile not in UFS_OWNER_PROFILES:
+        raise SystemExit('Log persistence is only qualified for explicit hardware UFS owner profiles')
+    if args.profile == 'nabu_ufs_root_defconfig':
+        select_ufs_root_profile(args.device, args.upstream)
+    elif args.profile == 'nabu_ufs_data_defconfig':
+        select_storage_profile(args.device, args.upstream, owner_root=True, data=True)
+    elif args.profile == CPU_UI_PROFILE:
+        select_ufs_cpu_ui_profile(args.device, args.upstream)
+    elif args.profile in ('nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig'):
         select_ufs_profile(args.device, args.profile == 'nabu_ufs_readonly_defconfig')
     elif args.profile != 'nabu_bootstrap_defconfig':
         select_storage_profile(args.device, args.upstream, args.profile == 'nabu_qemu_root_defconfig')
@@ -264,8 +433,18 @@ def main():
         select_ufs_personality(args.upstream)
     path = args.upstream / PATCH
     result = fixed_patch(path.read_bytes()) + NABU_TEXT_PATCH.encode()
+    graphics_startup = None
+    if args.profile == CPU_UI_PROFILE:
+        legacy_path = args.upstream / LEGACY_PATCH
+        result, legacy_patch = retime_graphics_patches(result, legacy_path.read_bytes())
+        legacy_path.write_bytes(legacy_patch)
+        graphics_startup = {
+            'trigger': 'verified_SystemOS_Data_prepare', 'execution': 'independent_kernel_thread',
+            'before_root_load': False, 'runtime_qualified': False,
+            'late_patch_sha256': hashlib.sha256(legacy_patch).hexdigest(),
+        }
     options = (args.device / 'configs' / args.profile).read_text().splitlines()
-    owner_root = args.profile == 'nabu_qemu_root_defconfig'
+    owner_root = args.profile in OWNER_PROFILES
     second_static = owner_root and 'CONFIG_XNU_SECOND_STATIC_TRUST_CACHE=y' in options
     if second_static:
         result += SECOND_STATIC_TRUST_CACHE_PATCH.encode()
@@ -286,6 +465,10 @@ def main():
             '04769D26-2CA0-4825-B443-E2E5F88300F2', ROOT_VOLUME_UUID)
         mount.write_text(text, encoding='utf-8')
     path.write_bytes(result)
+    data_skeleton = None
+    if args.profile in ('nabu_ufs_data_defconfig', CPU_UI_PROFILE):
+        data_skeleton = prepare_data_skeleton(args.upstream)
+    log_capture = enable_logging(args.upstream, args.device) if args.capture_logs else None
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps({
         'upstream_commit': head, 'profile': board['kernel']['defconfig'],
@@ -295,8 +478,14 @@ def main():
         'input_sha256': INPUT_SHA256, 'runtime_qualified': False,
         'ufs_passive_only': args.profile == 'nabu_ufs_passive_defconfig',
         'ufs_read_only': args.profile == 'nabu_ufs_readonly_defconfig',
-        'owner_policy': OWNER_POLICY if args.profile == 'nabu_qemu_root_defconfig' else None,
-        'systemos_policy': SYSTEMOS_POLICY if args.profile == 'nabu_qemu_root_defconfig' else None,
+        'ufs_root': args.profile == 'nabu_ufs_root_defconfig',
+        'ufs_cpu_ui': args.profile == CPU_UI_PROFILE,
+        'display_roots': GRAPHICS_ROOTS if args.profile == CPU_UI_PROFILE else [],
+        'graphics_startup': graphics_startup,
+        'data_skeleton': data_skeleton,
+        'log_capture': log_capture,
+        'owner_policy': OWNER_POLICY if owner_root else None,
+        'systemos_policy': SYSTEMOS_POLICY if owner_root else None,
         'second_static_trust_cache': second_static,
         'owner_boot_manifest': ({'domain': 'VerifiedRoot.OwnerBootSet.v1',
                                  'root_volume_uuid': ROOT_VOLUME_UUID,

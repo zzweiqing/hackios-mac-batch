@@ -1,31 +1,18 @@
 #!/usr/bin/env python3
 """Build modern read-only VirtIO MMIO against the 21H16 storage class."""
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 
+from nabu_storage_bindings import BINDINGS
+
 spec = importlib.util.spec_from_file_location(
     'platform_builder', Path(__file__).with_name('build-nabu-platform.py'))
 platform = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(platform)
-
-# Same original IOStorageFamily layout as the passing nabu UFS binding.
-# The parent remains Apple's class, not a locally reconstructed substitute.
-BINDINGS = {
-    '__ZTV20IOBlockStorageDevice': 0xfffffff0059644c0,
-    '__ZN20IOBlockStorageDevice10gMetaClassE': 0xfffffff0067751d0,
-    '__ZN20IOBlockStorageDeviceC2EPK11OSMetaClass': 0xfffffff0046ced98,
-    '__ZN20IOBlockStorageDeviceD2Ev': 0xfffffff0046cedb8,
-    '__ZN20IOBlockStorageDevice4initEP12OSDictionary': 0xfffffff0046cee30,
-    '__ZNK20IOBlockStorageDevice11getPropertyEPK8OSSymbol': 0xfffffff0046cee88,
-    '__ZN20IOBlockStorageDevice13setPropertiesEP8OSObject': 0xfffffff0046cef38,
-    '__ZN20IOBlockStorageDevice11requestIdleEv': 0xfffffff0046cf050,
-    '__ZN20IOBlockStorageDevice7doUnmapEP26IOBlockStorageDeviceExtentjj': 0xfffffff0046cf05c,
-    '__ZN20IOBlockStorageDevice13doSetPriorityEP26IOBlockStorageDeviceExtentjh': 0xfffffff0046cf068,
-    '__ZN20IOBlockStorageDevice20doGetProvisionStatusEyyPjP35IOBlockStorageProvisionDeviceExtenty': 0xfffffff0046cf08c,
-}
 
 
 def main():
@@ -72,6 +59,8 @@ def main():
     (out / 'bindings.json').write_text(json.dumps({
         'original_build': '21H16', 'slide': -0x1360000,
         'bindings': {name: hex(value) for name, value in BINDINGS.items()},
+        'compiled_object_sha256': hashlib.sha256(obj.read_bytes()).hexdigest(),
+        'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
         'transport': 'modern-mmio', 'read_only': True,
         'verified_root_enabled': verified, 'runtime_qualified': False,
         'multi_policy_enabled': multi_policy,

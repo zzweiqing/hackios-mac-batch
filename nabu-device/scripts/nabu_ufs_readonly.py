@@ -69,12 +69,9 @@ SMMU_FUNCTION = '''static bool smmuBypassStream (uint16_t stream, OSSharedPtr<IO
 
 BRINGUP_FUNCTION = '''static bool hostBringUp (const char **why)
 {
-  IOLog("NABU UFS TRACE bringup begin\\n");
   if (!hostBeginBringup(why)) return false;
-  IOLog("NABU UFS TRACE ownership begin ok\\n");
   HostPreparedDmaGuard allocation;
   gRootDiagnostic.stage = "controller map";
-  IOLog("NABU UFS TRACE controller-map begin\\n");
   gHost.hc = mapPhys(nabu_ufs::kBoard.hcBase, nabu_ufs::kBoard.hcMapBytes, gHost.hcMap);
   if (!gHost.hc) { *why = "controller map"; return false; }
   gRootDiagnostic.cap = read32(gHost.hc, 0);
@@ -83,10 +80,7 @@ BRINGUP_FUNCTION = '''static bool hostBringUp (const char **why)
       !gRootDiagnostic.version || gRootDiagnostic.version == UINT32_MAX) {
     *why = "invalid UFS controller identity"; return false;
   }
-  IOLog("NABU UFS TRACE controller-map ok cap=%08x ver=%08x\\n",
-        gRootDiagnostic.cap, gRootDiagnostic.version);
   gRootDiagnostic.stage = "DMA allocation";
-  IOLog("NABU UFS TRACE dma-alloc begin\\n");
   gHost.dma = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
     static_cast<IOOptionBits>(kIODirectionInOut) | static_cast<IOOptionBits>(kIOMemoryPhysicallyContiguous) |
     static_cast<IOOptionBits>(kIOMemoryMapperNone), kDmaBytes, 4096);
@@ -100,49 +94,33 @@ BRINGUP_FUNCTION = '''static bool hostBringUp (const char **why)
   if (!gHost.virt || !hostDmaRangeValid(gHost.phys, contiguous, (gRootDiagnostic.cap & 0x01000000) != 0)) {
     *why = "DMA address/contiguity"; return false;
   }
-  IOLog("NABU UFS TRACE dma ok phys=%llx contiguous=%llx\\n",
-        static_cast<unsigned long long>(gHost.phys),
-        static_cast<unsigned long long>(contiguous));
   bzero(gHost.virt, kDmaBytes);
   cacheCivac(gHost.virt, kDmaBytes);
   gRootDiagnostic.stage = "queue ownership";
-  IOLog("NABU UFS TRACE queue-stop begin\\n");
   if (!hostStopQueue(why)) return false;
-  IOLog("NABU UFS TRACE queue-stop ok\\n");
   uint32_t report[3] = {};
   gRootDiagnostic.stage = "SMMU plan/configure";
-  IOLog("NABU UFS TRACE smmu begin\\n");
   if (!smmuBypassStream(nabu_ufs::kBoard.streamId, gHost.smmuMap, report, gHost.phys, kDmaBytes, why)) {
     gHost.poisoned = true; return false;
   }
-  IOLog("NABU UFS TRACE smmu ok slot=%u bank=%u\\n", report[0] & 0xffffU, report[0] >> 16);
   gHost.smmu = gHost.smmuMap->getVirtualAddress();
   uint32_t idr1 = read32(gHost.smmu, 0x24);
   gHost.cb = gHost.smmu + ((1U << (((idr1 >> 28) & 7) + 1)) + (report[0] >> 16)) * 4096;
-  IOLog("NABU UFS TRACE queue-start begin\\n");
   if (!hostStartQueue(why)) return false;
-  IOLog("NABU UFS TRACE queue-start ok\\n");
   gRootDiagnostic.stage = "NOP OUT";
-  IOLog("NABU UFS TRACE nop begin\\n");
   if (hostNop() != kIOReturnSuccess) { *why = "NOP OUT"; return false; }
-  IOLog("NABU UFS TRACE nop ok\\n");
   uint32_t power = 0;
-  IOLog("NABU UFS TRACE power-query begin\\n");
   if (hostQueryRead(3, 2, &power) != kIOReturnSuccess) { *why = "power mode query"; return false; }
   gRootDiagnostic.power = power;
-  IOLog("NABU UFS TRACE power=%08x\\n", power);
   // No START STOP UNIT, reset, link startup or power transition in this path.
   if ((power & 0xff) != 0x11) { *why = "firmware left UFS device inactive"; return false; }
   gRootDiagnostic.stage = "LUN ready";
   for (unsigned attempt = 0; attempt < 20; ++attempt) {
     uint8_t tur[6] = {};
     uint32_t scsi = 0;
-    IOLog("NABU UFS TRACE tur begin attempt=%u\\n", attempt);
     IOReturn status = hostScsi(0, tur, sizeof(tur), false, 0, 200000, &scsi);
-    IOLog("NABU UFS TRACE tur end attempt=%u status=%08x scsi=%x\\n", attempt, status, scsi);
     if (status == kIOReturnSuccess) {
       gRootDiagnostic.stage = "LUN capacity";
-      IOLog("NABU UFS TRACE capacity begin\\n");
       if (hostReadCapacity4k(&gHost.blocks) != kIOReturnSuccess) {
         *why = "READ CAPACITY(10), 4K geometry required"; return false;
       }

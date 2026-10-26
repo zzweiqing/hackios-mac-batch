@@ -72,10 +72,35 @@ def main():
         raise SystemExit(result.stderr.decode('utf-8', errors='replace')[-4000:])
     check_object(obj.read_bytes())
     objects = [obj]
+    stubs = out / 'PmgrPublishStubs.cpp'
+    stubs.write_text(
+        'class IOService;\nclass IORegistryEntry;\n'
+        'extern "C" {\n'
+        '__attribute__((weak)) bool qemu_boot_pmgr_publish (IOService *, IORegistryEntry *) { return false; }\n'
+        '__attribute__((weak)) bool nabu_boot_pmgr_publish (IOService *, IORegistryEntry *) { return false; }\n'
+        '}\n', encoding='utf-8')
+    stubs_obj = out / 'PmgrPublishStubs.o'
+    stubs_command = compile_command(record, stubs, stubs_obj)
+    stubs_command += ['-I', str(root / '.cache/xnu-work/osfmk')]
+    result = subprocess.run(stubs_command, cwd=record['directory'], capture_output=True)
+    (out / 'stubs-compile.log').write_bytes(result.stdout + result.stderr)
+    if result.returncode:
+        raise SystemExit(result.stderr.decode('utf-8', errors='replace')[-4000:])
+    check_object(stubs_obj.read_bytes())
+    objects.append(stubs_obj)
+    boot_pmgr = None
     if original_armio:
         from qemu_pmgr_build import build
-        objects += build(root, record, out / 'qemu-pmgr', compile_command,
-                         Path(os.environ['UNIXNU_KERNELCACHE']))
+        if os.environ.get('NABU_BOOT_PMGR') == '1':
+            boot_pmgr = 'NabuBootPMGR'
+            objects += build(root, record, out / 'nabu-pmgr', compile_command,
+                             Path(os.environ['UNIXNU_KERNELCACHE']),
+                             source_name='NabuBootPMGR.cpp', prefix='NabuBootPMGR',
+                             aon_storage='volatile nabu boot-session AON latch (not power hardware)')
+        else:
+            boot_pmgr = 'QemuBootPMGR'
+            objects += build(root, record, out / 'qemu-pmgr', compile_command,
+                             Path(os.environ['UNIXNU_KERNELCACHE']))
     archive = out / ('lib' + args.component + '.a')
     if archive.exists():
         raise SystemExit('Refuse to reuse an existing platform archive; use a fresh build')
@@ -85,6 +110,7 @@ def main():
         'recipe_sha256': hashlib.sha256(recipe_bytes).hexdigest(),
         'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
         'original_armio_factory_enabled': original_armio,
+        'boot_pmgr': boot_pmgr,
         'architecture': 'arm64', 'deployment': 'iOS 17.0', 'runtime_qualified': False,
     }, indent=2) + '\n', encoding='utf-8')
 

@@ -14,7 +14,15 @@ FACTORY = '''static IOService *createOriginalArmIONub (IORegistryEntry *entry)
 
 '''
 
-NUB = '''    if (entry->getProperty ("armdt,qemu-boot-pmgr") != nullptr) {
+NUB = '''    if (entry->getProperty ("armdt,nabu-boot-pmgr") != nullptr) {
+      if (!nabu_boot_pmgr_publish (this, entry)) {
+        iterator->release ();
+        return false;
+      }
+      count++;
+      continue;
+    }
+    if (entry->getProperty ("armdt,qemu-boot-pmgr") != nullptr) {
       if (!qemu_boot_pmgr_publish (this, entry)) {
         iterator->release ();
         return false;
@@ -61,5 +69,7 @@ def patch_source(text):
     text = text[:first] + NUB + text[last:]
     text = text.replace(method, FACTORY + method, 1)
     return text.replace('extern "C" {\n',
-                        'extern "C" {\nbool qemu_boot_pmgr_publish (IOService *, IORegistryEntry *);\n'
+                        'extern "C" {\n'
+                        '__attribute__((weak)) bool qemu_boot_pmgr_publish (IOService *, IORegistryEntry *);\n'
+                        '__attribute__((weak)) bool nabu_boot_pmgr_publish (IOService *, IORegistryEntry *);\n'
                         'volatile uint64_t armdt_platform_original_armio_registry_id = 0;\n', 1)

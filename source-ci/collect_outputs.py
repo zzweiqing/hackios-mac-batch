@@ -10,6 +10,7 @@ import tarfile
 import sys
 
 from prepare_source import INPUT_SHA256, UPSTREAM
+from nabu_logging_build import qualify_logging_candidate
 
 
 def sha256(path):
@@ -55,7 +56,8 @@ def selected_files(upstream):
         raise ValueError('Refuse a linked build output root')
     files = []
     selected_xnu_names = {'link.filelist', 'all-alias.exp', 'startup.o.json',
-                          'prng_random.o.json', 'IOPlatformExpert.cpo.json', 'KernelConfigTables.cpo.json'}
+                          'prng_random.o.json', 'IOPlatformExpert.cpo.json', 'KernelConfigTables.cpo.json',
+                          'serial_console.o', 'serial_console.o.json', 'pe_kprintf.o', 'pe_kprintf.o.json'}
     report_names = {'report.json', 'bindings.json', 'candidate-bindings.json', 'nabu-ufs-source.json', 'readonly-source.json',
                     'compile-command.json', 'compile-command-namespaced.json',
                     'build-report.json', 'build-report-namespaced.json',
@@ -106,6 +108,12 @@ def selected_files(upstream):
         for path in sorted((storage / 'include').rglob('*.h')):
             add(path, path.relative_to(work))
     add(work / '.config', Path('.config'))
+    for relative in ('tree/build/nabu-log/source-report.json',
+                     'tree/.cache/xnu-work/osfmk/console/serial_console.c',
+                     'tree/.cache/xnu-work/osfmk/console/NabuLogCore.h',
+                     'tree/.cache/xnu-work/osfmk/console/NabuLogFormat.h',
+                     'tree/.cache/xnu-work/pexpert/arm/pe_kprintf.c'):
+        add(work / relative, Path(relative))
     return files
 
 
@@ -121,6 +129,9 @@ def selected_sources(device):
         (device / 'configs/nabu_qemu_root_defconfig', 'device/configs/nabu_qemu_root_defconfig'),
         (device / 'configs/nabu_ufs_passive_defconfig', 'device/configs/nabu_ufs_passive_defconfig'),
         (device / 'configs/nabu_ufs_readonly_defconfig', 'device/configs/nabu_ufs_readonly_defconfig'),
+        (device / 'configs/nabu_ufs_root_defconfig', 'device/configs/nabu_ufs_root_defconfig'),
+        (device / 'configs/nabu_ufs_data_defconfig', 'device/configs/nabu_ufs_data_defconfig'),
+        (device / 'configs/nabu_ufs_cpu_ui_defconfig', 'device/configs/nabu_ufs_cpu_ui_defconfig'),
         (device / 'LICENSE', 'device/LICENSE'),
         (device / 'scripts/build-nabu-platform.py', 'device/scripts/build-nabu-platform.py'),
         (device / 'scripts/armdt_original_provider.py', 'device/scripts/armdt_original_provider.py'),
@@ -146,6 +157,9 @@ def selected_sources(device):
         (workflow_dir / 'unixnu-source.yml', '.github/workflows/unixnu-source.yml'),
     ]
     root = root.resolve()
+    sources += [(p, 'device/ufs/' + p.name) for p in sorted((device / 'ufs').glob('NabuLog*.h'))]
+    sources += [(device / 'scripts/nabu_capture_source.py', 'device/scripts/nabu_capture_source.py'),
+                (source_dir / 'nabu_logging_build.py', 'source-ci/nabu_logging_build.py')]
     for path, _ in sources:
         if (path.is_symlink() or not path.is_file()
                 or not path.resolve().is_relative_to(root)
@@ -206,6 +220,7 @@ def main():
                 'owner_boot_manifest': prepared.get('owner_boot_manifest'),
                 'ufs_passive_only': prepared.get('ufs_passive_only', False),
                 'ufs_read_only': prepared.get('ufs_read_only', False),
+                'log_capture': prepared.get('log_capture'),
                 'hardware_tested': False, 'apple_launchd_executed': False}
     summary = dict(identity, candidate_present=False, candidate_validated=False,
                    ufs_abi_validated=False)
@@ -240,6 +255,9 @@ def main():
                 summary['ufs_abi_validated'] = check_ufs_candidate(
                     args.upstream, args.device, candidate, report, read_only=True)
                 valid = valid and identity['ufs_read_only'] and summary['ufs_abi_validated']
+            if identity.get('log_capture'):
+                manifest['logging_qualification'] = qualify_logging_candidate(args.upstream, candidate)
+                summary['logging_qualified_statically'] = True
             summary['candidate_validated'] = valid
             summary['undefined_symbol_count'] = len(macho['undefined_names'])
             manifest['macho'] = macho

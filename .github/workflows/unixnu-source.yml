@@ -14,6 +14,10 @@ on:
         description: Xcode on macos-26
         required: true
         default: "26.6"
+      capture_logs:
+        description: Build RAM console capture and gated preallocated ESP log writer (off by default)
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -42,13 +46,16 @@ jobs:
         env:
           REQUESTED_REF: ${{ inputs.unixnu_ref }}
           REQUESTED_CONFIG: ${{ inputs.defconfig }}
+          CAPTURE_LOGS: ${{ inputs.capture_logs }}
         run: |
           test "$REQUESTED_REF" = 245aca1a9ec5b730b1cad80fade295800d2981f1
           test -d "$DEVELOPER_DIR"
           git clone --quiet --no-checkout https://github.com/UniXNU/UniXNU.git unixnu
           git -C unixnu fetch --quiet origin "$REQUESTED_REF"
           git -C unixnu checkout --quiet --detach "$REQUESTED_REF"
-          python3 source-ci/prepare_source.py --upstream unixnu --device nabu-device --profile "$REQUESTED_CONFIG" --report "$RUNNER_TEMP/source-prepare.json"
+          log_args=()
+          if [ "$CAPTURE_LOGS" = true ]; then log_args+=(--capture-logs); fi
+          python3 source-ci/prepare_source.py --upstream unixnu --device nabu-device --profile "$REQUESTED_CONFIG" --report "$RUNNER_TEMP/source-prepare.json" "${log_args[@]}"
       - name: Fetch the pinned private small input
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
@@ -63,7 +70,7 @@ jobs:
           echo "SOURCE_INPUT_SHA256=$actual" >> "$GITHUB_ENV"
           echo "UNIXNU_IPSW=$RUNNER_TEMP/ipsw-21h16-small.zip" >> "$GITHUB_ENV"
       - name: Fetch the private 21H16 OS owner policy
-        if: inputs.defconfig == 'nabu_qemu_root_defconfig'
+        if: contains(fromJSON('["nabu_qemu_root_defconfig","nabu_ufs_root_defconfig","nabu_ufs_data_defconfig","nabu_ufs_cpu_ui_defconfig"]'), inputs.defconfig)
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
           PRIVATE_INPUTS_REPO: ${{ vars.PRIVATE_INPUTS_REPO }}
@@ -76,7 +83,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/owner-policy-download/os-policy.tar.gz" -C "$RUNNER_TEMP/owner-policy"
           echo "UNIXNU_OWNER_POLICY=$RUNNER_TEMP/owner-policy" >> "$GITHUB_ENV"
       - name: Fetch the private 21H16 SystemOS owner policy
-        if: inputs.defconfig == 'nabu_qemu_root_defconfig'
+        if: contains(fromJSON('["nabu_qemu_root_defconfig","nabu_ufs_root_defconfig","nabu_ufs_data_defconfig","nabu_ufs_cpu_ui_defconfig"]'), inputs.defconfig)
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
           PRIVATE_INPUTS_REPO: ${{ vars.PRIVATE_INPUTS_REPO }}
