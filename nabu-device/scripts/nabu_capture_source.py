@@ -165,7 +165,7 @@ def patch_user_exception(text):
     Use task's cached telemetry fields: no shared-region locks, user memory
     reads, disk I/O or exception handling changes on this path.
     """
-    marker = '/* NABU_CAPTURE_V2_5 SpringBoard exception observation */'
+    marker = '/* NABU_CAPTURE_V2_6 SpringBoard exception observation */'
     anchor = ('kern_return_t\nexception_triage(\n'
               '\texception_type_t        exception,\n'
               '\tmach_exception_data_t   code,\n'
@@ -175,10 +175,15 @@ def patch_user_exception(text):
         if text.count(anchor + call) != 1:
             raise ValueError('Exception observer source drift')
         return text
+    if 'NABU_CAPTURE_V2_5 SpringBoard exception observation' in text:
+        raise ValueError('Use a fresh XNU tree for the panic-state observer upgrade')
     helper = r'''
-/* NABU_CAPTURE_V2_5 SpringBoard exception observation */
+/* NABU_CAPTURE_V2_6 SpringBoard exception observation */
 #if defined(__arm64__) && defined(MACH_BSD)
 #include <arm/thread.h>
+static unsigned nabu_exc_calls, nabu_exc_target, nabu_exc_valid;
+static unsigned nabu_exc_pid;
+static uint64_t nabu_exc_pc, nabu_exc_esr;
 __attribute__((noinline)) void
 nabu_trace_user_exception(exception_type_t exception, mach_exception_data_t code,
     mach_msg_type_number_t codeCnt)
@@ -186,12 +191,18 @@ nabu_trace_user_exception(exception_type_t exception, mach_exception_data_t code
     int enabled = 0;
     PE_parse_boot_argn("nabu-exit-trace", &enabled, sizeof(enabled));
     if (!enabled) return;
+    __atomic_fetch_add(&nabu_exc_calls, 1, __ATOMIC_RELAXED);
     task_t task = current_task();
     struct proc *p = get_bsdtask_info(task);
     if (!p || strcmp(proc_name_address(p), "SpringBoard")) return;
+    __atomic_fetch_add(&nabu_exc_target, 1, __ATOMIC_RELAXED);
     thread_t thread = current_thread();
     arm_saved_state_t *ss = get_user_regs(thread);
     if (!ss || !is_saved_state64(ss) || (get_saved_state_cpsr(ss) & 0x1f)) return;
+    __atomic_store_n(&nabu_exc_pid, (unsigned)proc_selfpid(), __ATOMIC_RELAXED);
+    __atomic_store_n(&nabu_exc_pc, get_saved_state_pc(ss), __ATOMIC_RELAXED);
+    __atomic_store_n(&nabu_exc_esr, get_saved_state_esr(ss), __ATOMIC_RELAXED);
+    __atomic_fetch_add(&nabu_exc_valid, 1, __ATOMIC_RELAXED);
     printf("NABU EXC comm=SpringBoard pid=%d tid=%llu type=%d count=%u code0=0x%llx code1=0x%llx\n",
         proc_selfpid(), (unsigned long long)thread_tid(thread), exception, codeCnt,
         (unsigned long long)(codeCnt > 0 ? code[0] : 0),
@@ -208,13 +219,55 @@ nabu_trace_user_exception(exception_type_t exception, mach_exception_data_t code
         uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
         uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]);
 }
+/* Called only at the already-selected SpringBoard error-exit panic. This
+ * reports the exiting thread's saved state, which may differ from the
+ * original fault state. Entry counters and last-entry PID keep that boundary
+ * explicit. No user dereference, new disk writes, or shared-region locks. */
+__attribute__((noinline, noreturn)) void
+nabu_trace_exit_panic(int rv, int pid)
+{
+    task_t task = current_task();
+    arm_saved_state_t *ss = get_user_regs(current_thread());
+    unsigned state_ok = proc_selfpid() == pid && ss && is_saved_state64(ss);
+    const unsigned char *uuid = task->task_shared_region_uuid;
+    panic("NABU SB pid=%d rv=%x state=%u hits=%u/%u/%u entrypid=%u entrypc=%llx entryesr=%llx "
+        "exitpc=%llx lr=%llx esr=%x cpsr=%x slide=%x uuid=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+        pid, rv, state_ok,
+        __atomic_load_n(&nabu_exc_calls, __ATOMIC_RELAXED),
+        __atomic_load_n(&nabu_exc_target, __ATOMIC_RELAXED),
+        __atomic_load_n(&nabu_exc_valid, __ATOMIC_RELAXED),
+        __atomic_load_n(&nabu_exc_pid, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&nabu_exc_pc, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&nabu_exc_esr, __ATOMIC_RELAXED),
+        (unsigned long long)(state_ok ? get_saved_state_pc(ss) : 0),
+        (unsigned long long)(state_ok ? get_saved_state_lr(ss) : 0),
+        state_ok ? get_saved_state_esr(ss) : 0, state_ok ? get_saved_state_cpsr(ss) : 0,
+        task->task_shared_region_slide,
+        uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
+        uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]);
+}
 #else
 static void nabu_trace_user_exception(exception_type_t exception __unused,
     mach_exception_data_t code __unused, mach_msg_type_number_t codeCnt __unused) {}
+__attribute__((noreturn)) void nabu_trace_exit_panic(int rv, int pid)
+{ panic("NABU SB pid=%d rv=%x saved state unavailable", pid, rv); }
 #endif
 
 '''
     return replace_once(text, anchor, helper + anchor + call)
+
+
+def patch_exit_panic_state(text):
+    marker = '/* NABU_CAPTURE_V2_6 existing error-exit panic state */'
+    if marker in text:
+        return text
+    anchor = '\t\tpanic("%s: Process %s with pid %d exited on error with code 0x%x.",\n'
+    snippet = ('\t\t' + marker + '\n'
+               '\t\tif (nabu_exit_trace && !strcmp(p->p_comm, "SpringBoard")) {\n'
+               '\t\t\textern void nabu_trace_exit_panic(int, int) __attribute__((noreturn));\n'
+               '\t\t\tnabu_trace_exit_panic(rv, proc_getpid(p));\n'
+               '\t\t}\n')
+    return replace_once(text, anchor, snippet + anchor)
 
 
 def apply(root, device):
@@ -229,7 +282,7 @@ def apply(root, device):
             # and no allocator/personality is assumed before it exists.
             ('bsd/kern/bsd_init.c', [patch_bsd_init, patch_bsd_init_cdc]),
             ('bsd/kern/kern_exec.c', [patch_data_mount]),
-            ('bsd/kern/kern_exit.c', [patch_exit_trace]),
+            ('bsd/kern/kern_exit.c', [patch_exit_trace, patch_exit_panic_state]),
             ('osfmk/kern/exception.c', [patch_user_exception])]:
         path = xnu / relative
         result = path.read_text(encoding='utf-8')
@@ -254,6 +307,7 @@ def apply(root, device):
         'user_exception_trace': 'SpringBoard EL0; nabu-exit-trace gated',
         'user_exception_entry': 'nabu_trace_user_exception',
         'user_exception_delivery_unchanged': True,
+        'exit_panic_state': 'existing SpringBoard error-exit panic only; no new panic trigger',
         'data_mount_trace': 'NABU_CAPTURE_V2_3' in (xnu / 'bsd/kern/kern_exec.c').read_text(),
         'data_trace_stages': {'1': 'seed ready', '2': 'mount enter',
                               '3': 'mount returned', '4': 'lookup returned',
