@@ -57,7 +57,8 @@ def selected_files(upstream):
     files = []
     selected_xnu_names = {'link.filelist', 'all-alias.exp', 'startup.o.json',
                           'prng_random.o.json', 'IOPlatformExpert.cpo.json', 'KernelConfigTables.cpo.json',
-                          'serial_console.o', 'serial_console.o.json', 'pe_kprintf.o', 'pe_kprintf.o.json'}
+                          'serial_console.o', 'serial_console.o.json', 'serial_general.o', 'serial_general.o.json',
+                          'pe_kprintf.o', 'pe_kprintf.o.json'}
     report_names = {'report.json', 'bindings.json', 'candidate-bindings.json', 'nabu-ufs-source.json', 'readonly-source.json',
                     'compile-command.json', 'compile-command-namespaced.json',
                     'build-report.json', 'build-report-namespaced.json',
@@ -110,6 +111,7 @@ def selected_files(upstream):
     add(work / '.config', Path('.config'))
     for relative in ('tree/build/nabu-log/source-report.json',
                      'tree/.cache/xnu-work/osfmk/console/serial_console.c',
+                     'tree/.cache/xnu-work/osfmk/console/serial_general.c',
                      'tree/.cache/xnu-work/osfmk/console/NabuLogCore.h',
                      'tree/.cache/xnu-work/osfmk/console/NabuLogFormat.h',
                      'tree/.cache/xnu-work/pexpert/arm/pe_kprintf.c'):
@@ -256,7 +258,8 @@ def main():
                     args.upstream, args.device, candidate, report, read_only=True)
                 valid = valid and identity['ufs_read_only'] and summary['ufs_abi_validated']
             if identity.get('log_capture'):
-                manifest['logging_qualification'] = qualify_logging_candidate(args.upstream, candidate)
+                manifest['logging_qualification'] = qualify_logging_candidate(
+                    args.upstream, candidate, identity['log_capture'].get('source_identity'))
                 summary['logging_qualified_statically'] = True
             summary['candidate_validated'] = valid
             summary['undefined_symbol_count'] = len(macho['undefined_names'])

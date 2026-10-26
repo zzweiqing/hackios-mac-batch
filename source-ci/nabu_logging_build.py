@@ -35,17 +35,20 @@ def enable_logging(upstream, device):
     identity = hashlib.sha256()
     for p in sorted((device / 'ufs').glob('NabuLog*.h')):
         identity.update(p.name.encode() + b'\0' + p.read_bytes())
+    identity.update(b'nabu_capture_source.py\0' + (device / 'scripts/nabu_capture_source.py').read_bytes())
     return {'format': 'NABULOG2', 'recorder': True, 'persistence_default': 'off',
             'write_gate': 'nabu-log=1 + allocation token + runtime GPT/FAT ownership proof',
             'source_identity': identity.hexdigest(), 'runtime_qualified': False}
 
 
-def qualify_logging_candidate(upstream, candidate):
+def qualify_logging_candidate(upstream, candidate, expected_source_identity=None):
     """Bind real hook objects, their UFS calls and final definitions to this build."""
     tree = upstream / 'out/nabu/tree'
     report = json.loads((tree / 'build/native-ufs/build-report.json').read_text())
     if report.get('log_capture') is not True or report.get('log_persistence_default') != 'off':
         raise ValueError('UFS archive does not declare the gated log writer')
+    if expected_source_identity and report.get('logging_source_identity') != expected_source_identity:
+        raise ValueError('Logging archive source identity does not match preparation')
     data = candidate.read_bytes()
     at, symbols = 32, None
     for _ in range(struct.unpack_from('<I', data, 16)[0]):
@@ -58,6 +61,7 @@ def qualify_logging_candidate(upstream, candidate):
     offset, count, strings, extent = symbols
     found = {}
     required = {'_nabu_capture_append', '_nabu_capture_snapshot', '_nabu_capture_copy',
+                '_nabu_console_write_captured',
                 '_nabu_log_writer_state', '_nabu_log_writer_rounds', '_nabu_log_writer_failures'}
     for i in range(count):
         name, kind, _, _, address = struct.unpack_from('<IBBHQ', data, offset + 16 * i)
@@ -76,15 +80,18 @@ def qualify_logging_candidate(upstream, candidate):
         raise ValueError('LLVM object relocation reader is required for log qualification')
     obj = tree / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837'
     paths = {'console': obj / 'osfmk/DEVELOPMENT/serial_console.o',
+             'printbuf': obj / 'osfmk/DEVELOPMENT/serial_general.o',
              'kprintf': obj / 'pexpert/DEVELOPMENT/pe_kprintf.o',
              'ufs': tree / 'build/native-ufs/NativeUfs.o'}
     observations = {}
     for role, path in paths.items():
         result = subprocess.run([objdump, '-r', str(path)], capture_output=True, text=True, check=True)
         calls = [line.strip() for line in result.stdout.splitlines()
-                 if 'ARM64_RELOC_BRANCH26' in line and '_nabu_capture_' in line]
+                 if 'ARM64_RELOC_BRANCH26' in line and
+                 ('_nabu_capture_' in line or '_nabu_console_write_captured' in line)]
         expected = ['_nabu_capture_append'] if role == 'kprintf' else (
-            ['_nabu_capture_snapshot', '_nabu_capture_copy'] if role == 'ufs' else [])
+            ['_nabu_capture_snapshot', '_nabu_capture_copy'] if role == 'ufs' else (
+            ['_nabu_capture_append', '_nabu_console_write_captured'] if role == 'printbuf' else []))
         if any(not any(name in line for line in calls) for name in expected):
             raise ValueError('Logging calls absent from actual ' + role + ' object')
         observations[role] = {'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'calls': calls}

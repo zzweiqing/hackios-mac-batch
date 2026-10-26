@@ -274,6 +274,7 @@ def main():
     cpp.write_text(transform(cpp.read_text(encoding='utf-8')), encoding='utf-8')
     patch_root_headers(source)
     logging = os.environ.get('NABU_CAPTURE_LOG') == '1'
+    logging_identity = None
     if logging:
         text = cpp.read_text(encoding='utf-8')
         anchors = [
@@ -294,6 +295,8 @@ def main():
             content = header.read_bytes()
             (source / header.name).write_bytes(content)
             identity.update(header.name.encode() + b'\0' + content)
+        identity.update(b'nabu_capture_source.py\0' + (device / 'scripts/nabu_capture_source.py').read_bytes())
+        logging_identity = identity.hexdigest()
         (source / 'NabuLogBuild.h').write_text(
             'static const unsigned char nabu_log_build_id[32] = {' +
             ','.join(str(b) for b in identity.digest()) + '};\n', encoding='utf-8')
@@ -348,6 +351,7 @@ def main():
         'direct_windows': True, 'verified_root_enabled': True,
         'readonly_service': False, 'compiled': True, 'linked': False,
         'log_capture': logging, 'log_persistence_default': 'off',
+        'logging_source_identity': logging_identity,
         'hardware_tested': False, 'runtime_qualified': False,
     }, indent=2) + '\n', encoding='utf-8')
 
