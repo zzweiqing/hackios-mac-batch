@@ -69,7 +69,7 @@ def qualify_logging_candidate(upstream, candidate, expected_source_identity=None
     offset, count, strings, extent = symbols
     found = {}
     required = {'_nabu_capture_append', '_nabu_capture_snapshot', '_nabu_capture_copy',
-                '_nabu_console_write_captured',
+                '_nabu_console_write_captured', '_nabu_trace_user_exception',
                 '_nabu_boot_watch_poll', '_nabu_data_mount_progress',
                 '_nabu_log_writer_state', '_nabu_log_writer_rounds', '_nabu_log_writer_failures'}
     for i in range(count):
@@ -95,17 +95,20 @@ def qualify_logging_candidate(upstream, candidate, expected_source_identity=None
     source_report = json.loads((tree / 'build/nabu-log/source-report.json').read_text())
     if source_report.get('data_mount_trace'):
         paths['data_mount'] = obj / 'bsd/DEVELOPMENT/kern_exec.o'
+    paths['user_exception'] = obj / 'osfmk/DEVELOPMENT/exception.o'
     observations = {}
     for role, path in paths.items():
         result = subprocess.run([objdump, '-r', str(path)], capture_output=True, text=True, check=True)
         calls = [line.strip() for line in result.stdout.splitlines()
                  if 'ARM64_RELOC_BRANCH26' in line and
                  any(name in line for name in ('_nabu_capture_', '_nabu_console_write_captured',
-                                               '_nabu_boot_watch_poll', '_nabu_data_mount_progress'))]
-        expected = ['_nabu_data_mount_progress'] if role == 'data_mount' else (
+                                               '_nabu_boot_watch_poll', '_nabu_data_mount_progress',
+                                               '_nabu_trace_user_exception'))]
+        expected = ['_nabu_trace_user_exception'] if role == 'user_exception' else (
+            ['_nabu_data_mount_progress'] if role == 'data_mount' else (
             ['_nabu_capture_append'] if role == 'kprintf' else (
             ['_nabu_capture_snapshot', '_nabu_capture_copy', '_nabu_boot_watch_poll'] if role == 'ufs' else (
-            ['_nabu_capture_append', '_nabu_console_write_captured'] if role == 'printbuf' else [])))
+            ['_nabu_capture_append', '_nabu_console_write_captured'] if role == 'printbuf' else []))))
         if any(not any(name in line for line in calls) for name in expected):
             raise ValueError('Logging calls absent from actual ' + role + ' object')
         observations[role] = {'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'calls': calls}

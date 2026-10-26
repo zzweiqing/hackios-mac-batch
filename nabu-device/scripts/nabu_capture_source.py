@@ -159,6 +159,64 @@ def patch_exit_trace(text):
     return text.replace(anchor, anchor + snippet, 1)
 
 
+def patch_user_exception(text):
+    """Observe the saved EL0 state before exception delivery changes it.
+
+    Use task's cached telemetry fields: no shared-region locks, user memory
+    reads, disk I/O or exception handling changes on this path.
+    """
+    marker = '/* NABU_CAPTURE_V2_5 SpringBoard exception observation */'
+    anchor = ('kern_return_t\nexception_triage(\n'
+              '\texception_type_t        exception,\n'
+              '\tmach_exception_data_t   code,\n'
+              '\tmach_msg_type_number_t  codeCnt)\n{\n')
+    call = '\tnabu_trace_user_exception(exception, code, codeCnt);\n'
+    if marker in text:
+        if text.count(anchor + call) != 1:
+            raise ValueError('Exception observer source drift')
+        return text
+    helper = r'''
+/* NABU_CAPTURE_V2_5 SpringBoard exception observation */
+#if defined(__arm64__) && defined(MACH_BSD)
+#include <arm/thread.h>
+__attribute__((noinline)) void
+nabu_trace_user_exception(exception_type_t exception, mach_exception_data_t code,
+    mach_msg_type_number_t codeCnt)
+{
+    int enabled = 0;
+    PE_parse_boot_argn("nabu-exit-trace", &enabled, sizeof(enabled));
+    if (!enabled) return;
+    task_t task = current_task();
+    struct proc *p = get_bsdtask_info(task);
+    if (!p || strcmp(proc_name_address(p), "SpringBoard")) return;
+    thread_t thread = current_thread();
+    arm_saved_state_t *ss = get_user_regs(thread);
+    if (!ss || !is_saved_state64(ss) || (get_saved_state_cpsr(ss) & 0x1f)) return;
+    printf("NABU EXC comm=SpringBoard pid=%d tid=%llu type=%d count=%u code0=0x%llx code1=0x%llx\n",
+        proc_selfpid(), (unsigned long long)thread_tid(thread), exception, codeCnt,
+        (unsigned long long)(codeCnt > 0 ? code[0] : 0),
+        (unsigned long long)(codeCnt > 1 ? code[1] : 0));
+    printf("NABU EXC pc=0x%llx lr=0x%llx esr=0x%x cpsr=0x%x\n",
+        (unsigned long long)get_saved_state_pc(ss),
+        (unsigned long long)get_saved_state_lr(ss), get_saved_state_esr(ss), get_saved_state_cpsr(ss));
+    printf("NABU EXC sp=0x%llx fp=0x%llx cache_slide=0x%x valid=%u\n",
+        (unsigned long long)get_saved_state_sp(ss),
+        (unsigned long long)get_saved_state_fp(ss), task->task_shared_region_slide,
+        task->task_shared_region_slide != (uint32_t)-1);
+    const unsigned char *uuid = task->task_shared_region_uuid;
+    printf("NABU EXC cache_uuid=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",
+        uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
+        uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]);
+}
+#else
+static void nabu_trace_user_exception(exception_type_t exception __unused,
+    mach_exception_data_t code __unused, mach_msg_type_number_t codeCnt __unused) {}
+#endif
+
+'''
+    return replace_once(text, anchor, helper + anchor + call)
+
+
 def apply(root, device):
     xnu = root / '.cache/xnu-work'
     changed = {}
@@ -171,7 +229,8 @@ def apply(root, device):
             # and no allocator/personality is assumed before it exists.
             ('bsd/kern/bsd_init.c', [patch_bsd_init, patch_bsd_init_cdc]),
             ('bsd/kern/kern_exec.c', [patch_data_mount]),
-            ('bsd/kern/kern_exit.c', [patch_exit_trace])]:
+            ('bsd/kern/kern_exit.c', [patch_exit_trace]),
+            ('osfmk/kern/exception.c', [patch_user_exception])]:
         path = xnu / relative
         result = path.read_text(encoding='utf-8')
         for transform in transforms:
@@ -192,6 +251,9 @@ def apply(root, device):
         'heartbeat_boot_arg_gated': True, 'heartbeat_read_only': True,
         'writer_counter_watch': True,
         'exit_trace': True,
+        'user_exception_trace': 'SpringBoard EL0; nabu-exit-trace gated',
+        'user_exception_entry': 'nabu_trace_user_exception',
+        'user_exception_delivery_unchanged': True,
         'data_mount_trace': 'NABU_CAPTURE_V2_3' in (xnu / 'bsd/kern/kern_exec.c').read_text(),
         'data_trace_stages': {'1': 'seed ready', '2': 'mount enter',
                               '3': 'mount returned', '4': 'lookup returned',

@@ -58,7 +58,9 @@ def selected_files(upstream):
     selected_xnu_names = {'link.filelist', 'all-alias.exp', 'startup.o.json',
                           'prng_random.o.json', 'IOPlatformExpert.cpo.json', 'KernelConfigTables.cpo.json',
                           'serial_console.o', 'serial_console.o.json', 'serial_general.o', 'serial_general.o.json',
-                          'pe_kprintf.o', 'pe_kprintf.o.json', 'bsd_init.o', 'bsd_init.o.json'}
+                          'pe_kprintf.o', 'pe_kprintf.o.json', 'bsd_init.o', 'bsd_init.o.json',
+                          'kern_exec.o', 'kern_exec.o.json', 'kern_exit.o', 'kern_exit.o.json',
+                          'exception.o', 'exception.o.json'}
     report_names = {'report.json', 'bindings.json', 'candidate-bindings.json', 'nabu-ufs-source.json', 'readonly-source.json',
                     'compile-command.json', 'compile-command-namespaced.json',
                     'build-report.json', 'build-report-namespaced.json',
@@ -119,7 +121,10 @@ def selected_files(upstream):
                      'tree/.cache/xnu-work/osfmk/console/NabuLogCore.h',
                      'tree/.cache/xnu-work/osfmk/console/NabuLogFormat.h',
                      'tree/.cache/xnu-work/pexpert/arm/pe_kprintf.c',
-                     'tree/.cache/xnu-work/bsd/kern/bsd_init.c'):
+                     'tree/.cache/xnu-work/bsd/kern/bsd_init.c',
+                     'tree/.cache/xnu-work/bsd/kern/kern_exec.c',
+                     'tree/.cache/xnu-work/bsd/kern/kern_exit.c',
+                     'tree/.cache/xnu-work/osfmk/kern/exception.c'):
         add(work / relative, Path(relative))
     return files
 
