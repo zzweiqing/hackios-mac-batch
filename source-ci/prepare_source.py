@@ -43,6 +43,21 @@ ROOT_COMPONENTS = ['com.apple.filesystems.apfs',
 GRAPHICS_ROOTS = ['com.apple.iokit.IOSurface',
                   'com.apple.iokit.IOMobileGraphicsFamily']
 CPU_UI_ROOTS = ROOT_COMPONENTS + GRAPHICS_ROOTS
+# Opt-in native text console magnification (boot arg nabu-vc-scale=1..4).
+# The patch is inert without the argument, so no profile gains a dependency.
+VC_TEXT_SCALE = {'name': 'nabu-vc-text-scale.patch',
+                 'argument': 'nabu-vc-scale', 'default': 1, 'maximum': 4,
+                 'sha256': '8d3bc4d998c7e6e8eccd12c87e7425d6a08fbcf0e5b4a39acc2704e4ceb98799'}
+# The pinned upstream 245aca1a predates the additional union lookup patches.
+# Both files are byte-identical to the corresponding UniXNU patches and are
+# only materialized for profiles that enable owner union composition.
+UNION_LOWER_DIRECTORY = {'name': 'nabu-union-lower-directory.patch',
+                         'target': 'patches/xnu/native-union-lower-directory.patch',
+                         'sha256': 'b39e077b190134caae1842d07758795bf15b408eb637701a41b603825e5d563b'}
+UNION_GETATTRLISTBULK = {'name': 'nabu-union-getattrlistbulk.patch',
+                         'target': 'patches/xnu/native-union-getattrlistbulk.patch',
+                         'sha256': 'f5d665fd7250717cfacced8408a0b94f282eb2764e514f61a378f7d085c7a03b'}
+UNION_PATCHES = (UNION_LOWER_DIRECTORY, UNION_GETATTRLISTBULK)
 
 SECOND_STATIC_TRUST_CACHE_PATCH = '''--- a/config/MASTER.arm64
 +++ b/config/MASTER.arm64
@@ -189,9 +204,12 @@ def _apply_owner_ufs_build(upstream, data=False, nabu_pmgr=False):
 
 def select_storage_profile(device, upstream, owner_root=False, data=False):
     if data:
+        # The Data profile boots on hardware; it needs the original ApplePMGR
+        # backend, the same as the UFS root/CPU-UI profiles. QemuBootPMGR is
+        # only for the QEMU storage/root profiles below.
         _select_owner_ufs_board(device, 'nabu_ufs_data_defconfig',
                                 ROOT_COMPONENTS, data=True)
-        _apply_owner_ufs_build(upstream, data=True, nabu_pmgr=False)
+        _apply_owner_ufs_build(upstream, data=True, nabu_pmgr=True)
         return
     path = device / 'board.toml'
     text = path.read_text(encoding='utf-8')
@@ -319,6 +337,36 @@ def fixed_patch(data):
     text = text.replace(hunk, '@@ -478,5 +478,90 @@', 1)
     text = text.replace(start, '+#if defined(XNU_NATIVE_LEGACY_DISPLAY) && XNU_NATIVE_LEGACY_DISPLAY\n' + start, 1)
     return text.replace(end, '+#endif\n' + end, 1).encode('utf-8')
+
+
+def apply_vc_text_scale(result):
+    """Append the pinned native-text-console magnification patch exactly once."""
+    patch = (Path(__file__).resolve().parent / VC_TEXT_SCALE['name']).read_bytes()
+    if hashlib.sha256(patch).hexdigest() != VC_TEXT_SCALE['sha256']:
+        raise SystemExit('Unexpected video-console scale patch')
+    if b'nabu-vc-scale' in result:
+        return result
+    return result + patch
+
+
+def _apply_owner_union_patch(upstream, patch):
+    source = (Path(__file__).resolve().parent / patch['name']).read_bytes()
+    if hashlib.sha256(source).hexdigest() != patch['sha256']:
+        raise SystemExit('Unexpected native union patch: ' + patch['name'])
+    target = upstream / patch['target']
+    if target.exists():
+        if target.read_bytes() != source:
+            raise SystemExit('Upstream native union patch differs from the pinned backport: ' +
+                             patch['target'])
+        return {'patch': patch['target'], 'sha256': patch['sha256']}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(source)
+    return {'patch': patch['target'], 'sha256': patch['sha256']}
+
+
+def apply_owner_union_patches(upstream):
+    """Backport the two union lookup/composition patches missing from the pin."""
+    return [_apply_owner_union_patch(upstream, patch) for patch in UNION_PATCHES]
 
 
 def validate_profile(device):
@@ -464,6 +512,9 @@ def main():
         text = mount.read_text(encoding='utf-8').replace(
             '04769D26-2CA0-4825-B443-E2E5F88300F2', ROOT_VOLUME_UUID)
         mount.write_text(text, encoding='utf-8')
+    owner_union = owner_root and 'CONFIG_XNU_OWNER_UNION_SYSTEMOS=y' in options
+    union_patches = apply_owner_union_patches(args.upstream) if owner_union else None
+    result = apply_vc_text_scale(result)
     path.write_bytes(result)
     data_skeleton = None
     if args.profile in ('nabu_ufs_data_defconfig', CPU_UI_PROFILE):
@@ -484,6 +535,10 @@ def main():
         'graphics_startup': graphics_startup,
         'data_skeleton': data_skeleton,
         'log_capture': log_capture,
+        'vc_text_scale': {'argument': VC_TEXT_SCALE['argument'],
+                          'default': VC_TEXT_SCALE['default'],
+                          'maximum': VC_TEXT_SCALE['maximum'],
+                          'patch_sha256': VC_TEXT_SCALE['sha256']},
         'owner_policy': OWNER_POLICY if owner_root else None,
         'systemos_policy': SYSTEMOS_POLICY if owner_root else None,
         'second_static_trust_cache': second_static,
@@ -492,6 +547,8 @@ def main():
                                  'cache_volume_uuid': CACHE_VOLUME_UUID} if owner_manifest else None),
         'owner_cache_carrier': ({'root_volume_uuid': ROOT_VOLUME_UUID,
                                  'cache_volume_uuid': CACHE_VOLUME_UUID} if owner_carrier else None),
+        'owner_union_systemos': ({**union_patches[0], 'patches': union_patches}
+                                 if union_patches else None),
     }, indent=2) + '\n', encoding='utf-8')
 
 

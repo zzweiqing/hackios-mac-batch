@@ -1,48 +1,118 @@
-"""Provision directories on the verified volatile Data mount before Apple init."""
+"""Provision directories and links on the verified volatile Data mount before Apple init.
+
+The list mirrors the reference Data layout shipped in the 21H16 OS image
+(/private/var on the restore volume), read with apfs-fuse on 2026-10-26:
+modes and numeric owners are the image's, and the two timezone links match
+that image's /Library/Preferences and /usr/share/zoneinfo indirection.
+"""
 import hashlib
 
 from nabu_graphics_startup import _recount_hunks, _replace_once
 
 DATA_PATCH = 'patches/xnu/zzzz-nabu-data-skeleton.patch'
 
-# Parents precede their children. tzinit owns the zoneinfo/icutz symlinks;
-# leave those names to the original userspace dataset initialization.
+# Parents precede their children. The reference image ships /private/var with
+# these entries; services such as init_featureflags reach them through the
+# /Library and /usr/share symlinks on the read-only OS volume.
 DIRECTORIES = (
+    ('audit', 0o700, 0, 0),
+    ('buddy', 0o700, 501, 501),
+    ('containers', 0o755, 0, 0),
+    ('containers/Data', 0o755, 0, 0),
+    ('containers/Data/Application', 0o755, 0, 0),
+    ('containers/Data/System', 0o755, 0, 0),
+    ('containers/Shared', 0o755, 0, 0),
+    ('containers/Shared/SystemGroup', 0o755, 0, 0),
+    ('datamigrator', 0o755, 501, 501),
     ('db', 0o755, 0, 0),
     ('db/dslocal', 0o755, 0, 0),
     ('db/dslocal/nodes', 0o755, 0, 0),
     ('db/dslocal/nodes/Default', 0o755, 0, 0),
-    ('db/dslocal/nodes/Default/users', 0o755, 0, 0),
-    ('db/dslocal/nodes/Default/groups', 0o755, 0, 0),
     ('db/dslocal/nodes/Default/config', 0o755, 0, 0),
-    ('db/timezone', 0o755, 0, 0),
+    ('db/dslocal/nodes/Default/groups', 0o755, 0, 0),
+    ('db/dslocal/nodes/Default/users', 0o755, 0, 0),
     ('db/com.apple.xpc.launchd', 0o755, 0, 0),
+    ('db/com.apple.xpc.roleaccountd.staging', 0o700, 0, 0),
+    ('db/Sandbox', 0o700, 0, 0),
+    ('db/accessoryupdater', 0o751, 278, 278),
+    ('db/analyticsd', 0o750, 263, 263),
+    ('db/astris', 0o755, 245, 245),
+    ('db/biome', 0o751, 501, 501),
+    ('db/com.apple.dt.automationmode', 0o755, 0, 0),
+    ('db/com.apple.findmy.findmybeaconingd', 0o755, 501, 501),
+    ('db/coreml', 0o750, 280, 280),
+    ('db/darwindaemon', 0o750, 284, 284),
+    ('db/datadetectors', 0o711, 257, 257),
+    ('db/diagnostics', 0o751, 272, 272),
+    ('db/diskimagesiod', 0o750, 271, 271),
+    ('db/DumpPanic', 0o755, 0, 0),
+    ('db/eligibilityd', 0o755, 297, 297),
+    ('db/ExtensibleSSO', 0o755, 0, 0),
+    ('db/findmydevice', 0o755, 254, 254),
+    ('db/fpsd', 0o750, 501, 501),
+    ('db/gpsd', 0o700, 267, 267),
+    ('db/knowledgegraphd', 0o750, 279, 279),
+    ('db/lockdown', 0o700, 213, 213),
+    ('db/lsd', 0o755, 501, 501),
+    ('db/mmaintenanced', 0o750, 283, 283),
+    ('db/nearbyd', 0o750, 501, 501),
+    ('db/ondemand', 0o755, 249, 249),
+    ('db/os_eligibility', 0o755, 297, 297),
+    ('db/reportmemoryexception', 0o750, 269, 269),
+    ('db/rmd', 0o750, 277, 277),
+    ('db/sysdiagnose', 0o755, 0, 0),
+    ('db/systemstats', 0o755, 0, 0),
+    ('db/timed', 0o750, 266, 266),
+    ('db/timezone', 0o755, 0, 0),
+    ('db/UpdateMetrics', 0o777, 501, 501),
+    ('dextcores', 0o755, 270, 270),
+    ('empty', 0o755, 0, 3),
+    ('folders', 0o755, 0, 0),
+    ('hardware', 0o755, 0, 0),
+    ('installd', 0o755, 33, 33),
     ('keybags', 0o700, 0, 0),
     ('keybags/backup', 0o700, 0, 0),
+    ('Keychains', 0o755, 64, 0),
     ('log', 0o755, 0, 0),
     ('log/com.apple.xpc.launchd', 0o755, 0, 0),
-    ('run', 0o755, 0, 0),
-    ('tmp', 0o1777, 0, 0),
-    ('mobile', 0o755, 501, 501),
-    ('mobile/Library', 0o755, 501, 501),
-    ('mobile/Library/Preferences', 0o755, 501, 501),
-    ('mobile/Library/Caches', 0o755, 501, 501),
-    ('mobile/Library/Logs', 0o755, 501, 501),
+    ('logs', 0o755, 0, 0),
+    ('Managed Preferences', 0o755, 0, 0),
+    ('Managed Preferences/mobile', 0o755, 501, 501),
+    ('mobile', 0o711, 501, 501),
     ('mobile/Containers', 0o755, 501, 501),
     ('mobile/Documents', 0o755, 501, 501),
+    ('mobile/Library', 0o755, 501, 501),
+    ('mobile/Library/Caches', 0o755, 501, 501),
+    ('mobile/Library/Logs', 0o755, 501, 501),
+    ('mobile/Library/Preferences', 0o755, 501, 501),
     ('mobile/Media', 0o755, 501, 501),
     ('mobile/tmp', 0o700, 501, 501),
-    ('containers', 0o755, 0, 0),
-    ('containers/Data', 0o755, 0, 0),
-    ('containers/Data/System', 0o755, 0, 0),
-    ('containers/Data/Application', 0o755, 0, 0),
-    ('containers/Shared', 0o755, 0, 0),
-    ('containers/Shared/SystemGroup', 0o755, 0, 0),
+    ('MobileAsset', 0o755, 0, 0),
+    ('MobileDevice', 0o755, 0, 0),
+    ('MobileSoftwareUpdate', 0o755, 0, 0),
+    ('msgs', 0o755, 0, 0),
+    ('networkd', 0o755, 24, 0),
+    ('OOPJit', 0o777, 0, 80),
     ('PersonaVolumes', 0o755, 0, 0),
     ('preboot', 0o755, 0, 0),
-    ('root', 0o700, 0, 0),
-    ('Library', 0o755, 0, 0),
-    ('Library/Preferences', 0o755, 0, 0),
+    ('preferences', 0o755, 0, 0),
+    ('protected', 0o755, 0, 0),
+    ('root', 0o755, 0, 0),
+    ('run', 0o775, 0, 1),
+    ('select', 0o755, 0, 0),
+    ('staged_system_apps', 0o755, 501, 501),
+    ('tmp', 0o1777, 0, 0),
+    ('vm', 0o755, 0, 0),
+    ('wireless', 0o755, 25, 25),
+)
+
+# The OS image ships /usr/share/zoneinfo -> /var/db/timezone/zoneinfo and
+# /private/var/db/timezone/localtime -> /var/db/timezone/zoneinfo/US/Pacific.
+# Without the first link both are dangling and tzinit fails its system-partition
+# fallback, so the skeleton creates the pair the restore image expects.
+SYMLINKS = (
+    ('db/timezone/zoneinfo', '/usr/share/zoneinfo.default'),
+    ('db/timezone/localtime', '/var/db/timezone/zoneinfo/US/Pacific'),
 )
 
 AFTER_DATA = '''#if (DEVELOPMENT || DEBUG) && defined(XNU_NATIVE_LEGACY_DISPLAY) && XNU_NATIVE_LEGACY_DISPLAY
@@ -102,6 +172,42 @@ native_owner_data_mkdir(proc_t p, user_addr_t scratch, mount_t data_mount,
 }
 
 static int
+native_owner_data_symlink(proc_t p, user_addr_t scratch, mount_t data_mount,
+    const char *path, const char *target)
+{
+	vfs_context_t ctx = vfs_context_current();
+	vnode_t vp = NULLVP;
+	int error = vnode_lookup(path, VNODE_LOOKUP_NOFOLLOW, &vp, ctx);
+	if (!error) {
+		/* Reuse is accepted only for an existing link on the Data mount. */
+		error = vnode_vtype(vp) != VLNK ? EEXIST :
+		    (vnode_mount(vp) != data_mount ? EXDEV : 0);
+		vnode_put(vp);
+		return error;
+	}
+	if (error != ENOENT) return error;
+	char parent[160];
+	if (strlen(path) >= sizeof(parent)) return ENAMETOOLONG;
+	strlcpy(parent, path, sizeof(parent));
+	char *slash = strrchr(parent, '/');
+	if (!slash || slash == parent) return EINVAL;
+	*slash = 0;
+	error = vnode_lookup(parent, VNODE_LOOKUP_NOFOLLOW, &vp, ctx);
+	if (error) return error;
+	error = vnode_vtype(vp) != VDIR ? ENOTDIR :
+	    (vnode_mount(vp) != data_mount ? EXDEV : 0);
+	vnode_put(vp);
+	if (error) return error;
+	struct symlink_args request = {.path = scratch + 0xa00, .link = scratch + 0xb00};
+	int32_t result = 0;
+	/* symlinkat_internal: path_data is the target, link is the new path. */
+	error = copyout(target, request.path, strlen(target) + 1);
+	if (!error) error = copyout(path, request.link, strlen(path) + 1);
+	if (!error) error = symlink(p, &request, &result);
+	return error;
+}
+
+static int
 native_owner_data_skeleton(proc_t p, user_addr_t scratch, mount_t data_mount)
 {
 	static const struct {
@@ -112,6 +218,12 @@ native_owner_data_skeleton(proc_t p, user_addr_t scratch, mount_t data_mount)
 	} dirs[] = {
 __DIRECTORIES__
 	};
+	static const struct {
+		const char *path;
+		const char *target;
+	} links[] = {
+__SYMLINKS__
+	};
 	for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); ++i) {
 		int error = native_owner_data_mkdir(p, scratch, data_mount,
 		    dirs[i].path, dirs[i].mode, dirs[i].uid, dirs[i].gid);
@@ -120,7 +232,17 @@ __DIRECTORIES__
 			return error;
 		}
 	}
-	printf("NABU DATA: skeleton ready dirs=%lu\n", (unsigned long)(sizeof(dirs) / sizeof(dirs[0])));
+	for (size_t i = 0; i < sizeof(links) / sizeof(links[0]); ++i) {
+		int error = native_owner_data_symlink(p, scratch, data_mount,
+		    links[i].path, links[i].target);
+		if (error) {
+			printf("NABU DATA: skeleton link failed path=%s error=%d\n", links[i].path, error);
+			return error;
+		}
+	}
+	printf("NABU DATA: skeleton ready dirs=%lu links=%lu\n",
+	    (unsigned long)(sizeof(dirs) / sizeof(dirs[0])),
+	    (unsigned long)(sizeof(links) / sizeof(links[0])));
 	return 0;
 }
 
@@ -130,7 +252,10 @@ __DIRECTORIES__
 def helper_source():
     rows = '\n'.join(f'\t\t{{ "/private/var/{path}", 0{mode:o}, {uid}, {gid} }},'
                      for path, mode, uid, gid in DIRECTORIES)
-    return HELPER.replace('__DIRECTORIES__', rows)
+    links = '\n'.join(f'\t\t{{ "/private/var/{path}", "{target}" }},'
+                      for path, target in SYMLINKS)
+    return (HELPER.replace('__DIRECTORIES__', rows)
+            .replace('__SYMLINKS__', links))
 
 
 def add_data_skeleton(text):
@@ -185,4 +310,7 @@ def prepare_data_skeleton(upstream):
     path.write_bytes(after)
     build.write_text(text, encoding='utf-8')
     return {'patch': DATA_PATCH, 'after_sha256': hashlib.sha256(after).hexdigest(),
-            'directories': [row[0] for row in DIRECTORIES], 'runtime_qualified': False}
+            'directories': [row[0] for row in DIRECTORIES],
+            'symlinks': [{'path': path, 'target': target} for path, target in SYMLINKS],
+            'reference': '21H16 restore-image /private/var (apfs-fuse, 2026-10-26)',
+            'runtime_qualified': False}

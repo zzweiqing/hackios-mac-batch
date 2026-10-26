@@ -58,7 +58,7 @@ def selected_files(upstream):
     selected_xnu_names = {'link.filelist', 'all-alias.exp', 'startup.o.json',
                           'prng_random.o.json', 'IOPlatformExpert.cpo.json', 'KernelConfigTables.cpo.json',
                           'serial_console.o', 'serial_console.o.json', 'serial_general.o', 'serial_general.o.json',
-                          'pe_kprintf.o', 'pe_kprintf.o.json'}
+                          'pe_kprintf.o', 'pe_kprintf.o.json', 'bsd_init.o', 'bsd_init.o.json'}
     report_names = {'report.json', 'bindings.json', 'candidate-bindings.json', 'nabu-ufs-source.json', 'readonly-source.json',
                     'compile-command.json', 'compile-command-namespaced.json',
                     'build-report.json', 'build-report-namespaced.json',
@@ -97,6 +97,10 @@ def selected_files(upstream):
                     'namespace.h', 'inputs.S', 'NativeVirtioBlock.cpp', 'ArmDTPlatform.cpp',
                     'OriginalPMGRABI.h', 'original-bindings.S'):
                 add(path, path.relative_to(work))
+            elif relative == 'armdt-platform' and path.name in (
+                    'NabuUsbProbe.cpp', 'NabuUsbProbe.o', 'NabuUsbProbe.o.json',
+                    'NabuUsbCaptureCdc.o', 'usb-cdc-compile.log', 'usb-probe-compile.log'):
+                add(path, path.relative_to(work))
             elif relative == 'native-ufs' and (path.suffix in ('.cpp', '.h') or
                                                path.name in ('NativeUfs.o', 'compile.log')):
                 add(path, path.relative_to(work))
@@ -114,7 +118,8 @@ def selected_files(upstream):
                      'tree/.cache/xnu-work/osfmk/console/serial_general.c',
                      'tree/.cache/xnu-work/osfmk/console/NabuLogCore.h',
                      'tree/.cache/xnu-work/osfmk/console/NabuLogFormat.h',
-                     'tree/.cache/xnu-work/pexpert/arm/pe_kprintf.c'):
+                     'tree/.cache/xnu-work/pexpert/arm/pe_kprintf.c',
+                     'tree/.cache/xnu-work/bsd/kern/bsd_init.c'):
         add(work / relative, Path(relative))
     return files
 
@@ -136,6 +141,7 @@ def selected_sources(device):
         (device / 'configs/nabu_ufs_cpu_ui_defconfig', 'device/configs/nabu_ufs_cpu_ui_defconfig'),
         (device / 'LICENSE', 'device/LICENSE'),
         (device / 'scripts/build-nabu-platform.py', 'device/scripts/build-nabu-platform.py'),
+        (device / 'scripts/nabu_armcpu_source.py', 'device/scripts/nabu_armcpu_source.py'),
         (device / 'scripts/armdt_original_provider.py', 'device/scripts/armdt_original_provider.py'),
         (device / 'scripts/qemu_pmgr_build.py', 'device/scripts/qemu_pmgr_build.py'),
         (device / 'platform/QemuBootPMGR.cpp', 'device/platform/QemuBootPMGR.cpp'),
@@ -161,7 +167,10 @@ def selected_sources(device):
     root = root.resolve()
     sources += [(p, 'device/ufs/' + p.name) for p in sorted((device / 'ufs').glob('NabuLog*.h'))]
     sources += [(device / 'scripts/nabu_capture_source.py', 'device/scripts/nabu_capture_source.py'),
+                (device / 'platform/NabuUsbProbe.cpp', 'device/platform/NabuUsbProbe.cpp'),
                 (source_dir / 'nabu_logging_build.py', 'source-ci/nabu_logging_build.py')]
+    sources += [(p, 'device/usb/' + p.name) for p in sorted((device / 'usb').glob('*'))
+                if p.is_file() and (p.suffix in ('.cpp', '.h') or p.name == 'LICENSE')]
     for path, _ in sources:
         if (path.is_symlink() or not path.is_file()
                 or not path.resolve().is_relative_to(root)

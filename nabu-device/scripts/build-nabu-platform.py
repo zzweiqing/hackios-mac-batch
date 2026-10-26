@@ -55,6 +55,18 @@ def main():
     out = root / 'build' / {'ArmDTPlatform': 'armdt-platform', 'ArmCpu': 'armcpu'}[args.component]
     out.mkdir(parents=True, exist_ok=True)
     original_armio = args.component == 'ArmDTPlatform' and os.environ.get('XNU_OWNER_ROOT_TRUST') == '1'
+    timer_binding = None
+    if args.component == 'ArmCpu':
+        from nabu_armcpu_source import patch_source
+        patched = out / 'ArmCpu.cpp'
+        patched.write_text(patch_source(source.read_text(encoding='utf-8')), encoding='utf-8')
+        source = patched
+        timer_binding = {'property': '/arm-io/intc/virtual-timer-intid',
+                         'encoding': 'u32 little endian', 'allowed_range': [16, 31],
+                         'missing_property_default': 27,
+                         'enable_and_dispatch_share_value': True,
+                         'transform_sha256': hashlib.sha256(
+                             Path(__file__).with_name('nabu_armcpu_source.py').read_bytes()).hexdigest()}
     if original_armio:
         from armdt_original_provider import patch_source
         patched = out / 'ArmDTPlatform.cpp'
@@ -88,6 +100,98 @@ def main():
         raise SystemExit(result.stderr.decode('utf-8', errors='replace')[-4000:])
     check_object(stubs_obj.read_bytes())
     objects.append(stubs_obj)
+    usb_probe = None
+    usb_cdc = None
+    heartbeat = None
+    if args.component == 'ArmDTPlatform' and os.environ.get('NABU_CAPTURE_LOG') == '1':
+        # The read-only USB probe shares the console-log build gate. It is not
+        # compiled into minimal/boot profiles and has no effect without the
+        # nabu-usb-probe=1 boot argument.
+        device = Path(os.environ.get('UNIXNU_DEVICE', root)).resolve()
+        probe_source = device / 'platform' / 'NabuUsbProbe.cpp'
+        if not probe_source.is_file():
+            probe_source = root / 'platform' / 'NabuUsbProbe.cpp'
+        if not probe_source.is_file():
+            raise SystemExit('USB probe source is missing')
+        probe_obj = out / 'NabuUsbProbe.o'
+        probe_command = compile_command(record, probe_source, probe_obj)
+        probe_command += ['-I', str(root / '.cache/xnu-work/osfmk'), '-DNABU_USB_PROBE=1']
+        result = subprocess.run(probe_command, cwd=record['directory'], capture_output=True)
+        (out / 'usb-probe-compile.log').write_bytes(result.stdout + result.stderr)
+        if result.returncode:
+            raise SystemExit(result.stderr.decode('utf-8', errors='replace')[-4000:])
+        check_object(probe_obj.read_bytes())
+        objects.append(probe_obj)
+        usb_probe = {
+            'source': str(probe_source),
+            'source_sha256': hashlib.sha256(probe_source.read_bytes()).hexdigest(),
+            'object_sha256': hashlib.sha256(probe_obj.read_bytes()).hexdigest(),
+            'boot_arg': 'nabu-usb-probe=1',
+            'read_only': True,
+            'runtime_qualified': False,
+        }
+        # The CDC entry only starts a worker after IOKitBSDInit. DMA pages remain
+        # static for the lifetime of the kernel, including failed halt paths.
+        cdc_source = device / 'usb' / 'NabuUsbCaptureCdc.cpp'
+        if not cdc_source.is_file():
+            cdc_source = root / 'usb' / 'NabuUsbCaptureCdc.cpp'
+        if not cdc_source.is_file():
+            raise SystemExit('USB capture CDC source is missing')
+        cdc_obj = out / 'NabuUsbCaptureCdc.o'
+        cdc_command = compile_command(record, cdc_source, cdc_obj)
+        cdc_command += ['-I', str(root / '.cache/xnu-work/osfmk')]
+        result = subprocess.run(cdc_command, cwd=record['directory'], capture_output=True)
+        (out / 'usb-cdc-compile.log').write_bytes(result.stdout + result.stderr)
+        if result.returncode:
+            raise SystemExit(result.stderr.decode('utf-8', errors='replace')[-4000:])
+        check_object(cdc_obj.read_bytes())
+        objects.append(cdc_obj)
+        usb_cdc = {
+            'source': str(cdc_source),
+            'source_sha256': hashlib.sha256(cdc_source.read_bytes()).hexdigest(),
+            'object_sha256': hashlib.sha256(cdc_obj.read_bytes()).hexdigest(),
+            'build_gate': 'NABU_CAPTURE_LOG=1',
+            'boot_args': ['nabu-usb-cdc-log=1', 'nabu-usb-cdc-log-init=1',
+                          'nabu-usb-cdc-log-smmu=1', 'nabu-usb-cdc-log-rounds=N'],
+            'call_site': 'bsd_init after bsd_autoconf (IOKitBSDInit)',
+            'dma': 'static BSS pages; ml_vtophys + cache-inhibited ml_io_map; one cache clean before handoff',
+            'worker_thread': True,
+            'headers_sha256': {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                               for p in sorted(cdc_source.parent.glob('*.h'))},
+            'capture_ring': 'NabuLogCore snapshot/copy, 4 MiB capacity',
+            'ioservice_personality': False,
+            'read_only_probe_separate': True,
+            'runtime_qualified': False,
+        }
+        # Liveness counters for the native text console: read-only, one short
+        # line per interval, so a photographed screen distinguishes a silent
+        # running system from a stopped scheduler.
+        heartbeat_source = device / 'platform' / 'NabuHeartbeat.cpp'
+        if not heartbeat_source.is_file():
+            heartbeat_source = root / 'platform' / 'NabuHeartbeat.cpp'
+        if not heartbeat_source.is_file():
+            raise SystemExit('heartbeat source is missing')
+        heartbeat_obj = out / 'NabuHeartbeat.o'
+        heartbeat_command = compile_command(record, heartbeat_source, heartbeat_obj)
+        heartbeat_command += ['-I', str(root / '.cache/xnu-work/osfmk')]
+        result = subprocess.run(heartbeat_command, cwd=record['directory'], capture_output=True)
+        (out / 'heartbeat-compile.log').write_bytes(result.stdout + result.stderr)
+        if result.returncode:
+            raise SystemExit(result.stderr.decode('utf-8', errors='replace')[-4000:])
+        check_object(heartbeat_obj.read_bytes())
+        objects.append(heartbeat_obj)
+        heartbeat = {
+            'source': str(heartbeat_source),
+            'source_sha256': hashlib.sha256(heartbeat_source.read_bytes()).hexdigest(),
+            'object_sha256': hashlib.sha256(heartbeat_obj.read_bytes()).hexdigest(),
+            'build_gate': 'NABU_CAPTURE_LOG=1',
+            'boot_arg': 'nabu-heartbeat=1',
+            'interval_arg': 'nabu-heartbeat-interval=N (5..300 s, default 15)',
+            'call_site': 'bsd_init beside the USB probe (nabu_capture_source.py)',
+            'read_only': True,
+            'mmio': False,
+            'runtime_qualified': False,
+        }
     boot_pmgr = None
     if original_armio:
         from qemu_pmgr_build import build
@@ -111,6 +215,10 @@ def main():
         'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
         'original_armio_factory_enabled': original_armio,
         'boot_pmgr': boot_pmgr,
+        'timer_binding': timer_binding,
+        'usb_probe': usb_probe,
+        'usb_cdc': usb_cdc,
+        'heartbeat': heartbeat,
         'architecture': 'arm64', 'deployment': 'iOS 17.0', 'runtime_qualified': False,
     }, indent=2) + '\n', encoding='utf-8')
 

@@ -296,6 +296,7 @@ def main():
             (source / header.name).write_bytes(content)
             identity.update(header.name.encode() + b'\0' + content)
         identity.update(b'nabu_capture_source.py\0' + (device / 'scripts/nabu_capture_source.py').read_bytes())
+        identity.update(b'NabuHeartbeat.cpp\0' + (device / 'platform/NabuHeartbeat.cpp').read_bytes())
         logging_identity = identity.hexdigest()
         (source / 'NabuLogBuild.h').write_text(
             'static const unsigned char nabu_log_build_id[32] = {' +
