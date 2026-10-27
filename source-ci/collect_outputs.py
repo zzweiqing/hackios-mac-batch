@@ -142,6 +142,7 @@ def selected_sources(device):
         (device / 'configs/nabu_qemu_storage_defconfig', 'device/configs/nabu_qemu_storage_defconfig'),
         (device / 'configs/nabu_qemu_root_defconfig', 'device/configs/nabu_qemu_root_defconfig'),
         (device / 'configs/nabu_qemu_data_defconfig', 'device/configs/nabu_qemu_data_defconfig'),
+        (device / 'configs/nabu_qemu_cpu_ui_defconfig', 'device/configs/nabu_qemu_cpu_ui_defconfig'),
         (device / 'configs/nabu_ufs_passive_defconfig', 'device/configs/nabu_ufs_passive_defconfig'),
         (device / 'configs/nabu_ufs_readonly_defconfig', 'device/configs/nabu_ufs_readonly_defconfig'),
         (device / 'configs/nabu_ufs_root_defconfig', 'device/configs/nabu_ufs_root_defconfig'),
@@ -243,6 +244,7 @@ def main():
                 'ufs_passive_only': prepared.get('ufs_passive_only', False),
                 'ufs_read_only': prepared.get('ufs_read_only', False),
                 'qemu_data': prepared.get('qemu_data', False),
+                'qemu_cpu_ui_reference': prepared.get('qemu_cpu_ui_reference', False),
                 'log_capture': prepared.get('log_capture'),
                 'hardware_tested': False, 'apple_launchd_executed': False}
     summary = dict(identity, candidate_present=False, candidate_validated=False,
@@ -263,10 +265,16 @@ def main():
         try:
             parsed = json.loads(report.read_text(encoding='utf-8'))
             macho = macho_summary(candidate)
+            required_images = {'com.apple.filesystems.apfs', 'com.apple.kec.corecrypto'}
+            if identity['profile'] == 'nabu_qemu_cpu_ui_defconfig':
+                required_images |= {
+                    'com.apple.iokit.IOSurface',
+                    'com.apple.iokit.IOMobileGraphicsFamily',
+                }
             valid = (parsed['candidate_sha256'] == summary['candidate_sha256']
                      and parsed['original_sha256'] == 'f7d1952c7a21633d212eccf288e77444fff0cc86976db5de292f6819c2ffa1b2'
                      and parsed['slide'] == -0x1360000
-                     and {'com.apple.filesystems.apfs', 'com.apple.kec.corecrypto'} <= set(parsed['components'])
+                     and required_images <= set(parsed['components'])
                      and not macho['undefined_names'] and macho['symbol_count'] > 0
                      and manifest.get('actual_upstream_commit') == UPSTREAM
                      and identity['input_verified'] and args.prepare_report.is_file())

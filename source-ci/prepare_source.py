@@ -17,12 +17,14 @@ PATCH_SHA256 = '1f228c5c6d8387b13cd8e0964ddeb56c858a5dae16478f3ed2baae8a2e4da1e9
 INPUT_SHA256 = 'fce1ea205e571c3850e150404fc04f255f1192ba19c68e12497c19b8f87d8994'
 CPU_UI_PROFILE = 'nabu_ufs_cpu_ui_defconfig'
 QEMU_DATA_PROFILE = 'nabu_qemu_data_defconfig'
+QEMU_CPU_UI_PROFILE = 'nabu_qemu_cpu_ui_defconfig'
 PROFILES = ('nabu_bootstrap_defconfig', 'nabu_qemu_storage_defconfig', 'nabu_qemu_root_defconfig',
-            QEMU_DATA_PROFILE,
+            QEMU_DATA_PROFILE, QEMU_CPU_UI_PROFILE,
             'nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig',
             'nabu_ufs_root_defconfig', 'nabu_ufs_data_defconfig', CPU_UI_PROFILE)
 OWNER_PROFILES = ('nabu_qemu_root_defconfig', 'nabu_ufs_root_defconfig',
-                  'nabu_ufs_data_defconfig', CPU_UI_PROFILE, QEMU_DATA_PROFILE)
+                  'nabu_ufs_data_defconfig', CPU_UI_PROFILE, QEMU_DATA_PROFILE,
+                  QEMU_CPU_UI_PROFILE)
 UFS_OWNER_PROFILES = ('nabu_ufs_root_defconfig', 'nabu_ufs_data_defconfig', CPU_UI_PROFILE)
 UFS_PROFILES = ('nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig',
                 'nabu_ufs_root_defconfig')
@@ -214,6 +216,14 @@ def select_qemu_data_profile(device, upstream):
     _apply_owner_ufs_build(upstream, data=True, nabu_pmgr=False)
 
 
+def select_qemu_cpu_ui_profile(device, upstream):
+    """Build the QEMU graphics-closure reference without a display backend."""
+    _select_owner_ufs_board(device, QEMU_CPU_UI_PROFILE, CPU_UI_ROOTS, data=True,
+                            archives=['build-nabu-owner-root.py', 'build-nabu-virtio.py',
+                                      'build-nabu-ram-block.py'])
+    _apply_owner_ufs_build(upstream, data=True, nabu_pmgr=False)
+
+
 def select_storage_profile(device, upstream, owner_root=False, data=False):
     if data:
         # The Data profile boots on hardware; it needs the original ApplePMGR
@@ -392,8 +402,10 @@ def validate_profile(device):
     ufs_data = name == 'nabu_ufs_data_defconfig'
     ufs_cpu_ui = name == CPU_UI_PROFILE
     qemu_data = name == QEMU_DATA_PROFILE
+    qemu_cpu_ui = name == QEMU_CPU_UI_PROFILE
+    qemu_owner = qemu_data or qemu_cpu_ui
     ufs_owner = name in UFS_OWNER_PROFILES
-    roots = (CPU_UI_ROOTS if ufs_cpu_ui else
+    roots = (CPU_UI_ROOTS if ufs_cpu_ui or qemu_cpu_ui else
              ROOT_COMPONENTS if owner_root else ['com.apple.filesystems.apfs'])
     if board['kernel']['prelink']['roots'] != roots:
         raise ValueError('Profile requires its declared original-component closure')
@@ -403,7 +415,7 @@ def validate_profile(device):
     lines = config.splitlines()
     disabled_features = ['BOOT_PROGRESS', 'NATIVE_AES',
                          'SOURCE_MOCKFS', 'NATIVE_LEGACY_DISPLAY', 'SHENG_PMGR']
-    if ufs_owner or qemu_data:
+    if ufs_owner or qemu_owner:
         # The hardware profile is the union of the verified owner closure and
         # both storage symbols; it must not silently lose either side.
         required = ['CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y',
@@ -416,10 +428,10 @@ def validate_profile(device):
                     'CONFIG_XNU_SOURCE_PTHREAD=y', 'CONFIG_XNU_ARM_DT_PLATFORM=y',
                     'CONFIG_XNU_ARMCPU=y', 'CONFIG_XNU_NATIVE_ARCH_TIMER=y',
                     'CONFIG_XNU_DT_PANIC_REGION=y', 'CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"']
-        required += ['CONFIG_XNU_NATIVE_UFS=n' if qemu_data else 'CONFIG_XNU_NATIVE_UFS=y']
-        if qemu_data:
+        required += ['CONFIG_XNU_NATIVE_UFS=n' if qemu_owner else 'CONFIG_XNU_NATIVE_UFS=y']
+        if qemu_owner:
             required += ['CONFIG_XNU_OWNER_UNION_SYSTEMOS=y']
-        if ufs_data or ufs_cpu_ui or qemu_data:
+        if ufs_data or ufs_cpu_ui or qemu_owner:
             required += ['CONFIG_XNU_NATIVE_RAM_BLOCK=y', 'CONFIG_XNU_OWNER_DATA_MOUNT=y']
             uuids = [line for line in lines if line.startswith('CONFIG_XNU_OWNER_DATA_VOLUME_UUID="')]
             if len(uuids) != 1 or uuids[0] in ('CONFIG_XNU_OWNER_DATA_VOLUME_UUID=""',
@@ -456,7 +468,7 @@ def validate_profile(device):
                 'build-libpthread-kernel.py']
     if owner_root:
         expected.append('build-nabu-owner-root.py')
-    if qemu_data:
+    if qemu_owner:
         expected += ['build-nabu-virtio.py', 'build-nabu-ram-block.py']
     elif ufs_data or ufs_cpu_ui:
         expected += ['build-nabu-virtio.py', 'build-nabu-ufs-root.py', 'build-nabu-ram-block.py']
@@ -487,6 +499,8 @@ def main():
         select_storage_profile(args.device, args.upstream, owner_root=True, data=True)
     elif args.profile == QEMU_DATA_PROFILE:
         select_qemu_data_profile(args.device, args.upstream)
+    elif args.profile == QEMU_CPU_UI_PROFILE:
+        select_qemu_cpu_ui_profile(args.device, args.upstream)
     elif args.profile == CPU_UI_PROFILE:
         select_ufs_cpu_ui_profile(args.device, args.upstream)
     elif args.profile in ('nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig'):
@@ -552,7 +566,8 @@ def main():
         'ufs_root': args.profile == 'nabu_ufs_root_defconfig',
         'ufs_cpu_ui': args.profile == CPU_UI_PROFILE,
         'qemu_data': args.profile == QEMU_DATA_PROFILE,
-        'display_roots': GRAPHICS_ROOTS if args.profile == CPU_UI_PROFILE else [],
+        'qemu_cpu_ui_reference': args.profile == QEMU_CPU_UI_PROFILE,
+        'display_roots': GRAPHICS_ROOTS if args.profile in (CPU_UI_PROFILE, QEMU_CPU_UI_PROFILE) else [],
         'graphics_startup': graphics_startup,
         'data_skeleton': data_skeleton,
         'log_capture': log_capture,
