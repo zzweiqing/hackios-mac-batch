@@ -318,7 +318,7 @@ def prepare_data_skeleton(upstream):
             'runtime_qualified': False}
 
 
-def qualify_data_skeleton(upstream, prepared):
+def qualify_data_skeleton(upstream, prepared, *, capture_logs=False):
     """Check the enabled feature in actual build sources, not a profile name."""
     work = upstream / 'out/nabu'
     options = (work / '.config').read_text(encoding='utf-8').splitlines()
@@ -330,12 +330,17 @@ def qualify_data_skeleton(upstream, prepared):
         raise ValueError('Data skeleton preparation does not match the current source')
     source = work / 'tree/.cache/xnu-work/bsd/kern/kern_exec.c'
     text = source.read_text(encoding='utf-8')
-    call = ('\tif (!error) error = native_owner_data_skeleton(p, scratch, data_mount);\n'
-            '\tif (!error) native_owner_data_stage = 4;')
-    if helper_source().rstrip() not in text or call not in text:
+    call = '\tif (!error) error = native_owner_data_skeleton(p, scratch, data_mount);\n'
+    # The recorder inserts this observer between the helper and stage publication.
+    # Select the exact sequence from the build mode, not arbitrary intervening code.
+    if capture_logs:
+        call += '\tnabu_data_mount_progress(5, error);\n'
+    call += '\tif (!error) native_owner_data_stage = 4;'
+    if text.count(helper_source().rstrip()) != 1 or text.count(call) != 1:
         raise ValueError('Actual kern_exec.c lacks the complete Data skeleton or its stage-4 call')
     return {'source': 'outputs/tree/.cache/xnu-work/bsd/kern/kern_exec.c',
             'source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
             'patch_sha256': prepared['after_sha256'],
             'directory_count': len(DIRECTORIES), 'symlink_count': len(SYMLINKS),
+            'capture_stage5_observer': capture_logs,
             'runtime_qualified': False}

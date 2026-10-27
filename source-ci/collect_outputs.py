@@ -319,7 +319,7 @@ def main():
                     args.upstream, candidate, identity['log_capture'].get('source_identity'))
                 summary['logging_qualified_statically'] = True
             manifest['data_skeleton_qualification'] = qualify_data_skeleton(
-                args.upstream, prepared.get('data_skeleton'))
+                args.upstream, prepared.get('data_skeleton'), capture_logs=bool(identity['log_capture']))
             summary['data_skeleton_qualified_statically'] = bool(
                 manifest['data_skeleton_qualification'])
             if identity['profile'] in DISPLAY_PROFILES:
