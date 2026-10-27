@@ -106,7 +106,7 @@ def selected_files(upstream):
             elif relative == 'native-ufs' and (path.suffix in ('.cpp', '.h') or
                                                path.name in ('NativeUfs.o', 'compile.log')):
                 add(path, path.relative_to(work))
-            elif relative == 'native-ram-block' and path.name in ('NativeRamBlock.o', 'compile.log'):
+            elif relative == 'native-ram-block' and path.name in ('NativeRamBlock.o', 'NativeRamBlock.cpp', 'compile.log'):
                 add(path, path.relative_to(work))
 
     # Small generated public storage headers and their pinned-source receipt,
@@ -126,8 +126,7 @@ def selected_files(upstream):
                      'tree/.cache/xnu-work/bsd/kern/bsd_init.c',
                      'tree/.cache/xnu-work/bsd/kern/kern_exec.c',
                      'tree/.cache/xnu-work/bsd/kern/kern_exit.c',
-                     'tree/.cache/xnu-work/osfmk/kern/exception.c',
-                     'tree/drivers/NativeRamBlock/NativeRamBlock.cpp'):
+                     'tree/.cache/xnu-work/osfmk/kern/exception.c'):
         add(work / relative, Path(relative))
     return files
 
@@ -156,6 +155,7 @@ def selected_sources(device):
         (device / 'platform/QemuBootPMGR.cpp', 'device/platform/QemuBootPMGR.cpp'),
         (device / 'scripts/build-nabu-virtio.py', 'device/scripts/build-nabu-virtio.py'),
         (device / 'scripts/build-nabu-ram-block.py', 'device/scripts/build-nabu-ram-block.py'),
+        (device / 'scripts/nabu_ram_source.py', 'device/scripts/nabu_ram_source.py'),
         (device / 'scripts/nabu_storage_bindings.py', 'device/scripts/nabu_storage_bindings.py'),
         (device / 'scripts/build-nabu-owner-root.py', 'device/scripts/build-nabu-owner-root.py'),
         (device / 'scripts/build-nabu-ufs.py', 'device/scripts/build-nabu-ufs.py'),

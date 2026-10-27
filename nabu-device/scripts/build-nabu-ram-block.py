@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from nabu_storage_bindings import BINDINGS
+from nabu_ram_source import volatile_source
 
 spec_path = Path(__file__).with_name('build-nabu-platform.py')
 import importlib.util
@@ -30,18 +31,24 @@ def main():
     record = json.loads(recipe_bytes.decode('utf-8').strip().rstrip(','))
     headers = root / 'build/storage-abi/include'
     out = root / 'build/native-ram-block'
-    source = root / 'drivers/NativeRamBlock/NativeRamBlock.cpp'
-    if not source.is_file():
+    original = root / 'drivers/NativeRamBlock/NativeRamBlock.cpp'
+    if not original.is_file():
         raise SystemExit('NativeRamBlock source is missing')
     if not (headers / 'IOKit/storage/IOBlockStorageDevice.h').is_file():
         raise SystemExit('The RAM block class requires the prepared IOStorageFamily headers')
     if out.exists():
         raise SystemExit('Refuse to reuse an existing NativeRamBlock output; use a fresh build root')
     out.mkdir(parents=True)
+    persistent_store = os.environ.get('XNU_NATIVE_UFS') == '1'
+    source = out / 'NativeRamBlock.cpp'
+    text = original.read_text(encoding='utf-8')
+    source.write_text(text if persistent_store else volatile_source(text), encoding='utf-8')
     obj = out / 'NativeRamBlock.o'
     command = platform.compile_command(record, source, obj)
     command += ['-I', str(headers), '-I', str(root / '.cache/xnu-work/osfmk'),
-                '-I', str(source.parent), '-DXNU_NATIVE_RAM_BLOCK=1']
+                '-I', str(original.parent), '-DXNU_NATIVE_RAM_BLOCK=1']
+    if not persistent_store:
+        command.append('-DNABU_RAM_PERSISTENCE=0')
     (out / 'compile-command.json').write_text(json.dumps(command, indent=2) + '\n')
     result = subprocess.run(command, cwd=record['directory'], capture_output=True)
     (out / 'compile.log').write_bytes(result.stdout + result.stderr)
@@ -64,6 +71,8 @@ def main():
     }, indent=2) + '\n')
     (out / 'build-report.json').write_text(json.dumps({
         'source': 'drivers/NativeRamBlock/NativeRamBlock.cpp',
+        'actual_source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+        'optional_ufs_persistence': persistent_store,
         'object_sha256': hashlib.sha256(data).hexdigest(),
         'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
         'compiled': True, 'linked': False, 'hardware_tested': False,
