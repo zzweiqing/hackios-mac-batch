@@ -12,6 +12,7 @@ import sys
 from prepare_source import INPUT_SHA256, UPSTREAM
 from nabu_logging_build import qualify_logging_candidate
 from nabu_data_skeleton import qualify_data_skeleton
+from nabu_display_ci import PROFILE as QEMU_LEGACY_PROFILE, qualify_display_candidate
 
 
 def sha256(path):
@@ -110,6 +111,12 @@ def selected_files(upstream):
             elif relative == 'native-ram-block' and path.name in ('NativeRamBlock.o', 'NativeRamBlock.cpp', 'compile.log'):
                 add(path, path.relative_to(work))
 
+    display = build / 'native-legacy-display'
+    if display.is_dir():
+        for path in sorted(display.rglob('*')):
+            if path.is_file():
+                add(path, path.relative_to(work))
+
     # Small generated public storage headers and their pinned-source receipt,
     # not the SDK tree. This binds the class declarations used by UFS/VirtIO.
     storage = build / 'storage-abi'
@@ -144,6 +151,7 @@ def selected_sources(device):
         (device / 'configs/nabu_qemu_root_defconfig', 'device/configs/nabu_qemu_root_defconfig'),
         (device / 'configs/nabu_qemu_data_defconfig', 'device/configs/nabu_qemu_data_defconfig'),
         (device / 'configs/nabu_qemu_cpu_ui_defconfig', 'device/configs/nabu_qemu_cpu_ui_defconfig'),
+        (device / 'configs/nabu_qemu_legacy_defconfig', 'device/configs/nabu_qemu_legacy_defconfig'),
         (device / 'configs/nabu_ufs_passive_defconfig', 'device/configs/nabu_ufs_passive_defconfig'),
         (device / 'configs/nabu_ufs_readonly_defconfig', 'device/configs/nabu_ufs_readonly_defconfig'),
         (device / 'configs/nabu_ufs_root_defconfig', 'device/configs/nabu_ufs_root_defconfig'),
@@ -176,6 +184,14 @@ def selected_sources(device):
         (source_dir / 'prepare_source.py', 'source-ci/prepare_source.py'),
         (source_dir / 'collect_outputs.py', 'source-ci/collect_outputs.py'),
         (source_dir / 'nabu_data_skeleton.py', 'source-ci/nabu_data_skeleton.py'),
+        (source_dir / 'nabu_display_ci.py', 'source-ci/nabu_display_ci.py'),
+        (source_dir / 'nabu_graphics_startup.py', 'source-ci/nabu_graphics_startup.py'),
+        (device / 'scripts/build-nabu-legacy-display.py', 'device/scripts/build-nabu-legacy-display.py'),
+        (device / 'scripts/nabu_display_bindings.py', 'device/scripts/nabu_display_bindings.py'),
+        (device / 'platform/NabuLegacyDiscovery.cpp', 'device/platform/NabuLegacyDiscovery.cpp'),
+        (device / 'platform/NabuLegacyDisplayProbe.cpp', 'device/platform/NabuLegacyDisplayProbe.cpp'),
+        (device / 'platform/NabuLegacyStubs.cpp', 'device/platform/NabuLegacyStubs.cpp'),
+        (device / 'platform/NabuGraphicsStatus.cpp', 'device/platform/NabuGraphicsStatus.cpp'),
         (workflow_dir / 'unixnu-source.yml', '.github/workflows/unixnu-source.yml'),
     ]
     root = root.resolve()
@@ -247,6 +263,8 @@ def main():
                 'ufs_read_only': prepared.get('ufs_read_only', False),
                 'qemu_data': prepared.get('qemu_data', False),
                 'qemu_cpu_ui_reference': prepared.get('qemu_cpu_ui_reference', False),
+                'qemu_legacy_discovery': prepared.get('qemu_legacy_discovery', False),
+                'display_reference': prepared.get('display_reference'),
                 'log_capture': prepared.get('log_capture'),
                 'hardware_tested': False, 'apple_launchd_executed': False}
     summary = dict(identity, candidate_present=False, candidate_validated=False,
@@ -268,7 +286,7 @@ def main():
             parsed = json.loads(report.read_text(encoding='utf-8'))
             macho = macho_summary(candidate)
             required_images = {'com.apple.filesystems.apfs', 'com.apple.kec.corecrypto'}
-            if identity['profile'] == 'nabu_qemu_cpu_ui_defconfig':
+            if identity['profile'] in ('nabu_qemu_cpu_ui_defconfig', QEMU_LEGACY_PROFILE):
                 required_images |= {
                     'com.apple.iokit.IOSurface',
                     'com.apple.iokit.IOMobileGraphicsFamily',
@@ -296,10 +314,14 @@ def main():
                 args.upstream, prepared.get('data_skeleton'))
             summary['data_skeleton_qualified_statically'] = bool(
                 manifest['data_skeleton_qualification'])
+            if identity['profile'] == QEMU_LEGACY_PROFILE:
+                manifest['display_qualification'] = qualify_display_candidate(
+                    args.upstream, args.device, candidate)
+                summary['display_qualified_statically'] = True
             summary['candidate_validated'] = valid
             summary['undefined_symbol_count'] = len(macho['undefined_names'])
             manifest['macho'] = macho
-        except (KeyError, ValueError, OSError, struct.error) as error:
+        except (KeyError, ValueError, OSError, struct.error, subprocess.CalledProcessError) as error:
             manifest['candidate_validation_error'] = str(error)
     files.extend(selected_files(args.upstream))
     manifest['files'] = {name: {'bytes': path.stat().st_size, 'sha256': sha256(path)} for path, name in files}

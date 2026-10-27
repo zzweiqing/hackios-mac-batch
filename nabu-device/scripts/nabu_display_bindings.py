@@ -55,6 +55,19 @@ EXPECTED_GMETACLASS = 0xfffffff007afe840
 EXPECTED_METACLASS_VPTR = 0xfffffff006d594b8
 EXPECTED_PARENT = 0xfffffff007afa300
 EXPECTED_NAME_VA = 0xfffffff005444807
+# Slot 249: nullable width/height outputs, reading uint32 fields +5808/+5812.
+DIMENSIONS_ACCESSOR = bytes.fromhex(
+    'ff8300d1e00f00f9e10b00f9e20700f9e80f40f9e80300f9e80b40f9080100f1'
+    'e8179f1ae800003701000014e80340f908b156b9e90b40f9280100b901000014'
+    'e80740f9080100f1e8179f1ae800003701000014e80340f908b556b9e90740f9'
+    '280100b901000014ff830091c0035fd6')
+
+
+def qualify_dimensions_accessor(code):
+    if code != DIMENSIONS_ACCESSOR:
+        raise ValueError('Original dimension accessor differs from the audited 21H16 body')
+    return {'slot': 249, 'width_offset': 5808, 'height_offset': 5812,
+            'field_bytes': 4, 'instruction_sha256': hashlib.sha256(code).hexdigest()}
 
 
 def load_native_prelink(explicit):
@@ -448,6 +461,7 @@ def main():
         iosurface_getters.append(record)
 
     legacy_ctor, legacy_vptr, legacy = find_legacy_ctor(data, image, module, native_prelink)
+    dimensions = qualify_dimensions_accessor(read_va(image, data, legacy[249], len(DIMENSIONS_ACCESSOR)))
     if legacy_ctor != EXPECTED_LEGACY_CTOR or legacy_vptr != EXPECTED_LEGACY_VPTR:
         raise SystemExit('Locator found an unexpected Legacy constructor/vtable')
     service_ctor = first_bl(data, image, legacy_ctor)
@@ -573,6 +587,7 @@ def main():
         ],
         'bindings': {name: hex(va) for name, va in bindings.items()},
         'contracts': {
+            'display_dimensions': dimensions,
             'iosurface_getters': {
                 'status': 'confirmed_addresses',
                 'detail': 'seven ldr/ret getters validated; virtual owner/invocation unknown',

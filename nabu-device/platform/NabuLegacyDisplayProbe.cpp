@@ -391,7 +391,9 @@ extern "C" unsigned native_legacy_clients_dump(char *out,unsigned cap) {
     return at;
 }
 void native_legacy_client_observed(IOReturn status,IOUserClient *client) {
+#if !defined(NABU_LEGACY_DISCOVERY_ONLY) || !NABU_LEGACY_DISCOVERY_ONLY
     if(client && !status)interpose(client,native_legacy_client_pid);
+#endif
     native_legacy_client_status=status;native_legacy_client_object=(uintptr_t)client;
     if(client)strlcpy(native_legacy_client_class,client->getMetaClass()->getClassName(),sizeof(native_legacy_client_class));
     native_legacy_client_checkpoint();

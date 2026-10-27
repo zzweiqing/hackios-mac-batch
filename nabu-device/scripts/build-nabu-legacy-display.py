@@ -94,8 +94,12 @@ def main():
     abi = out / 'abi'
     source.mkdir(parents=True, exist_ok=True)
     abi.mkdir(parents=True, exist_ok=True)
-    for name in ('NativeLegacyDisplay.cpp', 'NativeLegacyRequest.h'):
-        shutil.copy2(device / 'vendor/GopFramebuffer-cf3b429' / name, source / name)
+    discovery = os.environ.get('NABU_LEGACY_DISCOVERY_ONLY') == '1'
+    if discovery:
+        shutil.copy2(device / 'platform/NabuLegacyDiscovery.cpp', source / 'NativeLegacyDisplay.cpp')
+    else:
+        for name in ('NativeLegacyDisplay.cpp', 'NativeLegacyRequest.h'):
+            shutil.copy2(device / 'vendor/GopFramebuffer-cf3b429' / name, source / name)
     shutil.copy2(device / 'platform/NabuLegacyDisplayProbe.cpp',
                  source / 'NabuLegacyDisplayProbe.cpp')
     shutil.copy2(device / 'platform/NabuLegacyStubs.cpp',
@@ -112,11 +116,14 @@ def main():
     record = json.loads(recipe_bytes.decode('utf-8').strip().rstrip(','))
     includes = ['-I', str(abi), '-I', str(source),
                 '-I', str(root / '.cache/xnu-work/osfmk')]
+    if discovery:
+        includes.append('-DNABU_LEGACY_DISCOVERY_ONLY=1')
     objects = []
     for name in ('NativeLegacyDisplay.cpp', 'NabuLegacyDisplayProbe.cpp',
                  'NabuLegacyStubs.cpp', 'NabuGraphicsStatus.cpp'):
         obj = out / (Path(name).stem + '.o')
         command = compile_command(record, source / name, obj) + includes
+        (out / (Path(name).stem + '.command.json')).write_text(json.dumps(command, indent=2) + '\n')
         run(command, record['directory'], out / (Path(name).stem + '.log'))
         check_object(obj.read_bytes())
         objects.append(obj)
@@ -173,9 +180,7 @@ def main():
     report = {
         'archive_sha256': sha(archive),
         'source_sha256': {
-            str((source / name).relative_to(root)): sha(source / name)
-            for name in ('NativeLegacyDisplay.cpp', 'NativeLegacyRequest.h',
-                         'NabuLegacyDisplayProbe.cpp', 'NabuLegacyStubs.cpp', 'NabuGraphicsStatus.cpp')
+            str(path.relative_to(root)): sha(path) for path in sorted(source.iterdir()) if path.is_file()
         },
         'abi_sha256': {
             'header': sha(abi / 'OriginalLegacyFramebufferABI.h'),
@@ -183,6 +188,11 @@ def main():
             'json': sha(abi / 'display-abi.json'),
         },
         'reference_candidate': str(reference),
+        'reference_candidate_sha256': sha(reference),
+        'discovery_only': discovery,
+        'objects': {obj.name: sha(obj) for obj in objects},
+        'vtable_symbols': compiled,
+        'recipe_sha256': hashlib.sha256(recipe_bytes).hexdigest(),
         'kernelcache': str(kernelcache),
         'runtime_qualified': False,
     }
