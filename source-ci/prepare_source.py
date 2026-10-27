@@ -16,11 +16,13 @@ PATCH = 'patches/xnu/offline-component-load-probes.patch'
 PATCH_SHA256 = '1f228c5c6d8387b13cd8e0964ddeb56c858a5dae16478f3ed2baae8a2e4da1e9'
 INPUT_SHA256 = 'fce1ea205e571c3850e150404fc04f255f1192ba19c68e12497c19b8f87d8994'
 CPU_UI_PROFILE = 'nabu_ufs_cpu_ui_defconfig'
+QEMU_DATA_PROFILE = 'nabu_qemu_data_defconfig'
 PROFILES = ('nabu_bootstrap_defconfig', 'nabu_qemu_storage_defconfig', 'nabu_qemu_root_defconfig',
+            QEMU_DATA_PROFILE,
             'nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig',
             'nabu_ufs_root_defconfig', 'nabu_ufs_data_defconfig', CPU_UI_PROFILE)
 OWNER_PROFILES = ('nabu_qemu_root_defconfig', 'nabu_ufs_root_defconfig',
-                  'nabu_ufs_data_defconfig', CPU_UI_PROFILE)
+                  'nabu_ufs_data_defconfig', CPU_UI_PROFILE, QEMU_DATA_PROFILE)
 UFS_OWNER_PROFILES = ('nabu_ufs_root_defconfig', 'nabu_ufs_data_defconfig', CPU_UI_PROFILE)
 UFS_PROFILES = ('nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig',
                 'nabu_ufs_root_defconfig')
@@ -140,7 +142,7 @@ def owner_ufs_archives(data=False):
     return archives
 
 
-def _select_owner_ufs_board(device, profile, roots, data):
+def _select_owner_ufs_board(device, profile, roots, data, archives=None):
     """Rewrite the bootstrap board for a UFS owner profile."""
     path = device / 'board.toml'
     text = path.read_text(encoding='utf-8')
@@ -149,7 +151,8 @@ def _select_owner_ufs_board(device, profile, roots, data):
     root_line = 'roots = ["com.apple.filesystems.apfs"]'
     if any(text.count(marker) != 1 for marker in (old, archive, root_line)):
         raise ValueError('Expected unmodified bootstrap board for UFS owner selection')
-    builders = ''.join(f'\n  "{name}",' for name in owner_ufs_archives(data))
+    builders = ''.join(f'\n  "{name}",' for name in
+                       (owner_ufs_archives(data) if archives is None else archives))
     text = text.replace(old, f'defconfig = "{profile}"', 1)
     text = text.replace(archive, archive + builders, 1)
     text = text.replace(root_line,
@@ -200,6 +203,15 @@ def _apply_owner_ufs_build(upstream, data=False, nabu_pmgr=False):
     if nabu_pmgr:
         env += "    env['NABU_BOOT_PMGR'] = '1'\n"
     kernel.write_text(text.replace(anchor, env + anchor, 1), encoding='utf-8')
+
+
+def select_qemu_data_profile(device, upstream):
+    """Use the same owner/Data contracts with virtual storage and boot PMGR."""
+    _select_owner_ufs_board(device, QEMU_DATA_PROFILE, ROOT_COMPONENTS, data=True,
+                            archives=['build-nabu-owner-root.py', 'build-nabu-virtio.py',
+                                      'build-nabu-ram-block.py'])
+    # No UFS producer or NABU_BOOT_PMGR: ArmDTPlatform selects QemuBootPMGR.
+    _apply_owner_ufs_build(upstream, data=True, nabu_pmgr=False)
 
 
 def select_storage_profile(device, upstream, owner_root=False, data=False):
@@ -379,6 +391,7 @@ def validate_profile(device):
     ufs_root = name == 'nabu_ufs_root_defconfig'
     ufs_data = name == 'nabu_ufs_data_defconfig'
     ufs_cpu_ui = name == CPU_UI_PROFILE
+    qemu_data = name == QEMU_DATA_PROFILE
     ufs_owner = name in UFS_OWNER_PROFILES
     roots = (CPU_UI_ROOTS if ufs_cpu_ui else
              ROOT_COMPONENTS if owner_root else ['com.apple.filesystems.apfs'])
@@ -390,10 +403,10 @@ def validate_profile(device):
     lines = config.splitlines()
     disabled_features = ['BOOT_PROGRESS', 'NATIVE_AES',
                          'SOURCE_MOCKFS', 'NATIVE_LEGACY_DISPLAY', 'SHENG_PMGR']
-    if ufs_owner:
+    if ufs_owner or qemu_data:
         # The hardware profile is the union of the verified owner closure and
         # both storage symbols; it must not silently lose either side.
-        required = ['CONFIG_XNU_NATIVE_UFS=y', 'CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y',
+        required = ['CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y',
                     'CONFIG_XNU_OWNER_ROOT_AUDIT=y', 'CONFIG_XNU_OWNER_ROOT_TRUST=y',
                     'CONFIG_XNU_TRUST_CACHE_RUNTIME=y', 'CONFIG_XNU_SECOND_STATIC_TRUST_CACHE=y',
                     'CONFIG_XNU_NATIVE_CS_HASH_CACHE=y', 'CONFIG_XNU_NATIVE_PAN=y',
@@ -403,7 +416,10 @@ def validate_profile(device):
                     'CONFIG_XNU_SOURCE_PTHREAD=y', 'CONFIG_XNU_ARM_DT_PLATFORM=y',
                     'CONFIG_XNU_ARMCPU=y', 'CONFIG_XNU_NATIVE_ARCH_TIMER=y',
                     'CONFIG_XNU_DT_PANIC_REGION=y', 'CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"']
-        if ufs_data or ufs_cpu_ui:
+        required += ['CONFIG_XNU_NATIVE_UFS=n' if qemu_data else 'CONFIG_XNU_NATIVE_UFS=y']
+        if qemu_data:
+            required += ['CONFIG_XNU_OWNER_UNION_SYSTEMOS=y']
+        if ufs_data or ufs_cpu_ui or qemu_data:
             required += ['CONFIG_XNU_NATIVE_RAM_BLOCK=y', 'CONFIG_XNU_OWNER_DATA_MOUNT=y']
             uuids = [line for line in lines if line.startswith('CONFIG_XNU_OWNER_DATA_VOLUME_UUID="')]
             if len(uuids) != 1 or uuids[0] in ('CONFIG_XNU_OWNER_DATA_VOLUME_UUID=""',
@@ -440,7 +456,9 @@ def validate_profile(device):
                 'build-libpthread-kernel.py']
     if owner_root:
         expected.append('build-nabu-owner-root.py')
-    if ufs_data or ufs_cpu_ui:
+    if qemu_data:
+        expected += ['build-nabu-virtio.py', 'build-nabu-ram-block.py']
+    elif ufs_data or ufs_cpu_ui:
         expected += ['build-nabu-virtio.py', 'build-nabu-ufs-root.py', 'build-nabu-ram-block.py']
     elif ufs_root:
         expected += ['build-nabu-virtio.py', 'build-nabu-ufs-root.py']
@@ -467,6 +485,8 @@ def main():
         select_ufs_root_profile(args.device, args.upstream)
     elif args.profile == 'nabu_ufs_data_defconfig':
         select_storage_profile(args.device, args.upstream, owner_root=True, data=True)
+    elif args.profile == QEMU_DATA_PROFILE:
+        select_qemu_data_profile(args.device, args.upstream)
     elif args.profile == CPU_UI_PROFILE:
         select_ufs_cpu_ui_profile(args.device, args.upstream)
     elif args.profile in ('nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig'):
@@ -517,7 +537,7 @@ def main():
     result = apply_vc_text_scale(result)
     path.write_bytes(result)
     data_skeleton = None
-    if args.profile in ('nabu_ufs_data_defconfig', CPU_UI_PROFILE):
+    if args.profile in ('nabu_ufs_data_defconfig', CPU_UI_PROFILE, QEMU_DATA_PROFILE):
         data_skeleton = prepare_data_skeleton(args.upstream)
     log_capture = enable_logging(args.upstream, args.device) if args.capture_logs else None
     args.report.parent.mkdir(parents=True, exist_ok=True)
@@ -531,6 +551,7 @@ def main():
         'ufs_read_only': args.profile == 'nabu_ufs_readonly_defconfig',
         'ufs_root': args.profile == 'nabu_ufs_root_defconfig',
         'ufs_cpu_ui': args.profile == CPU_UI_PROFILE,
+        'qemu_data': args.profile == QEMU_DATA_PROFILE,
         'display_roots': GRAPHICS_ROOTS if args.profile == CPU_UI_PROFILE else [],
         'graphics_startup': graphics_startup,
         'data_skeleton': data_skeleton,

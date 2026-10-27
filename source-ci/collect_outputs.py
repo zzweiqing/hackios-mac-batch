@@ -88,7 +88,7 @@ def selected_files(upstream):
             if path.is_file() and path.name in selected_xnu_names:
                 add(path, path.relative_to(work))
     for relative in ('corecrypto-2023', 'armdt-platform', 'armcpu', 'libpthread-kernel',
-                     'native-virtio-block', 'verified-root-xnu', 'native-ufs'):
+                     'native-virtio-block', 'verified-root-xnu', 'native-ufs', 'native-ram-block'):
         directory = build / relative
         if not directory.is_dir():
             continue
@@ -105,6 +105,8 @@ def selected_files(upstream):
                 add(path, path.relative_to(work))
             elif relative == 'native-ufs' and (path.suffix in ('.cpp', '.h') or
                                                path.name in ('NativeUfs.o', 'compile.log')):
+                add(path, path.relative_to(work))
+            elif relative == 'native-ram-block' and path.name in ('NativeRamBlock.o', 'compile.log'):
                 add(path, path.relative_to(work))
 
     # Small generated public storage headers and their pinned-source receipt,
@@ -124,7 +126,8 @@ def selected_files(upstream):
                      'tree/.cache/xnu-work/bsd/kern/bsd_init.c',
                      'tree/.cache/xnu-work/bsd/kern/kern_exec.c',
                      'tree/.cache/xnu-work/bsd/kern/kern_exit.c',
-                     'tree/.cache/xnu-work/osfmk/kern/exception.c'):
+                     'tree/.cache/xnu-work/osfmk/kern/exception.c',
+                     'tree/drivers/NativeRamBlock/NativeRamBlock.cpp'):
         add(work / relative, Path(relative))
     return files
 
@@ -139,6 +142,7 @@ def selected_sources(device):
         (device / 'configs/nabu_bootstrap_defconfig', 'device/configs/nabu_bootstrap_defconfig'),
         (device / 'configs/nabu_qemu_storage_defconfig', 'device/configs/nabu_qemu_storage_defconfig'),
         (device / 'configs/nabu_qemu_root_defconfig', 'device/configs/nabu_qemu_root_defconfig'),
+        (device / 'configs/nabu_qemu_data_defconfig', 'device/configs/nabu_qemu_data_defconfig'),
         (device / 'configs/nabu_ufs_passive_defconfig', 'device/configs/nabu_ufs_passive_defconfig'),
         (device / 'configs/nabu_ufs_readonly_defconfig', 'device/configs/nabu_ufs_readonly_defconfig'),
         (device / 'configs/nabu_ufs_root_defconfig', 'device/configs/nabu_ufs_root_defconfig'),
@@ -151,6 +155,8 @@ def selected_sources(device):
         (device / 'scripts/qemu_pmgr_build.py', 'device/scripts/qemu_pmgr_build.py'),
         (device / 'platform/QemuBootPMGR.cpp', 'device/platform/QemuBootPMGR.cpp'),
         (device / 'scripts/build-nabu-virtio.py', 'device/scripts/build-nabu-virtio.py'),
+        (device / 'scripts/build-nabu-ram-block.py', 'device/scripts/build-nabu-ram-block.py'),
+        (device / 'scripts/nabu_storage_bindings.py', 'device/scripts/nabu_storage_bindings.py'),
         (device / 'scripts/build-nabu-owner-root.py', 'device/scripts/build-nabu-owner-root.py'),
         (device / 'scripts/build-nabu-ufs.py', 'device/scripts/build-nabu-ufs.py'),
         (device / 'scripts/build-nabu-ufs-readonly.py', 'device/scripts/build-nabu-ufs-readonly.py'),
@@ -236,6 +242,7 @@ def main():
                 'owner_boot_manifest': prepared.get('owner_boot_manifest'),
                 'ufs_passive_only': prepared.get('ufs_passive_only', False),
                 'ufs_read_only': prepared.get('ufs_read_only', False),
+                'qemu_data': prepared.get('qemu_data', False),
                 'log_capture': prepared.get('log_capture'),
                 'hardware_tested': False, 'apple_launchd_executed': False}
     summary = dict(identity, candidate_present=False, candidate_validated=False,
