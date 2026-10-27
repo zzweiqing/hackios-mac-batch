@@ -430,6 +430,8 @@ def main():
                         help='candidate kernel.macho with matching .json; enables address translation')
     parser.add_argument('--slide', type=lambda value: int(value, 0), default=-0x1360000)
     parser.add_argument('--native-prelink', type=Path)
+    parser.add_argument('--cpu-present', action='store_true',
+                        help='Qualify the selected original CPU presentation contract and activation binding')
     parser.add_argument('--output-dir', required=True, type=Path)
     args = parser.parse_args()
 
@@ -462,6 +464,10 @@ def main():
 
     legacy_ctor, legacy_vptr, legacy = find_legacy_ctor(data, image, module, native_prelink)
     dimensions = qualify_dimensions_accessor(read_va(image, data, legacy[249], len(DIMENSIONS_ACCESSOR)))
+    cpu_contract = None
+    if args.cpu_present:
+        from nabu_cpu_abi import qualify
+        cpu_contract = qualify(lambda va, size: read_va(image, data, va, size), legacy)
     if legacy_ctor != EXPECTED_LEGACY_CTOR or legacy_vptr != EXPECTED_LEGACY_VPTR:
         raise SystemExit('Locator found an unexpected Legacy constructor/vtable')
     service_ctor = first_bl(data, image, legacy_ctor)
@@ -495,6 +501,10 @@ def main():
     ]
     binding_specs += [(getter['symbol'], getter['va'], 'iosurface')
                       for getter in iosurface_getters]
+    if args.cpu_present:
+        from nabu_cpu_abi import ACTIVE_REQUEST, DISPLAY_STATE
+        binding_specs.append(('_nabu_legacy_request_active', ACTIVE_REQUEST, 'family'))
+        binding_specs.append(('_nabu_legacy_display_state', DISPLAY_STATE, 'family'))
     translators = {}
     candidate = {}
     if args.native is not None:
@@ -607,6 +617,11 @@ def main():
         'images_modified': False,
     }
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    if cpu_contract is not None:
+        report['contracts']['cpu_present'] = cpu_contract
+        report['contracts']['swap_request_queue'] = {
+            'status': 'static_qualified_subset',
+            'detail': 'Selected CPU fields and original activation/completion; execution unqualified'}
     (args.output_dir / 'OriginalLegacyFramebufferABI.h').write_text(
         generate_header(), encoding='utf-8')
     (args.output_dir / 'display-abi.json').write_text(

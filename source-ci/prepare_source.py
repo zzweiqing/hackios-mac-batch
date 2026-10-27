@@ -10,7 +10,7 @@ import tomllib
 from nabu_graphics_startup import LEGACY_PATCH, retime_graphics_patches
 from nabu_data_skeleton import prepare_data_skeleton
 from nabu_logging_build import enable_logging
-from nabu_display_ci import PROFILE as QEMU_LEGACY_PROFILE, REFERENCE as DISPLAY_REFERENCE
+from nabu_display_ci import PROFILE as QEMU_LEGACY_PROFILE, CPU_PROFILE as QEMU_CPU_PRESENT_PROFILE, REFERENCE as DISPLAY_REFERENCE
 
 UPSTREAM = '245aca1a9ec5b730b1cad80fade295800d2981f1'
 PATCH = 'patches/xnu/offline-component-load-probes.patch'
@@ -20,12 +20,12 @@ CPU_UI_PROFILE = 'nabu_ufs_cpu_ui_defconfig'
 QEMU_DATA_PROFILE = 'nabu_qemu_data_defconfig'
 QEMU_CPU_UI_PROFILE = 'nabu_qemu_cpu_ui_defconfig'
 PROFILES = ('nabu_bootstrap_defconfig', 'nabu_qemu_storage_defconfig', 'nabu_qemu_root_defconfig',
-            QEMU_DATA_PROFILE, QEMU_CPU_UI_PROFILE, QEMU_LEGACY_PROFILE,
+            QEMU_DATA_PROFILE, QEMU_CPU_UI_PROFILE, QEMU_LEGACY_PROFILE, QEMU_CPU_PRESENT_PROFILE,
             'nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig',
             'nabu_ufs_root_defconfig', 'nabu_ufs_data_defconfig', CPU_UI_PROFILE)
 OWNER_PROFILES = ('nabu_qemu_root_defconfig', 'nabu_ufs_root_defconfig',
                   'nabu_ufs_data_defconfig', CPU_UI_PROFILE, QEMU_DATA_PROFILE,
-                  QEMU_CPU_UI_PROFILE, QEMU_LEGACY_PROFILE)
+                  QEMU_CPU_UI_PROFILE, QEMU_LEGACY_PROFILE, QEMU_CPU_PRESENT_PROFILE)
 UFS_OWNER_PROFILES = ('nabu_ufs_root_defconfig', 'nabu_ufs_data_defconfig', CPU_UI_PROFILE)
 UFS_PROFILES = ('nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig',
                 'nabu_ufs_root_defconfig')
@@ -225,9 +225,9 @@ def select_qemu_cpu_ui_profile(device, upstream):
     _apply_owner_ufs_build(upstream, data=True, nabu_pmgr=False)
 
 
-def select_qemu_legacy_profile(device, upstream):
+def select_qemu_legacy_profile(device, upstream, cpu_present=False):
     """Add the disabled-scanout Legacy discovery backend to the QEMU baseline."""
-    _select_owner_ufs_board(device, QEMU_LEGACY_PROFILE, CPU_UI_ROOTS, data=True,
+    _select_owner_ufs_board(device, QEMU_CPU_PRESENT_PROFILE if cpu_present else QEMU_LEGACY_PROFILE, CPU_UI_ROOTS, data=True,
                             archives=['build-nabu-owner-root.py', 'build-nabu-virtio.py',
                                       'build-nabu-ram-block.py', 'build-nabu-legacy-display.py'])
     _apply_owner_ufs_build(upstream, data=True, nabu_pmgr=False)
@@ -236,7 +236,8 @@ def select_qemu_legacy_profile(device, upstream):
     anchor = '    build_archives(ctx, env)\n'
     if text.count(anchor) != 1:
         raise ValueError('Expected one archive build entry')
-    kernel.write_text(text.replace(anchor, "    env['NABU_LEGACY_DISCOVERY_ONLY'] = '1'\n" + anchor), encoding='utf-8')
+    flag = "NABU_LEGACY_CPU_PRESENT" if cpu_present else "NABU_LEGACY_DISCOVERY_ONLY"
+    kernel.write_text(text.replace(anchor, f"    env['{flag}'] = '1'\n" + anchor), encoding='utf-8')
 
 
 def select_storage_profile(device, upstream, owner_root=False, data=False):
@@ -418,7 +419,7 @@ def validate_profile(device):
     ufs_cpu_ui = name == CPU_UI_PROFILE
     qemu_data = name == QEMU_DATA_PROFILE
     qemu_cpu_ui = name == QEMU_CPU_UI_PROFILE
-    qemu_legacy = name == QEMU_LEGACY_PROFILE
+    qemu_legacy = name in (QEMU_LEGACY_PROFILE, QEMU_CPU_PRESENT_PROFILE)
     qemu_owner = qemu_data or qemu_cpu_ui or qemu_legacy
     ufs_owner = name in UFS_OWNER_PROFILES
     roots = (CPU_UI_ROOTS if ufs_cpu_ui or qemu_cpu_ui or qemu_legacy else
@@ -524,8 +525,8 @@ def main():
         select_qemu_data_profile(args.device, args.upstream)
     elif args.profile == QEMU_CPU_UI_PROFILE:
         select_qemu_cpu_ui_profile(args.device, args.upstream)
-    elif args.profile == QEMU_LEGACY_PROFILE:
-        select_qemu_legacy_profile(args.device, args.upstream)
+    elif args.profile in (QEMU_LEGACY_PROFILE, QEMU_CPU_PRESENT_PROFILE):
+        select_qemu_legacy_profile(args.device, args.upstream, args.profile == QEMU_CPU_PRESENT_PROFILE)
     elif args.profile == CPU_UI_PROFILE:
         select_ufs_cpu_ui_profile(args.device, args.upstream)
     elif args.profile in ('nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig'):
@@ -541,7 +542,7 @@ def main():
     path = args.upstream / PATCH
     result = fixed_patch(path.read_bytes()) + NABU_TEXT_PATCH.encode()
     graphics_startup = None
-    if args.profile in (CPU_UI_PROFILE, QEMU_LEGACY_PROFILE):
+    if args.profile in (CPU_UI_PROFILE, QEMU_LEGACY_PROFILE, QEMU_CPU_PRESENT_PROFILE):
         legacy_path = args.upstream / LEGACY_PATCH
         result, legacy_patch = retime_graphics_patches(result, legacy_path.read_bytes())
         legacy_path.write_bytes(legacy_patch)
@@ -593,8 +594,9 @@ def main():
         'qemu_data': args.profile == QEMU_DATA_PROFILE,
         'qemu_cpu_ui_reference': args.profile == QEMU_CPU_UI_PROFILE,
         'qemu_legacy_discovery': args.profile == QEMU_LEGACY_PROFILE,
-        'display_reference': DISPLAY_REFERENCE if args.profile == QEMU_LEGACY_PROFILE else None,
-        'display_roots': GRAPHICS_ROOTS if args.profile in (CPU_UI_PROFILE, QEMU_CPU_UI_PROFILE, QEMU_LEGACY_PROFILE) else [],
+        'qemu_cpu_present': args.profile == QEMU_CPU_PRESENT_PROFILE,
+        'display_reference': DISPLAY_REFERENCE if args.profile in (QEMU_LEGACY_PROFILE, QEMU_CPU_PRESENT_PROFILE) else None,
+        'display_roots': GRAPHICS_ROOTS if args.profile in (CPU_UI_PROFILE, QEMU_CPU_UI_PROFILE, QEMU_LEGACY_PROFILE, QEMU_CPU_PRESENT_PROFILE) else [],
         'graphics_startup': graphics_startup,
         'data_skeleton': data_skeleton,
         'log_capture': log_capture,

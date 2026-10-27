@@ -12,7 +12,7 @@ import sys
 from prepare_source import INPUT_SHA256, UPSTREAM
 from nabu_logging_build import qualify_logging_candidate
 from nabu_data_skeleton import qualify_data_skeleton
-from nabu_display_ci import PROFILE as QEMU_LEGACY_PROFILE, qualify_display_candidate
+from nabu_display_ci import PROFILE as QEMU_LEGACY_PROFILE, CPU_PROFILE as QEMU_CPU_PRESENT_PROFILE, qualify_display_candidate
 
 
 def sha256(path):
@@ -189,6 +189,10 @@ def selected_sources(device):
         (device / 'scripts/build-nabu-legacy-display.py', 'device/scripts/build-nabu-legacy-display.py'),
         (device / 'scripts/nabu_display_bindings.py', 'device/scripts/nabu_display_bindings.py'),
         (device / 'platform/NabuLegacyDiscovery.cpp', 'device/platform/NabuLegacyDiscovery.cpp'),
+        (device / 'platform/NabuLegacyCpuPixels.h', 'device/platform/NabuLegacyCpuPixels.h'),
+        (device / 'platform/NabuLegacyCpuPresent.cpp', 'device/platform/NabuLegacyCpuPresent.cpp'),
+        (device / 'scripts/nabu_cpu_abi.py', 'device/scripts/nabu_cpu_abi.py'),
+        (device / 'configs/nabu_qemu_cpu_present_defconfig', 'device/configs/nabu_qemu_cpu_present_defconfig'),
         (device / 'platform/NabuLegacyDisplayProbe.cpp', 'device/platform/NabuLegacyDisplayProbe.cpp'),
         (device / 'platform/NabuLegacyStubs.cpp', 'device/platform/NabuLegacyStubs.cpp'),
         (device / 'platform/NabuGraphicsStatus.cpp', 'device/platform/NabuGraphicsStatus.cpp'),
@@ -286,7 +290,7 @@ def main():
             parsed = json.loads(report.read_text(encoding='utf-8'))
             macho = macho_summary(candidate)
             required_images = {'com.apple.filesystems.apfs', 'com.apple.kec.corecrypto'}
-            if identity['profile'] in ('nabu_qemu_cpu_ui_defconfig', QEMU_LEGACY_PROFILE):
+            if identity['profile'] in ('nabu_qemu_cpu_ui_defconfig', QEMU_LEGACY_PROFILE, QEMU_CPU_PRESENT_PROFILE):
                 required_images |= {
                     'com.apple.iokit.IOSurface',
                     'com.apple.iokit.IOMobileGraphicsFamily',
@@ -314,7 +318,7 @@ def main():
                 args.upstream, prepared.get('data_skeleton'))
             summary['data_skeleton_qualified_statically'] = bool(
                 manifest['data_skeleton_qualification'])
-            if identity['profile'] == QEMU_LEGACY_PROFILE:
+            if identity['profile'] in (QEMU_LEGACY_PROFILE, QEMU_CPU_PRESENT_PROFILE):
                 manifest['display_qualification'] = qualify_display_candidate(
                     args.upstream, args.device, candidate)
                 summary['display_qualified_statically'] = True

@@ -95,8 +95,14 @@ def main():
     source.mkdir(parents=True, exist_ok=True)
     abi.mkdir(parents=True, exist_ok=True)
     discovery = os.environ.get('NABU_LEGACY_DISCOVERY_ONLY') == '1'
+    cpu = os.environ.get('NABU_LEGACY_CPU_PRESENT') == '1'
+    if discovery and cpu:
+        raise SystemExit('Discovery and CPU presentation modes are mutually exclusive')
     if discovery:
         shutil.copy2(device / 'platform/NabuLegacyDiscovery.cpp', source / 'NativeLegacyDisplay.cpp')
+    elif cpu:
+        shutil.copy2(device / 'platform/NabuLegacyCpuPresent.cpp', source / 'NativeLegacyDisplay.cpp')
+        shutil.copy2(device / 'platform/NabuLegacyCpuPixels.h', source / 'NabuLegacyCpuPixels.h')
     else:
         for name in ('NativeLegacyDisplay.cpp', 'NativeLegacyRequest.h'):
             shutil.copy2(device / 'vendor/GopFramebuffer-cf3b429' / name, source / name)
@@ -108,7 +114,8 @@ def main():
                  source / 'NabuGraphicsStatus.cpp')
 
     run([sys.executable, root / 'scripts/nabu_display_bindings.py',
-         '--kernelcache', kernelcache, '--native', reference, '--output-dir', abi],
+         '--kernelcache', kernelcache, '--native', reference, '--output-dir', abi] +
+        (['--cpu-present'] if cpu else []),
         root, out / 'display-abi.log')
 
     recipe = root / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'
@@ -118,6 +125,11 @@ def main():
                 '-I', str(root / '.cache/xnu-work/osfmk')]
     if discovery:
         includes.append('-DNABU_LEGACY_DISCOVERY_ONLY=1')
+    if cpu:
+        contract = json.loads((abi / 'display-abi.json').read_text())['contracts'].get('cpu_present', {})
+        if contract.get('status') != 'static_qualified':
+            raise SystemExit('CPU presentation requires the original limited ABI contract')
+        includes += ['-DNABU_LEGACY_CPU_PRESENT=1', '-DNABU_LEGACY_CPU_ABI_VERIFIED=1']
     objects = []
     for name in ('NativeLegacyDisplay.cpp', 'NabuLegacyDisplayProbe.cpp',
                  'NabuLegacyStubs.cpp', 'NabuGraphicsStatus.cpp'):
@@ -190,6 +202,8 @@ def main():
         'reference_candidate': str(reference),
         'reference_candidate_sha256': sha(reference),
         'discovery_only': discovery,
+        'cpu_present': cpu,
+        'mode': 'cpu_present' if cpu else 'discovery_only' if discovery else 'vendor',
         'objects': {obj.name: sha(obj) for obj in objects},
         'vtable_symbols': compiled,
         'recipe_sha256': hashlib.sha256(recipe_bytes).hexdigest(),

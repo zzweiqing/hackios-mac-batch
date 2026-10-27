@@ -10,6 +10,7 @@ import sys
 import tarfile
 
 PROFILE = 'nabu_qemu_legacy_defconfig'
+CPU_PROFILE = 'nabu_qemu_cpu_present_defconfig'
 REFERENCE = {
     'run_id': 40446350654,
     'head_sha': '85962d51b41d2b618ff1886715ac0c5f8a905758',
@@ -94,16 +95,24 @@ def qualify_display_candidate(upstream, device, candidate):
     tree = upstream / 'out/nabu/tree'
     out = tree / 'build/native-legacy-display'
     report = json.loads((out / 'build-report.json').read_text())
-    if report.get('discovery_only') is not True or report['reference_candidate_sha256'] != REFERENCE['candidate_sha256']:
+    cpu = report.get('cpu_present') is True
+    discovery = report.get('discovery_only') is True
+    if cpu == discovery or report['reference_candidate_sha256'] != REFERENCE['candidate_sha256']:
         raise ValueError('Display archive has the wrong mode or reference')
     if sha(out / 'libNativeLegacyDisplay.late.a') != report['archive_sha256']:
         raise ValueError('Display archive changed')
-    if sha(out / 'source/NativeLegacyDisplay.cpp') != sha(device / 'platform/NabuLegacyDiscovery.cpp'):
-        raise ValueError('Display archive did not compile the discovery implementation')
+    implementation = 'NabuLegacyCpuPresent.cpp' if cpu else 'NabuLegacyDiscovery.cpp'
+    if sha(out / 'source/NativeLegacyDisplay.cpp') != sha(device / 'platform' / implementation):
+        raise ValueError('Display archive did not compile the selected implementation')
+    if cpu and sha(out / 'source/NabuLegacyCpuPixels.h') != sha(device / 'platform/NabuLegacyCpuPixels.h'):
+        raise ValueError('CPU pixel implementation changed')
     for name in ('NativeLegacyDisplay', 'NabuLegacyDisplayProbe', 'NabuLegacyStubs', 'NabuGraphicsStatus'):
         command = json.loads((out / (name + '.command.json')).read_text())
-        if '-DNABU_LEGACY_DISCOVERY_ONLY=1' not in command:
-            raise ValueError('Display object lacks the discovery-only compile flag')
+        required = (['-DNABU_LEGACY_CPU_PRESENT=1', '-DNABU_LEGACY_CPU_ABI_VERIFIED=1']
+                    if cpu else ['-DNABU_LEGACY_DISCOVERY_ONLY=1'])
+        forbidden = '-DNABU_LEGACY_DISCOVERY_ONLY=1' if cpu else '-DNABU_LEGACY_CPU_PRESENT=1'
+        if any(flag not in command for flag in required) or forbidden in command:
+            raise ValueError('Display object has the wrong implementation compile flags')
     for name, digest in report['source_sha256'].items():
         if not (tree / name).resolve().is_relative_to(tree.resolve()) or sha(tree / name) != digest:
             raise ValueError('Display source mismatch')
@@ -113,11 +122,15 @@ def qualify_display_candidate(upstream, device, candidate):
     final_dir = out / 'final-abi'
     subprocess.run([sys.executable, device / 'scripts/nabu_display_bindings.py',
                     '--kernelcache', report['kernelcache'], '--native', candidate,
-                    '--native-prelink', tree / 'kits/NativePrelink', '--output-dir', final_dir],
+                    '--native-prelink', tree / 'kits/NativePrelink', '--output-dir', final_dir] +
+                   (['--cpu-present'] if cpu else []),
                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     reference = json.loads((out / 'abi/display-abi.json').read_text())
     final = json.loads((final_dir / 'display-abi.json').read_text())
     compare_abi(reference, final)
+    if cpu and (reference['contracts'].get('cpu_present', {}).get('status') != 'static_qualified' or
+                final['contracts'].get('cpu_present') != reference['contracts'].get('cpu_present')):
+        raise ValueError('Final CPU limited ABI contract changed')
     raw = candidate.read_bytes()
     symbols, segments = symbols_and_segments(raw)
     aliases = re.findall(r'^\.set (\S+), (0x[0-9a-f]+)$',
@@ -133,10 +146,11 @@ def qualify_display_candidate(upstream, device, candidate):
     for index, name in enumerate(report['vtable_symbols']):
         if slots[index] != symbols.get(name):
             raise ValueError(f'Final display dispatch mismatch at slot {index}: {name}')
-    return {'mode': 'discovery_only', 'reference': REFERENCE,
+    return {'mode': 'cpu_present' if cpu else 'discovery_only', 'reference': REFERENCE,
             'archive_sha256': report['archive_sha256'], 'aliases_verified': len(aliases),
             'vtable_slots_verified': 358, 'candidate_sha256': sha(candidate),
-            'pixel_transfer_enabled': False, 'user_client_interposition': False,
+            'pixel_transfer_enabled': cpu, 'pixel_transfer_runtime_observed': False,
+            'user_client_interposition': False,
             'runtime_qualified': False}
 
 
