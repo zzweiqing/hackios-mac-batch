@@ -68,7 +68,7 @@ volatile uint64_t native_legacy_object,native_legacy_nub,native_legacy_workloop;
 volatile uint32_t native_legacy_guard_slot;
 volatile uint64_t native_legacy_guard_object,native_legacy_guard_caller;
 volatile int native_legacy_surface_status=-1;
-volatile uint32_t native_legacy_surface_found;
+volatile uint32_t native_legacy_surface_found,native_legacy_surface_class_match;
 volatile int native_legacy_console_status=-1;
 volatile uint32_t native_legacy_console_width,native_legacy_console_height;
 volatile uint32_t native_legacy_console_stride,native_legacy_console_rotation;
@@ -517,13 +517,18 @@ void native_legacy_display_late_probe(void) {
         display->release();native_legacy_released=1;native_legacy_stage=8;
         native_legacy_display_checkpoint();return;
     }
-    IOLog("NABU LEGACY: IOSurfaceRoot wait begin\n");
-    OSDictionary *matching=IOService::nameMatching("IOSurfaceRoot");
+    // 21H16 IOSurfaceRoot::start names the service IOCoreSurfaceRoot. The
+    // original IOMFB consumer uses that name, not the personality's IOClass.
+    IOLog("NABU LEGACY: IOCoreSurfaceRoot wait begin\n");
+    OSDictionary *matching=IOService::nameMatching("IOCoreSurfaceRoot");
     IOService *surface=matching?IOService::waitForMatchingService(matching,5000000000ULL):nullptr;
-    native_legacy_surface_found=surface!=nullptr;OSSafeReleaseNULL(surface);OSSafeReleaseNULL(matching);
-    IOLog("NABU LEGACY: IOSurfaceRoot wait returned found=%u\n",native_legacy_surface_found);
+    native_legacy_surface_found=surface!=nullptr;
+    native_legacy_surface_class_match=surface && surface->metaCast("IOSurfaceRoot");
+    OSSafeReleaseNULL(surface);OSSafeReleaseNULL(matching);
+    IOLog("NABU LEGACY: IOCoreSurfaceRoot wait returned found=%u class=%u\n",
+        native_legacy_surface_found,native_legacy_surface_class_match);
     PE_Video video={};
-    if(!native_legacy_surface_status && native_legacy_surface_found && !PE_current_console(&video)
+    if(!native_legacy_surface_status && native_legacy_surface_found && native_legacy_surface_class_match && !PE_current_console(&video)
         && video.v_baseAddr && video.v_width && video.v_height && video.v_depth==32
         && !video.v_rotate && video.v_width<=16384 && video.v_height<=16384
         && video.v_rowBytes>=video.v_width*4 && video.v_rowBytes<=UINT64_MAX/video.v_height) {
