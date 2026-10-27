@@ -6,8 +6,8 @@
 #include <pexpert/pexpert.h>
 #include <mach/kmod.h>
 
-#if !defined(NABU_LEGACY_CPU_PRESENT)
-#error Keybag notifications are limited to the explicit QEMU RAM-Data CPU profile
+#if !defined(NABU_LEGACY_CPU_PRESENT) || !defined(NABU_KEYBAG_RAM_DATA_VERIFIED)
+#error Keybag notifications require an explicit CPU profile with verified RAM-Data build dependencies
 #endif
 
 extern "C" {

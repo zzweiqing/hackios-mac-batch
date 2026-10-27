@@ -8,9 +8,13 @@ import struct
 import subprocess
 import sys
 import tarfile
+import tomllib
 
 PROFILE = 'nabu_qemu_legacy_defconfig'
 CPU_PROFILE = 'nabu_qemu_cpu_present_defconfig'
+HARDWARE_CPU_PROFILE = 'nabu_ufs_cpu_present_defconfig'
+CPU_PROFILES = (CPU_PROFILE, HARDWARE_CPU_PROFILE)
+DISPLAY_PROFILES = (PROFILE, *CPU_PROFILES)
 REFERENCE = {
     'run_id': 40446350654,
     'head_sha': '85962d51b41d2b618ff1886715ac0c5f8a905758',
@@ -91,14 +95,26 @@ def compare_abi(reference, final):
         raise ValueError('Original display vtable targets moved in the final candidate')
 
 
-def qualify_display_candidate(upstream, device, candidate):
+def qualify_display_candidate(upstream, device, candidate, expected_profile=None):
     tree = upstream / 'out/nabu/tree'
     out = tree / 'build/native-legacy-display'
     report = json.loads((out / 'build-report.json').read_text())
     cpu = report.get('cpu_present') is True
     discovery = report.get('discovery_only') is True
+    profile = tomllib.loads((device / 'board.toml').read_text())['kernel']['defconfig']
+    if (profile not in DISPLAY_PROFILES or report.get('profile') != profile or
+            (expected_profile is not None and profile != expected_profile) or
+            cpu != (profile in CPU_PROFILES) or discovery != (profile == PROFILE)):
+        raise ValueError('Display archive has the wrong profile or implementation mode')
     if cpu == discovery or report['reference_candidate_sha256'] != REFERENCE['candidate_sha256']:
         raise ValueError('Display archive has the wrong mode or reference')
+    if cpu:
+        hardware = profile == HARDWARE_CPU_PROFILE
+        expected_scope = {'profile': profile, 'data_backend': 'volatile_ram',
+                          'system_transport': 'ufs' if hardware else 'virtio',
+                          'boot_pmgr': 'nabu' if hardware else 'qemu'}
+        if report.get('notification_profile_qualification') != expected_scope:
+            raise ValueError('Notification dependencies do not match the selected CPU profile')
     if sha(out / 'libNativeLegacyDisplay.late.a') != report['archive_sha256']:
         raise ValueError('Display archive changed')
     implementation = 'NabuLegacyCpuPresent.cpp' if cpu else 'NabuLegacyDiscovery.cpp'
@@ -116,7 +132,8 @@ def qualify_display_candidate(upstream, device, candidate):
         compiled_sources.append('NabuKeybagNotifications')
     for name in compiled_sources:
         command = json.loads((out / (name + '.command.json')).read_text())
-        required = (['-DNABU_LEGACY_CPU_PRESENT=1', '-DNABU_LEGACY_CPU_ABI_VERIFIED=1']
+        required = (['-DNABU_LEGACY_CPU_PRESENT=1', '-DNABU_LEGACY_CPU_ABI_VERIFIED=1',
+                     '-DNABU_KEYBAG_RAM_DATA_VERIFIED=1']
                     if cpu else ['-DNABU_LEGACY_DISCOVERY_ONLY=1'])
         forbidden = '-DNABU_LEGACY_DISCOVERY_ONLY=1' if cpu else '-DNABU_LEGACY_CPU_PRESENT=1'
         if any(flag not in command for flag in required) or forbidden in command:
@@ -154,12 +171,13 @@ def qualify_display_candidate(upstream, device, candidate):
     for index, name in enumerate(report['vtable_symbols']):
         if slots[index] != symbols.get(name):
             raise ValueError(f'Final display dispatch mismatch at slot {index}: {name}')
-    return {'mode': 'cpu_present' if cpu else 'discovery_only', 'reference': REFERENCE,
+    return {'profile': profile, 'mode': 'cpu_present' if cpu else 'discovery_only', 'reference': REFERENCE,
             'archive_sha256': report['archive_sha256'], 'aliases_verified': len(aliases),
             'vtable_slots_verified': 358, 'candidate_sha256': sha(candidate),
             'pixel_transfer_enabled': cpu, 'pixel_transfer_runtime_observed': False,
             'user_client_interposition': False,
             'ephemeral_notification_transport_compiled': cpu,
+            'notification_profile_qualification': report.get('notification_profile_qualification'),
             'key_operations_supported': False, 'key_state_queries_supported': False,
             'runtime_qualified': False}
 

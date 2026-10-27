@@ -12,7 +12,7 @@ import sys
 from prepare_source import INPUT_SHA256, UPSTREAM
 from nabu_logging_build import qualify_logging_candidate
 from nabu_data_skeleton import qualify_data_skeleton
-from nabu_display_ci import PROFILE as QEMU_LEGACY_PROFILE, CPU_PROFILE as QEMU_CPU_PRESENT_PROFILE, qualify_display_candidate
+from nabu_display_ci import DISPLAY_PROFILES, qualify_display_candidate
 
 
 def sha256(path):
@@ -157,6 +157,7 @@ def selected_sources(device):
         (device / 'configs/nabu_ufs_root_defconfig', 'device/configs/nabu_ufs_root_defconfig'),
         (device / 'configs/nabu_ufs_data_defconfig', 'device/configs/nabu_ufs_data_defconfig'),
         (device / 'configs/nabu_ufs_cpu_ui_defconfig', 'device/configs/nabu_ufs_cpu_ui_defconfig'),
+        (device / 'configs/nabu_ufs_cpu_present_defconfig', 'device/configs/nabu_ufs_cpu_present_defconfig'),
         (device / 'LICENSE', 'device/LICENSE'),
         (device / 'scripts/build-nabu-platform.py', 'device/scripts/build-nabu-platform.py'),
         (device / 'scripts/nabu_armcpu_source.py', 'device/scripts/nabu_armcpu_source.py'),
@@ -270,6 +271,7 @@ def main():
                 'qemu_cpu_ui_reference': prepared.get('qemu_cpu_ui_reference', False),
                 'qemu_legacy_discovery': prepared.get('qemu_legacy_discovery', False),
                 'qemu_cpu_present': prepared.get('qemu_cpu_present', False),
+                'ufs_cpu_present': prepared.get('ufs_cpu_present', False),
                 'display_reference': prepared.get('display_reference'),
                 'log_capture': prepared.get('log_capture'),
                 'hardware_tested': False, 'apple_launchd_executed': False}
@@ -292,7 +294,7 @@ def main():
             parsed = json.loads(report.read_text(encoding='utf-8'))
             macho = macho_summary(candidate)
             required_images = {'com.apple.filesystems.apfs', 'com.apple.kec.corecrypto'}
-            if identity['profile'] in ('nabu_qemu_cpu_ui_defconfig', QEMU_LEGACY_PROFILE, QEMU_CPU_PRESENT_PROFILE):
+            if identity['profile'] in ('nabu_qemu_cpu_ui_defconfig', *DISPLAY_PROFILES):
                 required_images |= {
                     'com.apple.iokit.IOSurface',
                     'com.apple.iokit.IOMobileGraphicsFamily',
@@ -320,9 +322,9 @@ def main():
                 args.upstream, prepared.get('data_skeleton'))
             summary['data_skeleton_qualified_statically'] = bool(
                 manifest['data_skeleton_qualification'])
-            if identity['profile'] in (QEMU_LEGACY_PROFILE, QEMU_CPU_PRESENT_PROFILE):
+            if identity['profile'] in DISPLAY_PROFILES:
                 manifest['display_qualification'] = qualify_display_candidate(
-                    args.upstream, args.device, candidate)
+                    args.upstream, args.device, candidate, expected_profile=identity['profile'])
                 summary['display_qualified_statically'] = True
             summary['candidate_validated'] = valid
             summary['undefined_symbol_count'] = len(macho['undefined_names'])

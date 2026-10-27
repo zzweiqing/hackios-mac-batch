@@ -14,6 +14,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tomllib
 
 
 def compile_command(record, source, output):
@@ -78,9 +79,37 @@ def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def validate_cpu_profile(lines, profile, hardware_pmgr):
+    modes = {'nabu_qemu_cpu_present_defconfig': False,
+             'nabu_ufs_cpu_present_defconfig': True}
+    if profile not in modes:
+        raise ValueError('CPU notifications require an explicit CPU presentation profile')
+    hardware = modes[profile]
+    if hardware_pmgr != hardware:
+        raise ValueError('CPU presentation profile has the wrong boot PMGR backend')
+    config = {}
+    for line in lines:
+        if not line.startswith('CONFIG_') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        if key in config:
+            raise ValueError('Duplicate CPU profile assignment: ' + key)
+        config[key] = value
+    required = {'NATIVE_LEGACY_DISPLAY': 'y', 'NATIVE_RAM_BLOCK': 'y',
+                'OWNER_DATA_MOUNT': 'y', 'OWNER_ROOT_TRUST': 'y',
+                'OWNER_UNION_SYSTEMOS': 'y', 'NATIVE_VIRTIO_BLOCK': 'y',
+                'NATIVE_UFS': 'y' if hardware else 'n'}
+    if any(config.get('CONFIG_XNU_' + name) != value for name, value in required.items()):
+        raise ValueError('CPU notifications require the selected owner root and volatile RAM Data dependencies')
+    return {'profile': profile, 'data_backend': 'volatile_ram',
+            'system_transport': 'ufs' if hardware else 'virtio',
+            'boot_pmgr': 'nabu' if hardware else 'qemu'}
+
+
 def main():
     root = Path(__file__).resolve().parents[1]
     device = Path(os.environ['UNIXNU_DEVICE'])
+    profile = tomllib.loads((device / 'board.toml').read_text())['kernel']['defconfig']
     kernelcache = Path(os.environ['UNIXNU_KERNELCACHE'])
     reference = os.environ.get('UNIXNU_DISPLAY_REFERENCE')
     if not reference:
@@ -96,6 +125,7 @@ def main():
     abi.mkdir(parents=True, exist_ok=True)
     discovery = os.environ.get('NABU_LEGACY_DISCOVERY_ONLY') == '1'
     cpu = os.environ.get('NABU_LEGACY_CPU_PRESENT') == '1'
+    notification_scope = None
     if discovery and cpu:
         raise SystemExit('Discovery and CPU presentation modes are mutually exclusive')
     if discovery:
@@ -104,10 +134,12 @@ def main():
         shutil.copy2(device / 'platform/NabuLegacyCpuPresent.cpp', source / 'NativeLegacyDisplay.cpp')
         shutil.copy2(device / 'platform/NabuLegacyCpuPixels.h', source / 'NabuLegacyCpuPixels.h')
         shutil.copy2(device / 'platform/NabuKeybagNotifications.cpp', source / 'NabuKeybagNotifications.cpp')
-        config = set((root.parent / '.config').read_text().splitlines())
-        if not {'CONFIG_XNU_NATIVE_RAM_BLOCK=y', 'CONFIG_XNU_OWNER_DATA_MOUNT=y',
-                'CONFIG_XNU_NATIVE_UFS=n'} <= config:
-            raise SystemExit('Ephemeral notifications require the actual QEMU RAM-Data profile')
+        try:
+            notification_scope = validate_cpu_profile(
+                (root.parent / '.config').read_text().splitlines(), profile,
+                os.environ.get('NABU_BOOT_PMGR') == '1')
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
     else:
         for name in ('NativeLegacyDisplay.cpp', 'NativeLegacyRequest.h'):
             shutil.copy2(device / 'vendor/GopFramebuffer-cf3b429' / name, source / name)
@@ -134,7 +166,8 @@ def main():
         contract = json.loads((abi / 'display-abi.json').read_text())['contracts'].get('cpu_present', {})
         if contract.get('status') != 'static_qualified':
             raise SystemExit('CPU presentation requires the original limited ABI contract')
-        includes += ['-DNABU_LEGACY_CPU_PRESENT=1', '-DNABU_LEGACY_CPU_ABI_VERIFIED=1']
+        includes += ['-DNABU_LEGACY_CPU_PRESENT=1', '-DNABU_LEGACY_CPU_ABI_VERIFIED=1',
+                     '-DNABU_KEYBAG_RAM_DATA_VERIFIED=1']
     objects = []
     sources = ['NativeLegacyDisplay.cpp', 'NabuLegacyDisplayProbe.cpp',
                'NabuLegacyStubs.cpp', 'NabuGraphicsStatus.cpp']
@@ -206,6 +239,7 @@ def main():
     archive.unlink(missing_ok=True)
     run(['llvm-ar', 'rcs', archive, *objects], root, out / 'ar.log')
     report = {
+        'profile': profile,
         'archive_sha256': sha(archive),
         'source_sha256': {
             str(path.relative_to(root)): sha(path) for path in sorted(source.iterdir()) if path.is_file()
@@ -220,6 +254,7 @@ def main():
         'discovery_only': discovery,
         'cpu_present': cpu,
         'ephemeral_notification_transport_compiled': cpu,
+        'notification_profile_qualification': notification_scope,
         'key_state_queries_supported': False,
         'key_operations_supported': False,
         'mode': 'cpu_present' if cpu else 'discovery_only' if discovery else 'vendor',
