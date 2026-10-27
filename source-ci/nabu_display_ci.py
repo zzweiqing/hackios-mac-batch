@@ -106,7 +106,15 @@ def qualify_display_candidate(upstream, device, candidate):
         raise ValueError('Display archive did not compile the selected implementation')
     if cpu and sha(out / 'source/NabuLegacyCpuPixels.h') != sha(device / 'platform/NabuLegacyCpuPixels.h'):
         raise ValueError('CPU pixel implementation changed')
-    for name in ('NativeLegacyDisplay', 'NabuLegacyDisplayProbe', 'NabuLegacyStubs', 'NabuGraphicsStatus'):
+    if cpu and sha(out / 'source/NabuKeybagNotifications.cpp') != sha(device / 'platform/NabuKeybagNotifications.cpp'):
+        raise ValueError('Ephemeral notification implementation changed')
+    if cpu and (report.get('key_state_queries_supported') is not False or
+                report.get('key_operations_supported') is not False):
+        raise ValueError('Notification transport must not supply key or lock-state answers')
+    compiled_sources = ['NativeLegacyDisplay', 'NabuLegacyDisplayProbe', 'NabuLegacyStubs', 'NabuGraphicsStatus']
+    if cpu:
+        compiled_sources.append('NabuKeybagNotifications')
+    for name in compiled_sources:
         command = json.loads((out / (name + '.command.json')).read_text())
         required = (['-DNABU_LEGACY_CPU_PRESENT=1', '-DNABU_LEGACY_CPU_ABI_VERIFIED=1']
                     if cpu else ['-DNABU_LEGACY_DISCOVERY_ONLY=1'])
@@ -151,6 +159,8 @@ def qualify_display_candidate(upstream, device, candidate):
             'vtable_slots_verified': 358, 'candidate_sha256': sha(candidate),
             'pixel_transfer_enabled': cpu, 'pixel_transfer_runtime_observed': False,
             'user_client_interposition': False,
+            'ephemeral_notification_transport_compiled': cpu,
+            'key_operations_supported': False, 'key_state_queries_supported': False,
             'runtime_qualified': False}
 
 

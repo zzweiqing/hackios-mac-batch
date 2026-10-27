@@ -189,6 +189,7 @@ def selected_sources(device):
         (device / 'scripts/build-nabu-legacy-display.py', 'device/scripts/build-nabu-legacy-display.py'),
         (device / 'scripts/nabu_display_bindings.py', 'device/scripts/nabu_display_bindings.py'),
         (device / 'platform/NabuLegacyDiscovery.cpp', 'device/platform/NabuLegacyDiscovery.cpp'),
+        (device / 'platform/NabuKeybagNotifications.cpp', 'device/platform/NabuKeybagNotifications.cpp'),
         (device / 'platform/NabuLegacyCpuPixels.h', 'device/platform/NabuLegacyCpuPixels.h'),
         (device / 'platform/NabuLegacyCpuPresent.cpp', 'device/platform/NabuLegacyCpuPresent.cpp'),
         (device / 'scripts/nabu_cpu_abi.py', 'device/scripts/nabu_cpu_abi.py'),
@@ -268,6 +269,7 @@ def main():
                 'qemu_data': prepared.get('qemu_data', False),
                 'qemu_cpu_ui_reference': prepared.get('qemu_cpu_ui_reference', False),
                 'qemu_legacy_discovery': prepared.get('qemu_legacy_discovery', False),
+                'qemu_cpu_present': prepared.get('qemu_cpu_present', False),
                 'display_reference': prepared.get('display_reference'),
                 'log_capture': prepared.get('log_capture'),
                 'hardware_tested': False, 'apple_launchd_executed': False}

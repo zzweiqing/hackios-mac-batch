@@ -28,6 +28,9 @@ extern "C" void native_legacy_vsync_observed(unsigned, unsigned) {}
 extern "C" kmod_info_t g_kernel_kmod_info;
 extern "C" void native_legacy_display_static_init(void) __asm__("__GLOBAL__sub_I_NativeLegacyDisplay.cpp");
 extern "C" IOService *native_legacy_display_allocate(void);
+#if defined(NABU_LEGACY_CPU_PRESENT)
+extern "C" void nabu_keybag_notifications_start(void);
+#endif
 static IOService *pendingLegacyDisplay;
 static IOService *activeGOPPresenter,*activeGOPNub;
 // GPU hand-off presenter (sheng-fb-gpu=1, phase 4): lives beside the display driver, which offers it frames instead of copying them.
@@ -507,6 +510,9 @@ extern void native_shared_window_probe(void);
 extern void native_qemu_metal_publish(void);
 void native_legacy_display_late_probe(void) {
     // nabu CPU-only observation: no KeyStore/HID/VirtIO/shared-window/QEMU Metal probes.
+#if defined(NABU_LEGACY_CPU_PRESENT)
+    nabu_keybag_notifications_start();
+#endif
     IOService *display=pendingLegacyDisplay;
     IOLog("NABU LEGACY: late begin pending=%p stage=%u\n",display,native_legacy_stage);
     if(!display)return;pendingLegacyDisplay=nullptr;

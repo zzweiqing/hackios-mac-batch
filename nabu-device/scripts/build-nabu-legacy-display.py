@@ -103,6 +103,11 @@ def main():
     elif cpu:
         shutil.copy2(device / 'platform/NabuLegacyCpuPresent.cpp', source / 'NativeLegacyDisplay.cpp')
         shutil.copy2(device / 'platform/NabuLegacyCpuPixels.h', source / 'NabuLegacyCpuPixels.h')
+        shutil.copy2(device / 'platform/NabuKeybagNotifications.cpp', source / 'NabuKeybagNotifications.cpp')
+        config = set((root.parent / '.config').read_text().splitlines())
+        if not {'CONFIG_XNU_NATIVE_RAM_BLOCK=y', 'CONFIG_XNU_OWNER_DATA_MOUNT=y',
+                'CONFIG_XNU_NATIVE_UFS=n'} <= config:
+            raise SystemExit('Ephemeral notifications require the actual QEMU RAM-Data profile')
     else:
         for name in ('NativeLegacyDisplay.cpp', 'NativeLegacyRequest.h'):
             shutil.copy2(device / 'vendor/GopFramebuffer-cf3b429' / name, source / name)
@@ -131,8 +136,11 @@ def main():
             raise SystemExit('CPU presentation requires the original limited ABI contract')
         includes += ['-DNABU_LEGACY_CPU_PRESENT=1', '-DNABU_LEGACY_CPU_ABI_VERIFIED=1']
     objects = []
-    for name in ('NativeLegacyDisplay.cpp', 'NabuLegacyDisplayProbe.cpp',
-                 'NabuLegacyStubs.cpp', 'NabuGraphicsStatus.cpp'):
+    sources = ['NativeLegacyDisplay.cpp', 'NabuLegacyDisplayProbe.cpp',
+               'NabuLegacyStubs.cpp', 'NabuGraphicsStatus.cpp']
+    if cpu:
+        sources.append('NabuKeybagNotifications.cpp')
+    for name in sources:
         obj = out / (Path(name).stem + '.o')
         command = compile_command(record, source / name, obj) + includes
         (out / (Path(name).stem + '.command.json')).write_text(json.dumps(command, indent=2) + '\n')
@@ -148,6 +156,14 @@ def main():
         root, out / 'objcopy.log')
     check_object(late.read_bytes())
     objects = [late if obj.name == 'NativeLegacyDisplay.o' else obj for obj in objects]
+    if cpu:
+        notification = out / 'NabuKeybagNotifications.late.o'
+        run(['llvm-objcopy', '--remove-section=__DATA,__mod_init_func',
+             '--globalize-symbol=__GLOBAL__sub_I_NabuKeybagNotifications.cpp',
+             str(out / 'NabuKeybagNotifications.o'), str(notification)],
+            root, out / 'notification-objcopy.log')
+        check_object(notification.read_bytes())
+        objects = [notification if obj.name == 'NabuKeybagNotifications.o' else obj for obj in objects]
 
     sys.path.insert(0, str(root / 'kits/NativePrelink'))
     from native_prelink import macho
@@ -203,6 +219,9 @@ def main():
         'reference_candidate_sha256': sha(reference),
         'discovery_only': discovery,
         'cpu_present': cpu,
+        'ephemeral_notification_transport_compiled': cpu,
+        'key_state_queries_supported': False,
+        'key_operations_supported': False,
         'mode': 'cpu_present' if cpu else 'discovery_only' if discovery else 'vendor',
         'objects': {obj.name: sha(obj) for obj in objects},
         'vtable_symbols': compiled,
