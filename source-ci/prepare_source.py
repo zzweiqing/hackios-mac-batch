@@ -551,7 +551,7 @@ def main():
     result = apply_vc_text_scale(result)
     path.write_bytes(result)
     data_skeleton = None
-    if args.profile in ('nabu_ufs_data_defconfig', CPU_UI_PROFILE, QEMU_DATA_PROFILE):
+    if 'CONFIG_XNU_OWNER_DATA_MOUNT=y' in options:
         data_skeleton = prepare_data_skeleton(args.upstream)
     log_capture = enable_logging(args.upstream, args.device) if args.capture_logs else None
     args.report.parent.mkdir(parents=True, exist_ok=True)

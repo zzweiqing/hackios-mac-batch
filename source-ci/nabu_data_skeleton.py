@@ -316,3 +316,26 @@ def prepare_data_skeleton(upstream):
             'symlinks': [{'path': path, 'target': target} for path, target in SYMLINKS],
             'reference': '21H16 restore-image /private/var (apfs-fuse, 2026-10-26)',
             'runtime_qualified': False}
+
+
+def qualify_data_skeleton(upstream, prepared):
+    """Check the enabled feature in actual build sources, not a profile name."""
+    work = upstream / 'out/nabu'
+    options = (work / '.config').read_text(encoding='utf-8').splitlines()
+    if 'CONFIG_XNU_OWNER_DATA_MOUNT=y' not in options:
+        return None
+    if not prepared:
+        raise ValueError('Enabled Data mount has no skeleton preparation receipt')
+    if prepared.get('after_sha256') != hashlib.sha256(skeleton_patch()).hexdigest():
+        raise ValueError('Data skeleton preparation does not match the current source')
+    source = work / 'tree/.cache/xnu-work/bsd/kern/kern_exec.c'
+    text = source.read_text(encoding='utf-8')
+    call = ('\tif (!error) error = native_owner_data_skeleton(p, scratch, data_mount);\n'
+            '\tif (!error) native_owner_data_stage = 4;')
+    if helper_source().rstrip() not in text or call not in text:
+        raise ValueError('Actual kern_exec.c lacks the complete Data skeleton or its stage-4 call')
+    return {'source': 'outputs/tree/.cache/xnu-work/bsd/kern/kern_exec.c',
+            'source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+            'patch_sha256': prepared['after_sha256'],
+            'directory_count': len(DIRECTORIES), 'symlink_count': len(SYMLINKS),
+            'runtime_qualified': False}

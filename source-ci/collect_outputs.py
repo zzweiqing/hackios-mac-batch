@@ -11,6 +11,7 @@ import sys
 
 from prepare_source import INPUT_SHA256, UPSTREAM
 from nabu_logging_build import qualify_logging_candidate
+from nabu_data_skeleton import qualify_data_skeleton
 
 
 def sha256(path):
@@ -174,6 +175,7 @@ def selected_sources(device):
         (device / 'ufs/NabuUfsService.h', 'device/ufs/NabuUfsService.h'),
         (source_dir / 'prepare_source.py', 'source-ci/prepare_source.py'),
         (source_dir / 'collect_outputs.py', 'source-ci/collect_outputs.py'),
+        (source_dir / 'nabu_data_skeleton.py', 'source-ci/nabu_data_skeleton.py'),
         (workflow_dir / 'unixnu-source.yml', '.github/workflows/unixnu-source.yml'),
     ]
     root = root.resolve()
@@ -290,6 +292,10 @@ def main():
                 manifest['logging_qualification'] = qualify_logging_candidate(
                     args.upstream, candidate, identity['log_capture'].get('source_identity'))
                 summary['logging_qualified_statically'] = True
+            manifest['data_skeleton_qualification'] = qualify_data_skeleton(
+                args.upstream, prepared.get('data_skeleton'))
+            summary['data_skeleton_qualified_statically'] = bool(
+                manifest['data_skeleton_qualification'])
             summary['candidate_validated'] = valid
             summary['undefined_symbol_count'] = len(macho['undefined_names'])
             manifest['macho'] = macho
