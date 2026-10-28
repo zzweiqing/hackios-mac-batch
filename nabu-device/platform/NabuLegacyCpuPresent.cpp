@@ -139,15 +139,17 @@ public:
         enabled = value == 1;
         if (!IOMobileFramebufferLegacy::start(provider)) return false;
         if (enabled && primary && bootMapping) {
-            // As UniXNU's logical PM: request the original controller scheduling
-            // state (+5836=1, read by the original swap entry before validation)
-            // and leave panel power (+5840) unclaimed; no physical power control.
+            // As UniXNU's logical PM plus announcePoweredByFirmware: request the
+            // original scheduling state (+5836=1, read by the swap entry before
+            // validation) and record the firmware-lit GOP panel as powered (+5840=1;
+            // without it selector 6's wait answers busy). No physical power control.
             struct StateRequest { uint32_t skipRequested, requested, skipPowered, powered;
-                                  uint8_t changed; uint8_t pad[11]; } request = {0,1,1,0,1,{}};
+                                  uint8_t changed; uint8_t pad[11]; } request = {0,1,0,1,1,{}};
             nabu_legacy_display_state(this, &request, false);
-            uint32_t scheduled = 0;
+            uint32_t scheduled = 0, powered = 0;
             memcpy(&scheduled, reinterpret_cast<const unsigned char *>(this) + 5836, 4);
-            if (scheduled != 1) {
+            memcpy(&powered, reinterpret_cast<const unsigned char *>(this) + 5840, 4);
+            if (scheduled != 1 || powered != 1) {
                 enabled = false;
                 IOMobileFramebufferLegacy::stop(provider);
                 return false;

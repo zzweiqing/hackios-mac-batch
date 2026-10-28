@@ -36,6 +36,7 @@ extern volatile uint32_t nabu_keybag_notification_stage;
 extern volatile int nabu_keybag_notification_status;
 extern volatile uint32_t nabu_keybag_notification_subscriptions, nabu_keybag_notification_failures;
 extern volatile uint32_t nabu_keybag_notification_refused_opens;
+unsigned native_legacy_state_words(char *out, unsigned cap);
 #endif
 
 static void
@@ -86,6 +87,8 @@ nabu_graphics_status_worker(void *parameter, wait_result_t waitResult)
             nabu_keybag_notification_stage, (unsigned)nabu_keybag_notification_status,
             nabu_keybag_notification_subscriptions, nabu_keybag_notification_failures,
             nabu_keybag_notification_refused_opens);
+        char words[192];
+        if (native_legacy_state_words(words, sizeof(words))) IOLog("NABU DISPLAY state %s\n", words);
 #endif
     }
     thread_terminate(current_thread());

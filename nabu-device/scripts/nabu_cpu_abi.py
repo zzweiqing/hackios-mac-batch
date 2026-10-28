@@ -40,9 +40,10 @@ def qualify(read, methods):
         'completion': {'slot': 295, 'arguments': 'this; original wrapper passes force=1'},
         'logical_schedule_state': {'slot': 354, 'raw_va': hex(DISPLAY_STATE),
                                    'requested_word': 5836, 'requested_value': 1,
-                                   'powered_word': 5840, 'powered_claimed': False,
+                                   'powered_word': 5840, 'powered_claimed': True,
                                    'meaning': 'original swap entry requires +5836 != 0 (UniXNU logical PM); '
-                                              'no panel power claimed, not hardware PM'},
+                                              '+5840=1 records the firmware-lit GOP panel as UniXNU '
+                                              'announcePoweredByFirmware does; not hardware PM'},
         'console_handoff': 'standard PE_initialize_console(kPEDisableScreen), explicit CPU profile only',
         'runtime_qualified': False, 'user_client_contract': 'unknown',
         'limitation': 'Static limited backend contract; actual producer, queue serialization and completion need execution evidence',
