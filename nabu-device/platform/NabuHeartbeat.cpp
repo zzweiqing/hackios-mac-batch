@@ -24,6 +24,10 @@
 #include "../ufs/NabuLogCore.h"
 #include "../ufs/NabuLogWatch.h"
 
+#ifndef NABU_HEARTBEAT_RAM_ACCOUNTING
+#define NABU_HEARTBEAT_RAM_ACCOUNTING 0
+#endif
+
 extern "C" {
 extern volatile unsigned nabu_log_writer_state;
 extern volatile unsigned nabu_log_writer_rounds;
@@ -32,10 +36,38 @@ extern volatile uint64_t armcpu_timer_interrupts;
 extern int nprocs;
 extern unsigned int vm_page_free_count;
 extern unsigned int vm_page_active_count;
+extern unsigned int vm_page_wire_count;
+extern unsigned int vm_page_inactive_count;
+extern unsigned int vm_page_speculative_count;
+extern unsigned int vm_page_pageable_internal_count;
+extern unsigned int vm_page_pageable_external_count;
 extern uint32_t vm_page_pages;
+#if NABU_HEARTBEAT_RAM_ACCOUNTING
+extern volatile uint64_t native_ram_block_bytes;
+extern volatile uint64_t native_ram_block_resident_bytes;
+extern volatile uint64_t native_ram_block_reads;
+extern volatile uint64_t native_ram_block_writes;
+extern volatile uint64_t native_ram_block_failures;
+#endif
 }
 
 namespace {
+
+void memory_snapshot(const char *source, unsigned sample)
+{
+	// Independent reads; pageable counts overlap queues and must not be summed.
+	IOLog("NABU VM source=%s sample=%u free=%u active=%u inactive=%u speculative=%u wired=%u internal=%u external=%u\n",
+	    source, sample, vm_page_free_count, vm_page_active_count,
+	    vm_page_inactive_count, vm_page_speculative_count, vm_page_wire_count,
+	    vm_page_pageable_internal_count, vm_page_pageable_external_count);
+#if NABU_HEARTBEAT_RAM_ACCOUNTING
+	IOLog("NABU RAM source=%s sample=%u bytes=%llu resident=%llu reads=%llu writes=%llu failures=%llu\n",
+	    source, sample, (unsigned long long)native_ram_block_bytes,
+	    (unsigned long long)native_ram_block_resident_bytes,
+	    (unsigned long long)native_ram_block_reads, (unsigned long long)native_ram_block_writes,
+	    (unsigned long long)native_ram_block_failures);
+#endif
+}
 
 constexpr unsigned kDefaultInterval = 15;
 constexpr unsigned kMinInterval = 5;
@@ -122,6 +154,7 @@ nabu_heartbeat_thread(void *, wait_result_t)
 		    tick * interval,
 		    (unsigned long long)armcpu_timer_interrupts,
 		    nprocs, vm_page_free_count, vm_page_active_count, vm_page_pages);
+		memory_snapshot("heartbeat", tick);
 		struct nb_log_snapshot capture;
 		const int available = nabu_capture_snapshot(&capture);
 		IOLog("NABU LOG state=%u commits=%u failures=%u capture=%d bytes=%llu lost=%llu\n",
@@ -167,6 +200,7 @@ nabu_boot_watch_poll(void)
 	    __atomic_load_n(&timer_ticks, __ATOMIC_RELAXED), stage,
 	    __atomic_load_n(&data_status, __ATOMIC_RELAXED),
 	    nabu_log_writer_state, nabu_log_writer_rounds, nabu_log_writer_failures);
+	memory_snapshot("writer", samples);
 }
 
 extern "C" void

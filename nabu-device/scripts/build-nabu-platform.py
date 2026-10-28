@@ -163,9 +163,7 @@ def main():
             'read_only_probe_separate': True,
             'runtime_qualified': False,
         }
-        # Liveness counters for the native text console: read-only, one short
-        # line per interval, so a photographed screen distinguishes a silent
-        # running system from a stopped scheduler.
+        # Read-only liveness/VM counters; RAM statistics require its real archive.
         heartbeat_source = device / 'platform' / 'NabuHeartbeat.cpp'
         if not heartbeat_source.is_file():
             heartbeat_source = root / 'platform' / 'NabuHeartbeat.cpp'
@@ -174,6 +172,10 @@ def main():
         heartbeat_obj = out / 'NabuHeartbeat.o'
         heartbeat_command = compile_command(record, heartbeat_source, heartbeat_obj)
         heartbeat_command += ['-I', str(root / '.cache/xnu-work/osfmk')]
+        ram_option = os.environ.get('XNU_NATIVE_RAM_BLOCK', '0')
+        if ram_option not in ('0', '1'):
+            raise SystemExit('XNU_NATIVE_RAM_BLOCK must be 0 or 1 for heartbeat accounting')
+        heartbeat_command += ['-DNABU_HEARTBEAT_RAM_ACCOUNTING=' + ram_option]
         result = subprocess.run(heartbeat_command, cwd=record['directory'], capture_output=True)
         (out / 'heartbeat-compile.log').write_bytes(result.stdout + result.stderr)
         if result.returncode:
@@ -190,6 +192,13 @@ def main():
             'call_site': 'bsd_init beside the USB probe (nabu_capture_source.py)',
             'read_only': True,
             'mmio': False,
+            'memory_accounting': {
+                'vm_queues_and_wired': True,
+                'ram_disk_counters': ram_option == '1',
+                'sample_sources': ['heartbeat', 'writer'],
+                'independent_counter_reads': True,
+                'overlapping_vm_counts_not_a_sum': True,
+            },
             'runtime_qualified': False,
         }
     boot_pmgr = None
