@@ -6,6 +6,7 @@ modes and numeric owners are the image's, and the two timezone links match
 that image's /Library/Preferences and /usr/share/zoneinfo indirection.
 """
 import hashlib
+import plistlib
 
 from nabu_graphics_startup import _recount_hunks, _replace_once
 
@@ -117,6 +118,21 @@ SYMLINKS = (
     ('db/timezone/localtime', '/var/db/timezone/zoneinfo/US/Pacific'),
 )
 
+# Opt-in (nabu-disable-watchdogd=1), following UniXNU's sheng-disable-watchdogd:
+# launchd's own root-owned override database disables the watchdogd job; the
+# existing migration marker selects launchd's direct disabled.plist path.
+WATCHDOGD_DISABLED = plistlib.dumps({'com.apple.watchdogd': True})
+LAUNCHD_FILES = (
+    ('db/com.apple.xpc.launchd/disabled.plist', WATCHDOGD_DISABLED),
+    ('db/com.apple.xpc.launchd/disabled.migrated', b''),
+)
+
+
+def _c_string(data):
+    text = data.decode('ascii')
+    return '"' + text.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\t', '\\t') + '"'
+
+
 AFTER_DATA = '''#if (DEVELOPMENT || DEBUG) && defined(XNU_NATIVE_LEGACY_DISPLAY) && XNU_NATIVE_LEGACY_DISPLAY
 \tif (!error) {
 \t\textern void nabu_graphics_start_after_root(void);
@@ -210,6 +226,34 @@ native_owner_data_symlink(proc_t p, user_addr_t scratch, mount_t data_mount,
 }
 
 static int
+native_owner_data_file(mount_t data_mount, const char *path, const char *data, size_t size)
+{
+	vfs_context_t ctx = vfs_context_current();
+	vnode_t vp = NULLVP;
+	int error = vnode_open(path, O_CREAT | O_TRUNC | FWRITE | O_NOFOLLOW, 0644, 0, &vp, ctx);
+	if (error) return error;
+	error = vnode_vtype(vp) != VREG ? EFTYPE :
+	    (vnode_mount(vp) != data_mount ? EXDEV : 0);
+	if (!error && size) {
+		int resid = 0;
+		error = vn_rdwr(UIO_WRITE, vp, (caddr_t)(uintptr_t)data, (int)size, 0, UIO_SYSSPACE,
+		    IO_NOAUTH | IO_UNIT, vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx));
+		if (!error && resid) error = EIO;
+	}
+	if (!error) {
+		/* launchd accepts the override database only from root with mode 0644. */
+		struct vnode_attr va;
+		VATTR_INIT(&va);
+		VATTR_SET(&va, va_mode, 0644);
+		VATTR_SET(&va, va_uid, 0);
+		VATTR_SET(&va, va_gid, 0);
+		error = vnode_setattr(vp, &va, ctx);
+	}
+	int closed = vnode_close(vp, FWRITE, ctx);
+	return error ? error : closed;
+}
+
+static int
 native_owner_data_skeleton(proc_t p, user_addr_t scratch, mount_t data_mount)
 {
 	static const struct {
@@ -245,6 +289,25 @@ __SYMLINKS__
 	printf("NABU DATA: skeleton ready dirs=%lu links=%lu\n",
 	    (unsigned long)(sizeof(dirs) / sizeof(dirs[0])),
 	    (unsigned long)(sizeof(links) / sizeof(links[0])));
+	unsigned disable_watchdogd = 0;
+	if (PE_parse_boot_argn("nabu-disable-watchdogd", &disable_watchdogd, sizeof(disable_watchdogd)) &&
+	    disable_watchdogd == 1) {
+		static const struct {
+			const char *path;
+			const char *data;
+			size_t size;
+		} files[] = {
+__FILES__
+		};
+		for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); ++i) {
+			int error = native_owner_data_file(data_mount, files[i].path, files[i].data, files[i].size);
+			if (error) {
+				printf("NABU DATA: launchd override failed path=%s error=%d\n", files[i].path, error);
+				return error;
+			}
+		}
+		printf("NABU DATA: launchd override disables com.apple.watchdogd\n");
+	}
 	return 0;
 }
 
@@ -256,8 +319,11 @@ def helper_source():
                      for path, mode, uid, gid in DIRECTORIES)
     links = '\n'.join(f'\t\t{{ "/private/var/{path}", "{target}" }},'
                       for path, target in SYMLINKS)
+    files = '\n'.join(f'\t\t\t{{ "/private/var/{path}", {_c_string(content)}, {len(content)} }},'
+                      for path, content in LAUNCHD_FILES)
     return (HELPER.replace('__DIRECTORIES__', rows)
-            .replace('__SYMLINKS__', links))
+            .replace('__SYMLINKS__', links)
+            .replace('__FILES__', files))
 
 
 def add_data_skeleton(text):
