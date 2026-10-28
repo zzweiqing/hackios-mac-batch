@@ -19,11 +19,13 @@ DIRECTORIES = (
     ('audit', 0o700, 0, 0),
     ('buddy', 0o700, 501, 501),
     ('containers', 0o755, 0, 0),
+    ('containers/Bundle', 0o755, 0, 0),
     ('containers/Data', 0o755, 0, 0),
     ('containers/Data/Application', 0o755, 0, 0),
     ('containers/Data/System', 0o755, 0, 0),
     ('containers/Shared', 0o755, 0, 0),
     ('containers/Shared/SystemGroup', 0o755, 0, 0),
+    ('containers/Temp', 0o755, 0, 0),
     ('cores', 0o755, 0, 0),
     ('datamigrator', 0o755, 501, 501),
     ('db', 0o755, 0, 0),
@@ -127,6 +129,32 @@ LAUNCHD_FILES = (
     ('db/com.apple.xpc.launchd/disabled.migrated', b''),
 )
 
+# Opt-in (nabu-skip-setup=1): UniXNU scripts/seed-data-skip-setup.py --no-auto-dim
+# preferences, so Setup (purplebuddy) does not run as the alternate system app
+# that blocks SpringBoard. XML plists, owned by mobile with mode 0600.
+BUILD = '21H16'
+SETUP_PREFERENCES = (
+    ('com.apple.migration', {
+        'LastSystemVersion': BUILD,
+        'DMUserDataDisposition': {'SyntheticDidUpgrade': False, 'buildVersion': BUILD}}),
+    ('com.apple.springboard', {
+        'BKNoWatchdogs': True,
+        'FBLaunchWatchdogExceptions': {'com.apple.purplebuddy': 100.0},
+        'MCForceShowCloudConfigurationUI': False,
+        'SBDisableAutoDim': True, 'SBDontDimOrLockOnAC': True, 'SBDisableIdleSleep': True}),
+    ('com.apple.purplebuddy', {
+        'SetupDone': True, 'SetupFinishedAllSteps': True, 'SetupVersion': 11, 'daemonizeNeedsToRun': False}),
+    ('com.apple.purplebuddy.notbackedup', {
+        key: False for key in ('ShouldRunDiagnosticsMiniBuddy', 'ShouldRunHSA2MiniBuddy',
+                               'ShouldRunKeychainSyncMiniBuddy', 'ShouldRunMesaMiniBuddy',
+                               'ShouldRunPaymentMiniBuddy', 'ShouldRunStandardMiniBuddy',
+                               'SilentICDPUpgrade')}),
+    ('com.apple.managedconfiguration.notbackedup', {
+        'LockdownActivationIndicatesCloudConfigurationAvailable': False}),
+)
+SETUP_FILES = tuple(('mobile/Library/Preferences/' + name + '.plist', plistlib.dumps(values))
+                    for name, values in SETUP_PREFERENCES)
+
 
 def _c_string(data):
     text = data.decode('ascii')
@@ -226,11 +254,12 @@ native_owner_data_symlink(proc_t p, user_addr_t scratch, mount_t data_mount,
 }
 
 static int
-native_owner_data_file(mount_t data_mount, const char *path, const char *data, size_t size)
+native_owner_data_file(mount_t data_mount, const char *path, const char *data, size_t size,
+    mode_t mode, uid_t uid, gid_t gid)
 {
 	vfs_context_t ctx = vfs_context_current();
 	vnode_t vp = NULLVP;
-	int error = vnode_open(path, O_CREAT | O_TRUNC | FWRITE | O_NOFOLLOW, 0644, 0, &vp, ctx);
+	int error = vnode_open(path, O_CREAT | O_TRUNC | FWRITE | O_NOFOLLOW, mode, 0, &vp, ctx);
 	if (error) return error;
 	error = vnode_vtype(vp) != VREG ? EFTYPE :
 	    (vnode_mount(vp) != data_mount ? EXDEV : 0);
@@ -241,12 +270,11 @@ native_owner_data_file(mount_t data_mount, const char *path, const char *data, s
 		if (!error && resid) error = EIO;
 	}
 	if (!error) {
-		/* launchd accepts the override database only from root with mode 0644. */
 		struct vnode_attr va;
 		VATTR_INIT(&va);
-		VATTR_SET(&va, va_mode, 0644);
-		VATTR_SET(&va, va_uid, 0);
-		VATTR_SET(&va, va_gid, 0);
+		VATTR_SET(&va, va_mode, mode);
+		VATTR_SET(&va, va_uid, uid);
+		VATTR_SET(&va, va_gid, gid);
 		error = vnode_setattr(vp, &va, ctx);
 	}
 	int closed = vnode_close(vp, FWRITE, ctx);
@@ -289,25 +317,34 @@ __SYMLINKS__
 	printf("NABU DATA: skeleton ready dirs=%lu links=%lu\n",
 	    (unsigned long)(sizeof(dirs) / sizeof(dirs[0])),
 	    (unsigned long)(sizeof(links) / sizeof(links[0])));
-	unsigned disable_watchdogd = 0;
-	if (PE_parse_boot_argn("nabu-disable-watchdogd", &disable_watchdogd, sizeof(disable_watchdogd)) &&
-	    disable_watchdogd == 1) {
-		static const struct {
-			const char *path;
-			const char *data;
-			size_t size;
-		} files[] = {
+	static const struct {
+		const char *gate;
+		const char *path;
+		const char *data;
+		size_t size;
+		mode_t mode;
+		uid_t uid;
+		gid_t gid;
+	} files[] = {
 __FILES__
-		};
-		for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); ++i) {
-			int error = native_owner_data_file(data_mount, files[i].path, files[i].data, files[i].size);
-			if (error) {
-				printf("NABU DATA: launchd override failed path=%s error=%d\n", files[i].path, error);
-				return error;
-			}
+	};
+	unsigned disable_watchdogd = 0, skip_setup = 0;
+	if (!PE_parse_boot_argn("nabu-disable-watchdogd", &disable_watchdogd, sizeof(disable_watchdogd)))
+		disable_watchdogd = 0;
+	if (!PE_parse_boot_argn("nabu-skip-setup", &skip_setup, sizeof(skip_setup)))
+		skip_setup = 0;
+	for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); ++i) {
+		unsigned enabled = files[i].gate[0] == 'w' ? disable_watchdogd : skip_setup;
+		if (enabled != 1) continue;
+		int error = native_owner_data_file(data_mount, files[i].path, files[i].data, files[i].size,
+		    files[i].mode, files[i].uid, files[i].gid);
+		if (error) {
+			printf("NABU DATA: seeded file failed path=%s error=%d\n", files[i].path, error);
+			return error;
 		}
-		printf("NABU DATA: launchd override disables com.apple.watchdogd\n");
 	}
+	if (disable_watchdogd == 1) printf("NABU DATA: launchd override disables com.apple.watchdogd\n");
+	if (skip_setup == 1) printf("NABU DATA: Setup preferences seeded (SetupDone, no auto-dim)\n");
 	return 0;
 }
 
@@ -319,8 +356,13 @@ def helper_source():
                      for path, mode, uid, gid in DIRECTORIES)
     links = '\n'.join(f'\t\t{{ "/private/var/{path}", "{target}" }},'
                       for path, target in SYMLINKS)
-    files = '\n'.join(f'\t\t\t{{ "/private/var/{path}", {_c_string(content)}, {len(content)} }},'
-                      for path, content in LAUNCHD_FILES)
+    # launchd accepts its override database only from root with mode 0644;
+    # preferences belong to mobile (UniXNU writes them with mode 0600).
+    seeded = [('watchdogd', path, content, 0o644, 0, 0) for path, content in LAUNCHD_FILES]
+    seeded += [('setup', path, content, 0o600, 501, 501) for path, content in SETUP_FILES]
+    files = '\n'.join(f'\t\t{{ "{gate}", "/private/var/{path}", {_c_string(content)}, {len(content)}, '
+                      f'0{mode:o}, {uid}, {gid} }},'
+                      for gate, path, content, mode, uid, gid in seeded)
     return (HELPER.replace('__DIRECTORIES__', rows)
             .replace('__SYMLINKS__', links)
             .replace('__FILES__', files))
