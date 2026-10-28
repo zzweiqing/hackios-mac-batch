@@ -77,6 +77,8 @@ static int nabuDirectWindowLayout (RootLayout *layout, const char **why)
 
 '''
 
+ROOT_READ_TIMEOUT_US = 5000000
+
 START_ROOT = "// Boot the root image's windows as block devices. Soft-fails (logs, publishes nothing).\nbool NativeUfs::startRoot (IOService *provider)\n"
 LAYOUT_LINE = '  if (!layout || !findRootLayout (layout, &why)) {\n'
 DIRECT_LINE = ('  int direct = layout ? nabuDirectWindowLayout (layout, &why) : 0;\n'
@@ -151,6 +153,11 @@ def patch_root_headers(source):
          '    ++state.polls;\n'
          '    if (state.polls >= kUfsMaxPolls) return UfsTransferEnd::Timeout;\n'),
     ])
+    commands = source / 'RootCommands.h'
+    commands_text = commands.read_text(encoding='utf-8')
+    commands_text = patch_root_read_timeout(commands_text)
+    commands.write_text(commands_text, encoding='utf-8')
+
     patch('RootCommands.h', [
         ('  void delay () { IODelay (2); }\n',
          '  void delay () { nabuBusyWaitUs (2); }\n'),
@@ -178,6 +185,16 @@ def patch_root_headers(source):
          '  }\n'
          '  return false;\n'),
     ])
+
+
+def patch_root_read_timeout(text):
+    """Extend only the bounded READ(10) timeout; no retry or queue reset."""
+    old = ('  IOReturn status = hostScsi (lun, cdb, 10, true, blocks * 4096U, 1000000, &scsi);\n')
+    new = ('  IOReturn status = hostScsi (lun, cdb, 10, true, blocks * 4096U, '
+           f'{ROOT_READ_TIMEOUT_US}, &scsi);\n')
+    if text.count(old) != 1:
+        raise ValueError('Expected one root READ(10) timeout')
+    return text.replace(old, new, 1)
 
 
 def add_iobsd_wait(text):
