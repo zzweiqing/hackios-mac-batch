@@ -10,6 +10,7 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOWorkLoop.h>
+#include <IOKit/IODeviceTreeSupport.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSIterator.h>
@@ -23,6 +24,7 @@ vm_offset_t ml_io_map(vm_offset_t pa, vm_size_t size);
 extern kmod_info_t g_kernel_kmod_info;
 kern_return_t OSKextLoadKextWithIdentifier(const char *);
 void nabu_touch_static_init(void) __asm__("__GLOBAL__sub_I_NabuTouch.cpp");
+bool nabu_touch_publish(IOService *platform);
 // [0] stage reached, [1] frames read, [2] frames with fingers, [3] checksum drops,
 // [4] HID reports sent, [5] last handleReport status, [6] latch hits, [7] firmware downloads
 volatile uint32_t nabu_touch_stats[8] = {};
