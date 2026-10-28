@@ -90,6 +90,7 @@ def main():
         'extern "C" {\n'
         '__attribute__((weak)) bool qemu_boot_pmgr_publish (IOService *, IORegistryEntry *) { return false; }\n'
         '__attribute__((weak)) bool nabu_boot_pmgr_publish (IOService *, IORegistryEntry *) { return false; }\n'
+        '__attribute__((weak)) bool nabu_watchdog_publish (IOService *) { return false; }\n'
         '}\n', encoding='utf-8')
     stubs_obj = out / 'PmgrPublishStubs.o'
     stubs_command = compile_command(record, stubs, stubs_obj)
@@ -202,6 +203,7 @@ def main():
             'runtime_qualified': False,
         }
     boot_pmgr = None
+    watchdog = None
     if original_armio:
         from qemu_pmgr_build import build
         if os.environ.get('NABU_BOOT_PMGR') == '1':
@@ -210,6 +212,14 @@ def main():
                              Path(os.environ['UNIXNU_KERNELCACHE']),
                              source_name='NabuBootPMGR.cpp', prefix='NabuBootPMGR',
                              aon_storage='volatile nabu boot-session AON latch (not power hardware)')
+            # Hardware boards publish the original IOWatchdog for watchdogd;
+            # runtime publication additionally requires Apple's wdt=-1.
+            from nabu_watchdog_build import build as build_watchdog
+            objects += build_watchdog(root, record, out / 'nabu-watchdog', compile_command,
+                                      Path(os.environ['UNIXNU_KERNELCACHE']))
+            watchdog = {'class': 'NabuWatchdog', 'parent': 'IOWatchdog',
+                        'boot_arg': 'wdt=-1', 'soc_hooks_mmio': False,
+                        'bindings': str(out / 'nabu-watchdog' / 'bindings.json')}
         else:
             boot_pmgr = 'QemuBootPMGR'
             objects += build(root, record, out / 'qemu-pmgr', compile_command,
@@ -224,6 +234,7 @@ def main():
         'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
         'original_armio_factory_enabled': original_armio,
         'boot_pmgr': boot_pmgr,
+        'watchdog': watchdog,
         'timer_binding': timer_binding,
         'usb_probe': usb_probe,
         'usb_cdc': usb_cdc,

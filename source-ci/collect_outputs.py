@@ -174,6 +174,8 @@ def selected_sources(device):
         (device / 'scripts/armdt_original_provider.py', 'device/scripts/armdt_original_provider.py'),
         (device / 'scripts/qemu_pmgr_build.py', 'device/scripts/qemu_pmgr_build.py'),
         (device / 'platform/QemuBootPMGR.cpp', 'device/platform/QemuBootPMGR.cpp'),
+        (device / 'scripts/nabu_watchdog_build.py', 'device/scripts/nabu_watchdog_build.py'),
+        (device / 'platform/NabuWatchdog.cpp', 'device/platform/NabuWatchdog.cpp'),
         (device / 'scripts/build-nabu-virtio.py', 'device/scripts/build-nabu-virtio.py'),
         (device / 'scripts/build-nabu-ram-block.py', 'device/scripts/build-nabu-ram-block.py'),
         (device / 'scripts/nabu_ram_source.py', 'device/scripts/nabu_ram_source.py'),
