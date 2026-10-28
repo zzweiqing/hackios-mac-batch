@@ -4,6 +4,9 @@
 #include "NabuLegacyCpuPixels.h"
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
+#include <IOKit/pwr_mgt/IOPM.h>
+#include <IOKit/pwr_mgt/IOPMpowerState.h>
+#include <libkern/c++/OSData.h>
 #include <pexpert/pexpert.h>
 #include <machine/machine_routines.h>
 
@@ -21,8 +24,10 @@ extern "C" uint64_t native_legacy_surface_width(OSObject *), native_legacy_surfa
 extern "C" uint64_t native_legacy_surface_stride(OSObject *), native_legacy_surface_allocation(OSObject *);
 extern "C" uint32_t native_legacy_surface_format(OSObject *), native_legacy_surface_planes(OSObject *);
 extern "C" void native_legacy_swap_validation_observed(bool, unsigned, const void *, const void *);
+extern "C" void native_legacy_surface_rejected(uint64_t, uint64_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t);
 extern "C" void native_legacy_transfer_observed(IOReturn, const void *, uint64_t);
 extern "C" void native_legacy_retirement_observed(IOService *);
+extern "C" void native_legacy_pm_observed(unsigned, IOReturn, unsigned long);
 // This binding must be generated from this version's original activation path.
 extern "C" void nabu_legacy_request_active(void *, const OriginalLegacySwapRequest *, uint32_t);
 extern "C" int nabu_legacy_display_state(void *, void *, bool);
@@ -39,7 +44,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     OSDeclareDefaultStructors(NativeLegacyDisplay)
     IOMemoryMap *bootMapping = nullptr;
     uint64_t bootStride = 0;
-    bool primary = false, enabled = false, consoleOwned = false;
+    bool primary = false, enabled = false, consoleOwned = false, logicalPM = false;
     bool kicking = false, rekick = false;
     const OriginalLegacySwapRequest *validated[64] = {};
 
@@ -124,11 +129,13 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     }
 public:
     void free() override {
+        if (logicalPM) { PMstop(); logicalPM = false; }
         OSSafeReleaseNULL(bootMapping);
         IOMobileFramebufferLegacy::free();
     }
     void stop(IOService *provider) override {
         enabled = false;
+        if (logicalPM) { PMstop(); logicalPM = false; }
         IOMobileFramebufferLegacy::stop(provider);
         restoreConsole();
         OSSafeReleaseNULL(bootMapping);
@@ -154,8 +161,52 @@ public:
                 IOMobileFramebufferLegacy::stop(provider);
                 return false;
             }
+            if (!startLogicalPM(provider)) {
+                enabled = false;
+                IOMobileFramebufferLegacy::stop(provider);
+                return false;
+            }
         }
         return true;
+    }
+    // UniXNU startDisplay: the actual IOKit PM lifecycle for logical scanout
+    // scheduling (offline-legacy-pm=1, phase 4). GOP has no panel power switch;
+    // no state advertises physical power output or a hardware transition.
+    bool startLogicalPM(IOService *provider) {
+        unsigned pm = 0, phase = 0;
+        PE_parse_boot_argn("offline-legacy-pm", &pm, sizeof(pm));
+        if (!pm) return true;
+        PE_parse_boot_argn("offline-legacy-phase", &phase, sizeof(phase));
+        if (pm != 1 || phase != 4 || !provider) {
+            native_legacy_pm_observed(1, kIOReturnNotReady, 0);
+            return false;
+        }
+        static IOPMPowerState states[2] = {};
+        states[0].version = states[1].version = 1;
+        states[1].capabilityFlags = kIOPMDeviceUsable;
+        PMinit();
+        logicalPM = initialized;
+        if (!logicalPM) { native_legacy_pm_observed(1, kIOReturnNotReady, 0); return false; }
+        provider->joinPMtree(this);
+        IOReturn status = registerPowerDriver(this, states, 2);
+        native_legacy_pm_observed(1, status, 0);
+        if (status == kIOReturnSuccess) {
+            status = changePowerStateToPriv(1);
+            native_legacy_pm_observed(2, status, 1);
+        }
+        if (status != kIOReturnSuccess) { PMstop(); logicalPM = false; return false; }
+        return true;
+    }
+    IOReturn setPowerState(unsigned long ordinal, IOService *device) override {
+        if (!logicalPM) return IOMobileFramebufferLegacy::setPowerState(ordinal, device);
+        if (ordinal > 1 || !bootMapping) {
+            native_legacy_pm_observed(3, kIOReturnUnsupported, ordinal);
+            return kIOReturnUnsupported;
+        }
+        native_legacy_pm_observed(3, kIOReturnSuccess, ordinal);
+        IOReturn status = IOMobileFramebufferLegacy::setPowerState(ordinal, device);
+        native_legacy_pm_observed(4, status, ordinal);
+        return status;
     }
     void registerService(IOOptionBits options = 0) override {
         unsigned value = 0;
@@ -203,11 +254,17 @@ public:
                 else if (rectangles && surface->metaCast("IOSurface")) {
                     IOMemoryDescriptor *memory = native_legacy_surface_descriptor(surface);
                     uint64_t allocation = native_legacy_surface_allocation(surface);
+                    // UniXNU's '&BGA' exception relies on its own producer writing plain
+                    // rows. That layout has not been established for this CPU producer.
+                    uint32_t format = native_legacy_surface_format(surface), planes = native_legacy_surface_planes(surface);
                     accepted = memory && memory->metaCast("IOMemoryDescriptor") &&
-                        native_legacy_surface_format(surface) == 0x42475241 && !native_legacy_surface_planes(surface) &&
+                        format == 0x42475241 && !planes &&
                         native_legacy_surface_width(surface) >= width && native_legacy_surface_height(surface) >= height &&
                         allocation <= memory->getLength() &&
                         nabu_cpu_rows(width, height, native_legacy_surface_stride(surface), allocation);
+                    if (!accepted) native_legacy_surface_rejected(
+                        native_legacy_surface_width(surface), native_legacy_surface_height(surface), format, planes,
+                        native_legacy_surface_stride(surface), allocation, memory ? memory->getLength() : 0);
                 }
             }
             int slot = previousSlot;
@@ -222,8 +279,24 @@ public:
         if (count) *count = 0;
         return kIOReturnUnsupported;
     }
-    IOReturn getDotPitch(uint32_t *) override { return kIOReturnUnsupported; }
-    IOReturn supportedFrameInfo(uint32_t, uint32_t *, char *, uint32_t *) override { return kIOReturnUnsupported; }
+    // As UniXNU: the outputs are written before any status. GOP supplies no dot
+    // pitch unless the provider carries one; selector 74's trace keys are unsupported.
+    IOReturn getDotPitch(uint32_t *pitch) override {
+        if (!pitch) return kIOReturnBadArgument;
+        *pitch = 0;
+        IOService *provider = getProvider();
+        if (!provider) return kIOReturnNotReady;
+        OSData *data = OSDynamicCast(OSData, provider->getProperty("dot-pitch"));
+        if (!data) return kIOReturnNotFound;
+        if (data->getLength() != sizeof(*pitch)) return kIOReturnBadArgument;
+        memcpy(pitch, data->getBytesNoCopy(), sizeof(*pitch));
+        return kIOReturnSuccess;
+    }
+    IOReturn supportedFrameInfo(uint32_t, uint32_t *count, char *key, uint32_t *mask) override {
+        if (!count || !key || !mask) return kIOReturnBadArgument;
+        *count = 0; *mask = 0; bzero(key, 64);
+        return kIOReturnUnsupported;
+    }
     IOReturn newUserClient(task_t task, void *security, UInt32 type, IOUserClient **client) override {
         native_legacy_client_enter(task, type);
         IOReturn status = IOMobileFramebufferLegacy::newUserClient(task, security, type, client);

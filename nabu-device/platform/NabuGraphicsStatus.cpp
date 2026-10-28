@@ -37,6 +37,13 @@ extern volatile int nabu_keybag_notification_status;
 extern volatile uint32_t nabu_keybag_notification_subscriptions, nabu_keybag_notification_failures;
 extern volatile uint32_t nabu_keybag_notification_refused_opens;
 unsigned native_legacy_state_words(char *out, unsigned cap);
+extern volatile uint32_t native_legacy_pm_stage, native_legacy_pm_ordinal;
+extern volatile uint32_t native_legacy_pm_calls, native_legacy_pm_callbacks;
+extern volatile int native_legacy_pm_status;
+extern volatile uint32_t native_legacy_swap_accepted_count, native_legacy_swap_rejected_count;
+extern volatile uint32_t native_legacy_rej_reason, native_legacy_rej_state[3], native_legacy_rej_options[3];
+extern volatile uint32_t native_legacy_rej_size[2], native_legacy_rej_rects[2][4];
+extern volatile uint64_t native_legacy_rej_surface[7];
 unsigned native_legacy_clients_dump(char *out, unsigned cap);
 #endif
 
@@ -90,6 +97,24 @@ nabu_graphics_status_worker(void *parameter, wait_result_t waitResult)
             nabu_keybag_notification_refused_opens);
         char words[192];
         if (native_legacy_state_words(words, sizeof(words))) IOLog("NABU DISPLAY state %s\n", words);
+        IOLog("NABU DISPLAY pm stage=%u status=0x%x ordinal=%u calls=%u callbacks=%u\n",
+            native_legacy_pm_stage, (unsigned)native_legacy_pm_status, native_legacy_pm_ordinal,
+            native_legacy_pm_calls, native_legacy_pm_callbacks);
+        IOLog("NABU DISPLAY swaps accepted=%u rejected=%u last-reason=%u state=%x/%x/%x options=%x/%x/%x size=%ux%u\n",
+            native_legacy_swap_accepted_count, native_legacy_swap_rejected_count, native_legacy_rej_reason,
+            native_legacy_rej_state[0], native_legacy_rej_state[1], native_legacy_rej_state[2],
+            native_legacy_rej_options[0], native_legacy_rej_options[1], native_legacy_rej_options[2],
+            native_legacy_rej_size[0], native_legacy_rej_size[1]);
+        IOLog("NABU DISPLAY rejected-rects=%u/%u/%u/%u %u/%u/%u/%u\n",
+            native_legacy_rej_rects[0][0], native_legacy_rej_rects[0][1],
+            native_legacy_rej_rects[0][2], native_legacy_rej_rects[0][3],
+            native_legacy_rej_rects[1][0], native_legacy_rej_rects[1][1],
+            native_legacy_rej_rects[1][2], native_legacy_rej_rects[1][3]);
+        IOLog("NABU DISPLAY rejected-surface=%llux%llu format=0x%llx planes=%llu stride=%llu allocation=%llu descriptor=%llu\n",
+            (unsigned long long)native_legacy_rej_surface[0], (unsigned long long)native_legacy_rej_surface[1],
+            (unsigned long long)native_legacy_rej_surface[2], (unsigned long long)native_legacy_rej_surface[3],
+            (unsigned long long)native_legacy_rej_surface[4], (unsigned long long)native_legacy_rej_surface[5],
+            (unsigned long long)native_legacy_rej_surface[6]);
         // Per-client selector counts, one console line each (an empty dump prints nothing).
         static char clients[3072];
         native_legacy_clients_dump(clients, sizeof(clients));

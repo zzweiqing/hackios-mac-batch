@@ -103,6 +103,8 @@ DIRECTORIES = (
     ('preferences', 0o755, 0, 0),
     ('protected', 0o755, 0, 0),
     ('root', 0o755, 0, 0),
+    ('root/Library', 0o755, 0, 0),
+    ('root/Library/Preferences', 0o755, 0, 0),
     ('run', 0o775, 0, 1),
     ('select', 0o755, 0, 0),
     ('staged_system_apps', 0o755, 501, 501),
@@ -154,6 +156,17 @@ SETUP_PREFERENCES = (
 )
 SETUP_FILES = tuple(('mobile/Library/Preferences/' + name + '.plist', plistlib.dumps(values))
                     for name, values in SETUP_PREFERENCES)
+
+# Opt-in (nabu-cpu-present=1), as UniXNU scripts/add-gpu-plugin-data.py: the render
+# server (backboardd) picks a 10-bit deep, compressed framebuffer unless told not
+# to, read at process start. The CPU copy presents plain BGRA only. Both its own
+# domain and the global fallback, for mobile and root, mode 0644.
+FRAMEBUFFER_PREFERENCES = plistlib.dumps({
+    'CAEnableDeepFramebuffer': False, 'CAEnableFramebufferCompression': False,
+    'CAEnableIOSurfaceCompression': False})
+FRAMEBUFFER_FILES = tuple((home + '/Library/Preferences/' + name, FRAMEBUFFER_PREFERENCES, uid)
+                          for home, uid in (('mobile', 501), ('root', 0))
+                          for name in ('backboardd.plist', '.GlobalPreferences.plist'))
 
 
 def _c_string(data):
@@ -328,13 +341,16 @@ __SYMLINKS__
 	} files[] = {
 __FILES__
 	};
-	unsigned disable_watchdogd = 0, skip_setup = 0;
+	unsigned disable_watchdogd = 0, skip_setup = 0, cpu_present = 0;
 	if (!PE_parse_boot_argn("nabu-disable-watchdogd", &disable_watchdogd, sizeof(disable_watchdogd)))
 		disable_watchdogd = 0;
 	if (!PE_parse_boot_argn("nabu-skip-setup", &skip_setup, sizeof(skip_setup)))
 		skip_setup = 0;
+	if (!PE_parse_boot_argn("nabu-cpu-present", &cpu_present, sizeof(cpu_present)))
+		cpu_present = 0;
 	for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); ++i) {
-		unsigned enabled = files[i].gate[0] == 'w' ? disable_watchdogd : skip_setup;
+		unsigned enabled = files[i].gate[0] == 'w' ? disable_watchdogd :
+		    files[i].gate[0] == 'c' ? cpu_present : skip_setup;
 		if (enabled != 1) continue;
 		int error = native_owner_data_file(data_mount, files[i].path, files[i].data, files[i].size,
 		    files[i].mode, files[i].uid, files[i].gid);
@@ -345,6 +361,7 @@ __FILES__
 	}
 	if (disable_watchdogd == 1) printf("NABU DATA: launchd override disables com.apple.watchdogd\n");
 	if (skip_setup == 1) printf("NABU DATA: Setup preferences seeded (SetupDone, no auto-dim)\n");
+	if (cpu_present == 1) printf("NABU DATA: framebuffer preferences seeded (no deep/compressed)\n");
 	return 0;
 }
 
@@ -360,6 +377,7 @@ def helper_source():
     # preferences belong to mobile (UniXNU writes them with mode 0600).
     seeded = [('watchdogd', path, content, 0o644, 0, 0) for path, content in LAUNCHD_FILES]
     seeded += [('setup', path, content, 0o600, 501, 501) for path, content in SETUP_FILES]
+    seeded += [('cpu', path, content, 0o644, uid, uid) for path, content, uid in FRAMEBUFFER_FILES]
     files = '\n'.join(f'\t\t{{ "{gate}", "/private/var/{path}", {_c_string(content)}, {len(content)}, '
                       f'0{mode:o}, {uid}, {gid} }},'
                       for gate, path, content, mode, uid, gid in seeded)
