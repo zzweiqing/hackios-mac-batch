@@ -38,8 +38,11 @@ def qualify(read, methods):
         'opaque_words_semantics': 'unsupported nonzero values rejected; not classified as generic options',
         'activation_notification': {'raw_va': hex(ACTIVE_REQUEST), 'arguments': 'this, request, uint32 mode=3'},
         'completion': {'slot': 295, 'arguments': 'this; original wrapper passes force=1'},
-        'firmware_powered': {'slot': 354, 'raw_va': hex(DISPLAY_STATE),
-                             'instance_word': 5840, 'meaning': 'actual mapped firmware-lit GOP, not hardware PM'},
+        'logical_schedule_state': {'slot': 354, 'raw_va': hex(DISPLAY_STATE),
+                                   'requested_word': 5836, 'requested_value': 1,
+                                   'powered_word': 5840, 'powered_claimed': False,
+                                   'meaning': 'original swap entry requires +5836 != 0 (UniXNU logical PM); '
+                                              'no panel power claimed, not hardware PM'},
         'console_handoff': 'standard PE_initialize_console(kPEDisableScreen), explicit CPU profile only',
         'runtime_qualified': False, 'user_client_contract': 'unknown',
         'limitation': 'Static limited backend contract; actual producer, queue serialization and completion need execution evidence',
