@@ -306,7 +306,7 @@ void native_legacy_client_enter(task_t task,uint32_t type) {
 // is not touched; only this object's vptr names the copy. XNU's ARM64 vptr points at slot 0 (the original code dispatches with ldr x8,[vptr,#slot*8]).
 enum {kSeenClients=8,kSelectors=96,kRegEvents=8,kVtableSlots=256};
 struct ClientStat {
-    uintptr_t object;int pid;uint32_t calls,fails;uint32_t selector_calls[kSelectors],selector_fails[kSelectors],selector_status[kSelectors];
+    uintptr_t object;int pid;char name[20];uint32_t calls,fails;uint32_t selector_calls[kSelectors],selector_fails[kSelectors],selector_status[kSelectors];
     unsigned regs;struct {uint32_t type;uint64_t port;uint32_t ref,status;} reg[kRegEvents];
     uint64_t sel6_first[3],sel6_last[3];uint32_t sel6_distinct;uint64_t sel6_seen[8][3];uint32_t sel6_calls[8],sel6_fails[8],sel6_status[8];
     uint32_t seq_count;struct {uint32_t a,b,c,status,done,presented;} seq[24];
@@ -356,7 +356,7 @@ static void interpose(IOUserClient *client,int pid) {
     uintptr_t *copy=static_cast<uintptr_t *>(IOMalloc(kVtableSlots*sizeof(uintptr_t)));
     if(!copy)return;
     memcpy(copy,vtable,kVtableSlots*sizeof(uintptr_t));
-    stat.object=(uintptr_t)client;stat.pid=pid;stat.original_external=copy[168];stat.original_register=copy[175];
+    stat.object=(uintptr_t)client;stat.pid=pid;proc_name(pid,stat.name,(int)sizeof stat.name);stat.original_external=copy[168];stat.original_register=copy[175];
     copy[168]=(uintptr_t)&wrappedExternal;copy[175]=(uintptr_t)&wrappedRegister;
     ++seenClientCount;
     *reinterpret_cast<uintptr_t **>(client)=copy;
@@ -374,7 +374,7 @@ extern "C" unsigned native_legacy_clients_dump(char *out,unsigned cap) {
     unsigned at=0;out[0]=0;
     for(unsigned c=0;c<seenClientCount && at+120<cap;++c) {
         const ClientStat &s=seenClients[c];
-        at+=snprintf(out+at,cap-at,"C%u pid=%d calls=%u fails=%u regs=%u",c,s.pid,s.calls,s.fails,s.regs);
+        at+=snprintf(out+at,cap-at,"C%u pid=%d %s calls=%u fails=%u regs=%u",c,s.pid,s.name,s.calls,s.fails,s.regs);
         for(unsigned r=0;r<s.regs && r<kRegEvents && at+60<cap;++r)
             at+=snprintf(out+at,cap-at," reg(t%u,p%llx,r%x)=%x",s.reg[r].type,(unsigned long long)s.reg[r].port,s.reg[r].ref,s.reg[r].status);
         at+=snprintf(out+at,cap-at,"\n");
@@ -394,7 +394,11 @@ extern "C" unsigned native_legacy_clients_dump(char *out,unsigned cap) {
     return at;
 }
 void native_legacy_client_observed(IOReturn status,IOUserClient *client) {
-#if !defined(NABU_LEGACY_DISCOVERY_ONLY) && !defined(NABU_LEGACY_CPU_PRESENT)
+#if defined(NABU_LEGACY_CPU_PRESENT)
+    // Opt-in with the display status samples: count each original client's selectors (no call is changed).
+    unsigned counted=0;PE_parse_boot_argn("nabu-display-status",&counted,sizeof(counted));
+    if(counted==1 && client && !status)interpose(client,native_legacy_client_pid);
+#elif !defined(NABU_LEGACY_DISCOVERY_ONLY)
     if(client && !status)interpose(client,native_legacy_client_pid);
 #endif
     native_legacy_client_status=status;native_legacy_client_object=(uintptr_t)client;
