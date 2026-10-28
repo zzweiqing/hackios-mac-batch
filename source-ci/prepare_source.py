@@ -10,6 +10,7 @@ import tomllib
 from nabu_graphics_startup import LEGACY_PATCH, retime_graphics_patches
 from nabu_data_skeleton import prepare_data_skeleton
 from nabu_logging_build import enable_logging
+from nabu_cs_stream import prepare_signature_scan
 from nabu_display_ci import (PROFILE as QEMU_LEGACY_PROFILE, CPU_PROFILE as QEMU_CPU_PRESENT_PROFILE,
                              HARDWARE_CPU_PROFILE as UFS_CPU_PRESENT_PROFILE,
                              DISPLAY_PROFILES, REFERENCE as DISPLAY_REFERENCE)
@@ -601,6 +602,8 @@ def main():
     if 'CONFIG_XNU_OWNER_DATA_MOUNT=y' in options:
         data_skeleton = prepare_data_skeleton(args.upstream)
     log_capture = enable_logging(args.upstream, args.device) if args.capture_logs else None
+    signature_scan = (prepare_signature_scan(args.upstream)
+                      if 'CONFIG_XNU_NATIVE_CS_HASH_CACHE=y' in options else None)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps({
         'upstream_commit': head, 'profile': board['kernel']['defconfig'],
@@ -621,6 +624,7 @@ def main():
         'display_roots': GRAPHICS_ROOTS if args.profile in (CPU_UI_PROFILE, QEMU_CPU_UI_PROFILE, *DISPLAY_PROFILES) else [],
         'graphics_startup': graphics_startup,
         'data_skeleton': data_skeleton,
+        'signature_scan_io': signature_scan,
         'log_capture': log_capture,
         'vc_text_scale': {'argument': VC_TEXT_SCALE['argument'],
                           'default': VC_TEXT_SCALE['default'],

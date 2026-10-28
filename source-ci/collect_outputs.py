@@ -13,6 +13,7 @@ from prepare_source import INPUT_SHA256, UPSTREAM
 from nabu_logging_build import qualify_logging_candidate
 from nabu_data_skeleton import qualify_data_skeleton
 from nabu_display_ci import DISPLAY_PROFILES, qualify_display_candidate
+from nabu_cs_stream import qualify_signature_scan
 
 
 def sha256(path):
@@ -62,6 +63,7 @@ def selected_files(upstream):
                           'serial_console.o', 'serial_console.o.json', 'serial_general.o', 'serial_general.o.json',
                           'pe_kprintf.o', 'pe_kprintf.o.json', 'bsd_init.o', 'bsd_init.o.json',
                           'kern_exec.o', 'kern_exec.o.json', 'kern_exit.o', 'kern_exit.o.json',
+                          'ubc_subr.o', 'ubc_subr.o.json',
                           'exception.o', 'exception.o.json'}
     report_names = {'report.json', 'bindings.json', 'candidate-bindings.json', 'nabu-ufs-source.json', 'readonly-source.json',
                     'compile-command.json', 'compile-command-namespaced.json',
@@ -105,6 +107,8 @@ def selected_files(upstream):
                     'NabuUsbProbe.cpp', 'NabuUsbProbe.o', 'NabuUsbProbe.o.json',
                     'NabuUsbCaptureCdc.o', 'usb-cdc-compile.log', 'usb-probe-compile.log'):
                 add(path, path.relative_to(work))
+            elif relative == 'armdt-platform' and path.name in ('NabuHeartbeat.o', 'heartbeat-compile.log'):
+                add(path, path.relative_to(work))
             elif relative == 'native-ufs' and (path.suffix in ('.cpp', '.h') or
                                                path.name in ('NativeUfs.o', 'compile.log')):
                 add(path, path.relative_to(work))
@@ -133,6 +137,8 @@ def selected_files(upstream):
                      'tree/.cache/xnu-work/pexpert/arm/pe_kprintf.c',
                      'tree/.cache/xnu-work/bsd/kern/bsd_init.c',
                      'tree/.cache/xnu-work/bsd/kern/kern_exec.c',
+                     'tree/.cache/xnu-work/bsd/kern/ubc_subr.c',
+                     'tree/patches/xnu/native-4k-signature-hash-cache.patch',
                      'tree/.cache/xnu-work/bsd/kern/kern_exit.c',
                      'tree/.cache/xnu-work/osfmk/kern/exception.c'):
         add(work / relative, Path(relative))
@@ -185,6 +191,7 @@ def selected_sources(device):
         (source_dir / 'prepare_source.py', 'source-ci/prepare_source.py'),
         (source_dir / 'collect_outputs.py', 'source-ci/collect_outputs.py'),
         (source_dir / 'nabu_data_skeleton.py', 'source-ci/nabu_data_skeleton.py'),
+        (source_dir / 'nabu_cs_stream.py', 'source-ci/nabu_cs_stream.py'),
         (source_dir / 'nabu_display_ci.py', 'source-ci/nabu_display_ci.py'),
         (source_dir / 'nabu_graphics_startup.py', 'source-ci/nabu_graphics_startup.py'),
         (device / 'scripts/build-nabu-legacy-display.py', 'device/scripts/build-nabu-legacy-display.py'),
@@ -204,6 +211,7 @@ def selected_sources(device):
     sources += [(p, 'device/ufs/' + p.name) for p in sorted((device / 'ufs').glob('NabuLog*.h'))]
     sources += [(device / 'scripts/nabu_capture_source.py', 'device/scripts/nabu_capture_source.py'),
                 (device / 'platform/NabuUsbProbe.cpp', 'device/platform/NabuUsbProbe.cpp'),
+                (device / 'platform/NabuHeartbeat.cpp', 'device/platform/NabuHeartbeat.cpp'),
                 (source_dir / 'nabu_logging_build.py', 'source-ci/nabu_logging_build.py')]
     sources += [(p, 'device/usb/' + p.name) for p in sorted((device / 'usb').glob('*'))
                 if p.is_file() and (p.suffix in ('.cpp', '.h') or p.name == 'LICENSE')]
@@ -274,6 +282,7 @@ def main():
                 'ufs_cpu_present': prepared.get('ufs_cpu_present', False),
                 'display_reference': prepared.get('display_reference'),
                 'log_capture': prepared.get('log_capture'),
+                'signature_scan_io': prepared.get('signature_scan_io'),
                 'hardware_tested': False, 'apple_launchd_executed': False}
     summary = dict(identity, candidate_present=False, candidate_validated=False,
                    ufs_abi_validated=False)
@@ -322,6 +331,9 @@ def main():
                 args.upstream, prepared.get('data_skeleton'), capture_logs=bool(identity['log_capture']))
             summary['data_skeleton_qualified_statically'] = bool(
                 manifest['data_skeleton_qualification'])
+            manifest['signature_scan_qualification'] = qualify_signature_scan(
+                args.upstream, prepared.get('signature_scan_io'))
+            summary['signature_scan_qualified_statically'] = bool(manifest['signature_scan_qualification'])
             if identity['profile'] in DISPLAY_PROFILES:
                 manifest['display_qualification'] = qualify_display_candidate(
                     args.upstream, args.device, candidate, expected_profile=identity['profile'])
