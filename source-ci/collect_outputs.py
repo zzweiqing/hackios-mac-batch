@@ -138,10 +138,14 @@ def selected_files(upstream):
                      'tree/.cache/xnu-work/bsd/kern/bsd_init.c',
                      'tree/.cache/xnu-work/bsd/kern/kern_exec.c',
                      'tree/.cache/xnu-work/bsd/kern/ubc_subr.c',
-                     'tree/patches/xnu/native-4k-signature-hash-cache.patch',
                      'tree/.cache/xnu-work/bsd/kern/kern_exit.c',
                      'tree/.cache/xnu-work/osfmk/kern/exception.c'):
         add(work / relative, Path(relative))
+    # The assembled tree exposes patches through a symlink. Collect the
+    # authenticated upstream file itself, never the link target discovered by
+    # walking the build tree.
+    add(upstream / 'patches/xnu/native-4k-signature-hash-cache.patch',
+        Path('tree/patches/xnu/native-4k-signature-hash-cache.patch'))
     return files
 
 
