@@ -498,6 +498,9 @@ def main():
         ('__ZN25IOMobileFramebufferLegacyC2EPK11OSMetaClass', legacy_ctor, 'family'),
         ('__ZN25IOMobileFramebufferLegacyD2Ev', dtor, 'family'),
         ('__ZTV25IOMobileFramebufferLegacy', legacy_vptr - 16, 'family'),
+        # An override still calls its original parent implementation. Its own
+        # vtable slot no longer supplies that parent symbol to the builder.
+        ('__ZN25IOMobileFramebufferLegacy13setPowerStateEmP9IOService', legacy[155], 'family'),
     ]
     binding_specs += [(getter['symbol'], getter['va'], 'iosurface')
                       for getter in iosurface_getters]
