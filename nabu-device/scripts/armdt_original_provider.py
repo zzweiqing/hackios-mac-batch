@@ -21,6 +21,8 @@ NUB = '''    if (entry->getProperty ("armdt,nabu-boot-pmgr") != nullptr) {
       }
       // Optional: needs wdt=-1 and logs why when not published; boot continues.
       nabu_watchdog_publish (this);
+      // Optional: needs nabu-touch=1; starts its own worker and never blocks boot.
+      nabu_touch_publish (this);
       count++;
       continue;
     }
@@ -75,4 +77,5 @@ def patch_source(text):
                         '__attribute__((weak)) bool qemu_boot_pmgr_publish (IOService *, IORegistryEntry *);\n'
                         '__attribute__((weak)) bool nabu_boot_pmgr_publish (IOService *, IORegistryEntry *);\n'
                         '__attribute__((weak)) bool nabu_watchdog_publish (IOService *);\n'
+                        '__attribute__((weak)) bool nabu_touch_publish (IOService *);\n'
                         'volatile uint64_t armdt_platform_original_armio_registry_id = 0;\n', 1)

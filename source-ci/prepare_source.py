@@ -53,6 +53,12 @@ ROOT_COMPONENTS = ['com.apple.filesystems.apfs',
 GRAPHICS_ROOTS = ['com.apple.iokit.IOSurface',
                   'com.apple.iokit.IOMobileGraphicsFamily']
 CPU_UI_ROOTS = ROOT_COMPONENTS + GRAPHICS_ROOTS
+# The hardware CPU profile also publishes the NT36523 touch digitizer. On 21H16
+# the generic digitizer IOHIDEventDriver personality is only in the codeless
+# IOHIDEventDriverSafeBoot bundle; AppleMultitouchDriver stays out.
+HID_ROOTS = ['com.apple.iokit.IOHIDFamily',
+             'com.apple.iokit.IOHIDEventDriverSafeBoot']
+UFS_CPU_PRESENT_ROOTS = CPU_UI_ROOTS + HID_ROOTS
 # Opt-in native text console magnification (boot arg nabu-vc-scale=1..4).
 # The patch is inert without the argument, so no profile gains a dependency.
 VC_TEXT_SCALE = {'name': 'nabu-vc-text-scale.patch',
@@ -251,10 +257,20 @@ def select_legacy_build_mode(upstream, cpu_present):
 
 def select_ufs_cpu_present_profile(device, upstream):
     """Keep the hardware owner/Data closure and add the qualified CPU backend."""
-    _select_owner_ufs_board(device, UFS_CPU_PRESENT_PROFILE, CPU_UI_ROOTS, data=True,
+    _select_owner_ufs_board(device, UFS_CPU_PRESENT_PROFILE, UFS_CPU_PRESENT_ROOTS, data=True,
                             archives=owner_ufs_archives(data=True) + ['build-nabu-legacy-display.py'])
     _apply_owner_ufs_build(upstream, data=True, nabu_pmgr=True)
     select_legacy_build_mode(upstream, cpu_present=True)
+    select_touch_build(upstream)
+
+
+def select_touch_build(upstream):
+    kernel = upstream / 'scripts/unixnu/kernel.py'
+    text = kernel.read_text(encoding='utf-8')
+    anchor = '    build_archives(ctx, env)\n'
+    if text.count(anchor) != 1:
+        raise ValueError('Expected one archive build entry')
+    kernel.write_text(text.replace(anchor, "    env['NABU_TOUCH'] = '1'\n" + anchor), encoding='utf-8')
 
 
 def select_storage_profile(device, upstream, owner_root=False, data=False):
@@ -440,7 +456,8 @@ def validate_profile(device):
     qemu_legacy = name in (QEMU_LEGACY_PROFILE, QEMU_CPU_PRESENT_PROFILE)
     qemu_owner = qemu_data or qemu_cpu_ui or qemu_legacy
     ufs_owner = name in UFS_OWNER_PROFILES
-    roots = (CPU_UI_ROOTS if ufs_cpu_ui or ufs_cpu_present or qemu_cpu_ui or qemu_legacy else
+    roots = (UFS_CPU_PRESENT_ROOTS if ufs_cpu_present else
+             CPU_UI_ROOTS if ufs_cpu_ui or qemu_cpu_ui or qemu_legacy else
              ROOT_COMPONENTS if owner_root else ['com.apple.filesystems.apfs'])
     if board['kernel']['prelink']['roots'] != roots:
         raise ValueError('Profile requires its declared original-component closure')

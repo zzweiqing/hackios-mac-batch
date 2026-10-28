@@ -91,6 +91,7 @@ def main():
         '__attribute__((weak)) bool qemu_boot_pmgr_publish (IOService *, IORegistryEntry *) { return false; }\n'
         '__attribute__((weak)) bool nabu_boot_pmgr_publish (IOService *, IORegistryEntry *) { return false; }\n'
         '__attribute__((weak)) bool nabu_watchdog_publish (IOService *) { return false; }\n'
+        '__attribute__((weak)) bool nabu_touch_publish (IOService *) { return false; }\n'
         '}\n', encoding='utf-8')
     stubs_obj = out / 'PmgrPublishStubs.o'
     stubs_command = compile_command(record, stubs, stubs_obj)
@@ -204,6 +205,7 @@ def main():
         }
     boot_pmgr = None
     watchdog = None
+    touch = None
     if original_armio:
         from qemu_pmgr_build import build
         if os.environ.get('NABU_BOOT_PMGR') == '1':
@@ -220,6 +222,14 @@ def main():
             watchdog = {'class': 'NabuWatchdog', 'parent': 'IOWatchdog',
                         'boot_arg': 'wdt=-1', 'soc_hooks_mmio': False,
                         'bindings': str(out / 'nabu-watchdog' / 'bindings.json')}
+            if os.environ.get('NABU_TOUCH') == '1':
+                # Only profiles that prelink IOHIDFamily build the touch digitizer.
+                from nabu_touch_build import build as build_touch
+                objects += build_touch(root, record, out / 'nabu-touch', compile_command,
+                                       Path(os.environ['UNIXNU_KERNELCACHE']))
+                touch = {'class': 'NabuTouchHid', 'parent': 'IOHIDDevice',
+                         'boot_arg': 'nabu-touch=1', 'firmware': 'ADT /nabu-touch',
+                         'bindings': str(out / 'nabu-touch' / 'bindings.json')}
         else:
             boot_pmgr = 'QemuBootPMGR'
             objects += build(root, record, out / 'qemu-pmgr', compile_command,
@@ -235,6 +245,7 @@ def main():
         'original_armio_factory_enabled': original_armio,
         'boot_pmgr': boot_pmgr,
         'watchdog': watchdog,
+        'touch': touch,
         'timer_binding': timer_binding,
         'usb_probe': usb_probe,
         'usb_cdc': usb_cdc,
