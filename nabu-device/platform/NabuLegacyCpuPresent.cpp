@@ -9,6 +9,7 @@
 #include <libkern/c++/OSData.h>
 #include <pexpert/pexpert.h>
 #include <machine/machine_routines.h>
+#include <kern/clock.h>
 
 #if !defined(NABU_LEGACY_CPU_PRESENT) || !defined(NABU_LEGACY_CPU_ABI_VERIFIED)
 #error CPU presentation requires an explicitly qualified build mode
@@ -38,6 +39,9 @@ volatile uint32_t nabu_legacy_cpu_console_owned, nabu_legacy_cpu_console_status;
 volatile uint32_t nabu_legacy_cpu_first_request_valid;
 unsigned char nabu_legacy_cpu_first_request[0x340];
 volatile uint64_t nabu_legacy_cpu_copied_frames, nabu_legacy_cpu_blank_frames;
+volatile uint64_t nabu_legacy_cpu_stored_bytes, nabu_legacy_cpu_copy_ticks;
+volatile uint64_t nabu_legacy_cpu_max_copy_ticks, nabu_legacy_cpu_diff_frames;
+volatile uint64_t nabu_legacy_cpu_shadow_bytes;
 }
 
 class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
@@ -46,6 +50,9 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     uint64_t bootStride = 0;
     bool primary = false, enabled = false, consoleOwned = false, logicalPM = false;
     bool kicking = false, rekick = false;
+    void *shadow = nullptr;
+    size_t shadowBytes = 0;
+    bool shadowValid = false, diffEnabled = true;
     const OriginalLegacySwapRequest *validated[64] = {};
 
     static uint32_t word(const OriginalLegacySwapRequest *request, unsigned offset) {
@@ -80,6 +87,11 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
         consoleOwned = false;
         nabu_legacy_cpu_console_owned = 0;
     }
+    void releaseShadow() {
+        shadowValid = false;
+        if (shadow) IOFree(shadow, shadowBytes);
+        shadow = nullptr; shadowBytes = 0; nabu_legacy_cpu_shadow_bytes = 0;
+    }
     void kickOnce() {
         const OriginalLegacySwapRequest *request = pendingSwapRequest();
         if (!enabled || !bootMapping || !request || ml_at_interrupt_context()) return;
@@ -106,11 +118,26 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
             }
         }
         if (!acquireConsole()) { OSSafeReleaseNULL(source); return; }
-        bool copied = source ? nabu_cpu_copy_bgra(
-            reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress()), bootMapping->getLength(), bootStride,
-            reinterpret_cast<const void *>(source->getVirtualAddress()), source->getLength(), sourceStride, width, height) :
-            nabu_cpu_black(reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress()),
-                bootMapping->getLength(), bootStride, width, height);
+        const uint64_t begin = mach_absolute_time();
+        const uint64_t frameBytes = (uint64_t)width * height * 4;
+        uint64_t stored = UINT64_MAX;
+        if (source && shadow && shadowBytes == frameBytes) {
+            stored = nabu_cpu_copy_diff(
+                reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress()), bootMapping->getLength(), bootStride,
+                reinterpret_cast<const void *>(source->getVirtualAddress()), source->getLength(), sourceStride, width, height,
+                shadow, shadowBytes, shadowValid);
+        }
+        bool copied = stored != UINT64_MAX;
+        if (copied) { shadowValid = true; ++nabu_legacy_cpu_diff_frames; }
+        else {
+            shadowValid = false;
+            copied = source ? nabu_cpu_copy_bgra(
+                reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress()), bootMapping->getLength(), bootStride,
+                reinterpret_cast<const void *>(source->getVirtualAddress()), source->getLength(), sourceStride, width, height) :
+                nabu_cpu_black(reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress()),
+                    bootMapping->getLength(), bootStride, width, height);
+            if (copied) stored = frameBytes;
+        }
         OSSafeReleaseNULL(source);
         if (!copied) {
             native_legacy_transfer_observed(kIOReturnBadArgument, request, 0);
@@ -118,8 +145,12 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
             return;
         }
         __asm__ volatile("dsb sy" ::: "memory");
+        const uint64_t ticks = mach_absolute_time() - begin;
+        nabu_legacy_cpu_stored_bytes += stored;
+        nabu_legacy_cpu_copy_ticks += ticks;
+        if (ticks > nabu_legacy_cpu_max_copy_ticks) nabu_legacy_cpu_max_copy_ticks = ticks;
         if (surface) ++nabu_legacy_cpu_copied_frames; else ++nabu_legacy_cpu_blank_frames;
-        native_legacy_transfer_observed(kIOReturnSuccess, request, (uint64_t)width * height * 4);
+        native_legacy_transfer_observed(kIOReturnSuccess, request, stored);
         if (!activateOnlyPendingSwap(request)) return;
         nabu_legacy_request_active(this, request, 3);
         validated[acceptedSlot] = nullptr;
@@ -130,6 +161,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
 public:
     void free() override {
         if (logicalPM) { PMstop(); logicalPM = false; }
+        releaseShadow();
         OSSafeReleaseNULL(bootMapping);
         IOMobileFramebufferLegacy::free();
     }
@@ -138,12 +170,16 @@ public:
         if (logicalPM) { PMstop(); logicalPM = false; }
         IOMobileFramebufferLegacy::stop(provider);
         restoreConsole();
+        releaseShadow();
         OSSafeReleaseNULL(bootMapping);
     }
     bool start(IOService *provider) override {
         unsigned value = 0;
         PE_parse_boot_argn("nabu-cpu-present", &value, sizeof(value));
         enabled = value == 1;
+        value = 1;
+        PE_parse_boot_argn("nabu-cpu-diff", &value, sizeof(value));
+        diffEnabled = value == 1;
         if (!IOMobileFramebufferLegacy::start(provider)) return false;
         if (enabled && primary && bootMapping) {
             // As UniXNU's logical PM plus announcePoweredByFirmware: request the
@@ -326,6 +362,14 @@ public:
                 bootMapping = mapping; mapping = nullptr;
                 bootStride = video.v_rowBytes;
                 primary = video.v_display == 1;
+                releaseShadow();
+                const uint64_t packed = (uint64_t)width * height * 4;
+                if (enabled && diffEnabled && primary && !(width & 1) && packed <= 32 * 1024 * 1024) {
+                    shadow = IOMalloc((size_t)packed);
+                    if (shadow) { shadowBytes = (size_t)packed; nabu_legacy_cpu_shadow_bytes = packed; }
+                    IOLog("NABU CPU present: differential=%u shadow=%llu full-copy-fallback=%u\n",
+                        diffEnabled, (unsigned long long)shadowBytes, shadow == nullptr);
+                }
                 valid = native_legacy_gop_mapping_observed(this, bootMapping, width, height);
             }
         }

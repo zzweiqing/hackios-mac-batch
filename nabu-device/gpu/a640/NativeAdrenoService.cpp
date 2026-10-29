@@ -12,6 +12,7 @@
 #include "NativeAdrenoCpInit.h"
 #include "NativeAdrenoIrq.h"
 #include "NativeAdrenoKernelTime.h"
+#include "NabuSmmuPolicy.h"
 #include "ArmSmmu4KMmio.h"
 #include "AdrenoPM4.h"
 #include <IOKit/IODeviceMemory.h>
@@ -488,8 +489,22 @@ IOReturn A640State::reserveSmmuResources()
         const uint32_t faultRoute=(2u<<16)|(3u<<8);
         if(smmuIo_.write32(smmuIo_.cookie,0xc00+4*slot,faultRoute) ||
             smmuIo_.barrier(smmuIo_.cookie) ||
-            smmuIo_.read32(smmuIo_.cookie,0xc00+4*slot,&after) || after!=faultRoute)
+            smmuIo_.read32(smmuIo_.cookie,0xc00+4*slot,&after)) {
+            IOLog("NativeAdrenoSmmu: fault route I/O failed slot=%u before=%08x requested=%08x\n",
+                slot,before,faultRoute);
             return kIOReturnIOError;
+        }
+        const uint32_t compareMask=NabuSmmuS2crMask(id0,faultRoute);
+        IOLog("NativeAdrenoSmmu: fault route slot=%u before=%08x requested=%08x actual=%08x mask=%08x\n",
+            slot,before,faultRoute,after,compareMask);
+        uint32_t smrAfter=0;
+        if(!NabuSmmuS2crMatches(id0,after,faultRoute) ||
+            smmuIo_.read32(smmuIo_.cookie,0x800+4*slot,&smrAfter) ||
+            (extended?bool(after&(1u<<10)):bool(smrAfter&(1u<<31)))) {
+            IOLog("NativeAdrenoSmmu: fault route rejected slot=%u smr=%08x s2cr=%08x\n",
+                slot,smrAfter,after);
+            return kIOReturnIOError;
+        }
     }
     resources_.gpuBank=selectedBanks[0];resources_.gmuBank=selectedBanks[1];
     for(unsigned index=0;index<4;++index)gpuSlots_[index]=selectedSlots[index];

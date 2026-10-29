@@ -1,0 +1,6 @@
+ArmSmmu4KStreams.c is an SM8150 overlay of the preserved MIT source
+upstream/ArmSmmu4K/ArmSmmu4KStreams.c, SHA256 f0bc11a03a240182dac0e2417920b8c2415e759855e5badcce6fab2638879702.
+The original source and upstream provenance are retained unchanged.
+S2CR readback compares the TYPE/EXIDVALID and translation attributes
+selected by NabuSmmuPolicy.h; all exact SMR, overlap, ownership, global
+fault, poisoning and mutation-order checks remain in place.

@@ -31,6 +31,9 @@ extern volatile uint64_t native_legacy_retired_current, native_legacy_retired_pe
 #if defined(NABU_LEGACY_CPU_PRESENT)
 extern volatile uint32_t nabu_legacy_cpu_present_abi, nabu_legacy_cpu_first_request_valid;
 extern volatile uint64_t nabu_legacy_cpu_copied_frames, nabu_legacy_cpu_blank_frames;
+extern volatile uint64_t nabu_legacy_cpu_stored_bytes, nabu_legacy_cpu_copy_ticks;
+extern volatile uint64_t nabu_legacy_cpu_max_copy_ticks, nabu_legacy_cpu_diff_frames;
+extern volatile uint64_t nabu_legacy_cpu_shadow_bytes;
 extern volatile uint32_t nabu_legacy_cpu_console_owned, nabu_legacy_cpu_console_status;
 extern volatile uint32_t nabu_keybag_notification_stage;
 extern volatile int nabu_keybag_notification_status;
@@ -91,6 +94,10 @@ nabu_graphics_status_worker(void *parameter, wait_result_t waitResult)
             nabu_legacy_cpu_present_abi, nabu_legacy_cpu_first_request_valid,
             (unsigned long long)nabu_legacy_cpu_copied_frames, (unsigned long long)nabu_legacy_cpu_blank_frames,
             nabu_legacy_cpu_console_owned, nabu_legacy_cpu_console_status);
+        IOLog("NABU DISPLAY cpu-copy stored=%llu ticks=%llu max-ticks=%llu diff-frames=%llu shadow=%llu\n",
+            (unsigned long long)nabu_legacy_cpu_stored_bytes, (unsigned long long)nabu_legacy_cpu_copy_ticks,
+            (unsigned long long)nabu_legacy_cpu_max_copy_ticks, (unsigned long long)nabu_legacy_cpu_diff_frames,
+            (unsigned long long)nabu_legacy_cpu_shadow_bytes);
         IOLog("NABU DISPLAY notify-stage=%u status=0x%x subscriptions=%u failures=%u refused-opens=%u\n",
             nabu_keybag_notification_stage, (unsigned)nabu_keybag_notification_status,
             nabu_keybag_notification_subscriptions, nabu_keybag_notification_failures,

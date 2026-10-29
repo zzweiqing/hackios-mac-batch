@@ -3,6 +3,7 @@
  * QSMMUv500 reset and ECATS procedures adapted from the SM7325 arm-smmu and
  * arm-smmu-qcom drivers. Board clocks are held on by NativeAdrenoA6xxPower. */
 #include "NativeAdrenoA6xxSmmu.h"
+#include "NabuSmmuPolicy.h"
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOLib.h>
 
@@ -92,10 +93,15 @@ IOReturn NativeAdrenoA6xxSmmu::prepare(const NativeAdrenoA6xxResources &resource
     const unsigned banks=id1&255;
     contextStride_=size_t(1)<<((id1>>31)?16:12);
     contextBase_=contextStride_*(size_t(1)<<(((id1>>28)&7)+1));
-    if(!banks || banks>8 || resources_.smmuContextInterruptCount!=banks ||
-        resources_.gpuBank>=banks || resources_.gmuBank>=banks ||
-        resources_.gpuBank==resources_.gmuBank ||
-        contextOffset(banks)>io_.register_bytes) {
+    /* SMMUv2 uses the bank index as its context IRQ index. The nabu DT
+     * supplies eight IRQs; this unit reports five banks. Surplus IRQs are
+     * unused, as in arm-smmu_device_cfg_probe(), rather than additional banks. */
+    const size_t irqCapacity=sizeof(resources_.smmuContextInterrupts)/
+        sizeof(resources_.smmuContextInterrupts[0]);
+    if(!NabuSmmuGeometryMatches(id1,io_.register_bytes,
+        resources_.smmuContextInterruptCount,irqCapacity,resources_.gpuBank,resources_.gmuBank)) {
+        IOLog("NativeAdrenoSmmu: unsupported geometry id=%08x/%08x/%08x banks=%u context_irqs=%u\n",
+            id0,id1,id2,banks,resources_.smmuContextInterruptCount);
         return kIOReturnUnsupported;
     }
 

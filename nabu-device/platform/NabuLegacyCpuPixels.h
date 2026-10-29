@@ -59,6 +59,45 @@ static inline bool nabu_cpu_copy_bgra(volatile void *destination,
     return true;
 }
 
+// Compare cached shadow rows, not the slow device mapping. No hash collisions or
+// device reads: every skipped block is byte-identical to the last stored frame.
+static inline uint64_t nabu_cpu_copy_diff(volatile void *destination,
+    uint64_t destinationBytes, uint64_t destinationStride, const void *source,
+    uint64_t sourceBytes, uint64_t sourceStride, uint32_t width, uint32_t height,
+    void *shadow, uint64_t shadowBytes, bool valid) {
+    uintptr_t src = (uintptr_t)source, dst = (uintptr_t)destination, old = (uintptr_t)shadow;
+    uint64_t packedBytes = (uint64_t)width * height * 4;
+    if (!nabu_cpu_destination(destination, destinationBytes, destinationStride, width, height) ||
+        !src || !nabu_cpu_rows(width, height, sourceStride, sourceBytes) ||
+        sourceBytes > UINTPTR_MAX || src > UINTPTR_MAX - sourceBytes ||
+        !old || (old & 7) || (dst & 7) || (destinationStride & 7) || (width & 1) ||
+        packedBytes > shadowBytes || shadowBytes > UINTPTR_MAX || old > UINTPTR_MAX - shadowBytes ||
+        (old < src + sourceBytes && src < old + shadowBytes) ||
+        (old < dst + destinationBytes && dst < old + shadowBytes)) return UINT64_MAX;
+    uint64_t stored = 0;
+    for (uint32_t y = 0; y < height; ++y) {
+        volatile uint64_t *out = (volatile uint64_t *)(dst + y * destinationStride);
+        const unsigned char *in = (const unsigned char *)(src + y * sourceStride);
+        uint64_t *previous = (uint64_t *)(old + (uint64_t)y * width * 4);
+        uint32_t word = 0, words = width / 2;
+        for (; word + 8 <= words; word += 8) {
+            uint64_t next[8], changed = 0;
+            __builtin_memcpy(next, in + (uint64_t)word * 8, sizeof(next));
+            if (valid) for (unsigned i = 0; i < 8; ++i) changed |= next[i] ^ previous[word + i];
+            if (valid && !changed) continue;
+            for (unsigned i = 0; i < 8; ++i) { out[word + i] = next[i]; previous[word + i] = next[i]; }
+            stored += 64;
+        }
+        for (; word < words; ++word) {
+            uint64_t next;
+            __builtin_memcpy(&next, in + (uint64_t)word * 8, sizeof(next));
+            if (valid && next == previous[word]) continue;
+            out[word] = next; previous[word] = next; stored += 8;
+        }
+    }
+    return stored;
+}
+
 static inline bool nabu_cpu_black(volatile void *destination, uint64_t bytes,
     uint64_t stride, uint32_t width, uint32_t height) {
     if (!nabu_cpu_destination(destination, bytes, stride, width, height)) return false;

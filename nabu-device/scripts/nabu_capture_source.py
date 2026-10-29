@@ -165,7 +165,7 @@ def patch_user_exception(text):
     Use task's cached telemetry fields: no shared-region locks, user memory
     reads, disk I/O or exception handling changes on this path.
     """
-    marker = '/* NABU_CAPTURE_V2_6 SpringBoard exception observation */'
+    marker = '/* NABU_CAPTURE_V2_7 bounded UI exception observation */'
     anchor = ('kern_return_t\nexception_triage(\n'
               '\texception_type_t        exception,\n'
               '\tmach_exception_data_t   code,\n'
@@ -175,15 +175,17 @@ def patch_user_exception(text):
         if text.count(anchor + call) != 1:
             raise ValueError('Exception observer source drift')
         return text
-    if 'NABU_CAPTURE_V2_5 SpringBoard exception observation' in text:
+    if any(old in text for old in ('NABU_CAPTURE_V2_5 SpringBoard exception observation',
+                                  'NABU_CAPTURE_V2_6 SpringBoard exception observation')):
         raise ValueError('Use a fresh XNU tree for the panic-state observer upgrade')
     helper = r'''
-/* NABU_CAPTURE_V2_6 SpringBoard exception observation */
+/* NABU_CAPTURE_V2_7 bounded UI exception observation */
 #if defined(__arm64__) && defined(MACH_BSD)
 #include <arm/thread.h>
 static unsigned nabu_exc_calls, nabu_exc_target, nabu_exc_valid;
 static unsigned nabu_exc_pid;
 static uint64_t nabu_exc_pc, nabu_exc_esr;
+static unsigned nabu_ui_exc_emitted[3];
 __attribute__((noinline)) void
 nabu_trace_user_exception(exception_type_t exception, mach_exception_data_t code,
     mach_msg_type_number_t codeCnt)
@@ -194,19 +196,30 @@ nabu_trace_user_exception(exception_type_t exception, mach_exception_data_t code
     __atomic_fetch_add(&nabu_exc_calls, 1, __ATOMIC_RELAXED);
     task_t task = current_task();
     struct proc *p = get_bsdtask_info(task);
-    if (!p || strcmp(proc_name_address(p), "SpringBoard")) return;
-    __atomic_fetch_add(&nabu_exc_target, 1, __ATOMIC_RELAXED);
+    if (!p) return;
+    const char *name = proc_name_address(p);
+    unsigned target;
+    if (!strcmp(name, "SpringBoard")) target = 0;
+    else if (!strcmp(name, "Preferences")) target = 1;
+    else if (!strcmp(name, "iconservicesagent") || !strcmp(name, "iconservicesagen")) target = 2;
+    else return;
+    if (!target) __atomic_fetch_add(&nabu_exc_target, 1, __ATOMIC_RELAXED);
     thread_t thread = current_thread();
     arm_saved_state_t *ss = get_user_regs(thread);
     if (!ss || !is_saved_state64(ss) || (get_saved_state_cpsr(ss) & 0x1f)) return;
-    __atomic_store_n(&nabu_exc_pid, (unsigned)proc_selfpid(), __ATOMIC_RELAXED);
-    __atomic_store_n(&nabu_exc_pc, get_saved_state_pc(ss), __ATOMIC_RELAXED);
-    __atomic_store_n(&nabu_exc_esr, get_saved_state_esr(ss), __ATOMIC_RELAXED);
-    __atomic_fetch_add(&nabu_exc_valid, 1, __ATOMIC_RELAXED);
-    printf("NABU EXC comm=SpringBoard pid=%d tid=%llu type=%d count=%u code0=0x%llx code1=0x%llx\n",
-        proc_selfpid(), (unsigned long long)thread_tid(thread), exception, codeCnt,
-        (unsigned long long)(codeCnt > 0 ? code[0] : 0),
-        (unsigned long long)(codeCnt > 1 ? code[1] : 0));
+    if (!target) {
+        __atomic_store_n(&nabu_exc_pid, (unsigned)proc_selfpid(), __ATOMIC_RELAXED);
+        __atomic_store_n(&nabu_exc_pc, get_saved_state_pc(ss), __ATOMIC_RELAXED);
+        __atomic_store_n(&nabu_exc_esr, get_saved_state_esr(ss), __ATOMIC_RELAXED);
+        __atomic_fetch_add(&nabu_exc_valid, 1, __ATOMIC_RELAXED);
+    }
+    /* Independent budgets prevent a crashing icon service starving PID 1's
+     * console or hiding the next Settings/SpringBoard fault. No user reads. */
+    if (__atomic_fetch_add(&nabu_ui_exc_emitted[target], 1, __ATOMIC_RELAXED) >= 32) return;
+    printf("NABU EXC comm=%s pid=%d tid=%llu type=%d count=%u code0=0x%llx code1=0x%llx\n",
+        name, proc_selfpid(), (unsigned long long)thread_tid(thread), exception, codeCnt,
+        (unsigned long long)(code && codeCnt > 0 ? code[0] : 0),
+        (unsigned long long)(code && codeCnt > 1 ? code[1] : 0));
     printf("NABU EXC pc=0x%llx lr=0x%llx esr=0x%x cpsr=0x%x\n",
         (unsigned long long)get_saved_state_pc(ss),
         (unsigned long long)get_saved_state_lr(ss), get_saved_state_esr(ss), get_saved_state_cpsr(ss));
@@ -304,7 +317,7 @@ def apply(root, device):
         'heartbeat_boot_arg_gated': True, 'heartbeat_read_only': True,
         'writer_counter_watch': True,
         'exit_trace': True,
-        'user_exception_trace': 'SpringBoard EL0; nabu-exit-trace gated',
+        'user_exception_trace': 'SpringBoard/Preferences/iconservicesagent EL0; 32 records each; nabu-exit-trace gated',
         'user_exception_entry': 'nabu_trace_user_exception',
         'user_exception_delivery_unchanged': True,
         'exit_panic_state': 'existing SpringBoard error-exit panic only; no new panic trigger',
