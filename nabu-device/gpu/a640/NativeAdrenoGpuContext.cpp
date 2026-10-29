@@ -58,7 +58,9 @@ IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
     if(!status) {
         step(VmAttach);
         NativeAdrenoVmRegion lower{&tables_,smmu_.arenaHandle(),smmu_.stateHandle()};
-        status=vm_.attach(io,smmu_.configHandle(),smmu_.streamsHandle(),&lower,nullptr,16,262144);
+        // Metal clients share the bounded VM pool; diagnostics need only five bootstrap BOs.
+        status=vm_.attach(io,smmu_.configHandle(),smmu_.streamsHandle(),&lower,nullptr,
+            NabuGpuVmObjectCapacity(NativeAdrenoVmMaxObjects),262144);
     }
     if(!status) {
         step(Map);

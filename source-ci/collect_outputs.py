@@ -89,6 +89,12 @@ def selected_files(upstream):
                 add(path, path.relative_to(work))
 
     build = work / 'tree/build'
+    probe = work / 'userprobe'
+    if probe.is_dir():
+        for path in sorted(probe.iterdir()):
+            if path.name in ('nabu-gpu-userprobe', 'build-report.json', 'entitlements.plist') or (
+                    path.name.startswith('command-') and path.suffix == '.log'):
+                add(path, path.relative_to(work))
     xnu_obj = build / 'xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837'
     if xnu_obj.is_dir():
         for path in sorted(xnu_obj.rglob('*')):
@@ -182,6 +188,9 @@ def selected_sources(device):
         (device / 'configs/nabu_ufs_gpu_defconfig', 'device/configs/nabu_ufs_gpu_defconfig'),
         (device / 'configs/nabu_ufs_gpu_metal_defconfig', 'device/configs/nabu_ufs_gpu_metal_defconfig'),
         (device / 'scripts/build-nabu-adreno.py', 'device/scripts/build-nabu-adreno.py'),
+        (device / 'scripts/nabu_adreno_bindings.py', 'device/scripts/nabu_adreno_bindings.py'),
+        (device / 'scripts/build-nabu-gpu-userprobe.py', 'device/scripts/build-nabu-gpu-userprobe.py'),
+        (device / 'userprobe/nabu_gpu_userprobe.cpp', 'device/userprobe/nabu_gpu_userprobe.cpp'),
         (device / 'LICENSE', 'device/LICENSE'),
         (device / 'scripts/build-nabu-platform.py', 'device/scripts/build-nabu-platform.py'),
         (device / 'scripts/nabu_armcpu_source.py', 'device/scripts/nabu_armcpu_source.py'),

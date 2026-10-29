@@ -38,6 +38,24 @@ extern "C" void native_adreno_fault(void);
 extern "C" void native_adreno_dma_stopped(void);
 extern "C" void native_adreno_gpu_interrupt(bool failed);
 extern "C" int native_adreno_progress(uint32_t *,uint32_t *);
+/* Fixed diagnostic layouts exported by the pinned NativeAdrenoPublish.cpp.
+ * The observation regression checks the complete field layout at both sites. */
+extern "C" {
+struct NativeAdrenoMetalDiag {
+    uint32_t opens, busy, bad, closes, reports, property_reads, foreign_opens, foreign_type, name_reads, calls, last_selector, last_status, ext_entries, ext_selector, ext_status, ext_in, ext_out, tunnel_calls, probes, sel_bits[8], mb_maps, mb_calls, marks_total, marks[16], chk_macf, chk_res, chk_type, type_pass_lo, type_pass_hi, attach_status, inflight, inflight_since_calls, forced_unmaps;
+    char opener[3][17];
+    char reader[3][17];
+    char name_reader[17];
+    char starter[3][17];
+    char report[64];
+    char report2[64];
+    uint32_t grants;
+};
+struct NativeAdrenoOpenRecord {char name[20]; uint32_t type, macf, res, attach, foreign;};
+extern NativeAdrenoMetalDiag native_adreno_metal_diag;
+extern NativeAdrenoOpenRecord native_adreno_open_log[8];
+extern volatile uint32_t native_adreno_method_stats[20][4];
+}
 #endif
 extern "C" {
 volatile uint64_t native_adreno_fence_phys=0;
@@ -45,6 +63,60 @@ volatile uint32_t native_adreno_a6xx_stats[24];
 }
 
 namespace {
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+/* Snapshot only fixed software counters: the full upstream dump can print
+ * thousands of history rows and is unsuitable for the 10 ms hardware worker. */
+class NabuMetalObservation final {
+    bool enabled_=false;
+    unsigned next_=0;
+    uint64_t since_=0;
+public:
+    void start(bool enabled,uint64_t current)
+    {
+        enabled_=enabled;next_=0;since_=current;
+        if(enabled_) {
+            IOLog("NabuGPU: Metal observations enabled slots=4 at_seconds=0,10,30,120\n");
+        }
+    }
+    void sample(uint64_t current,uint32_t submitted,uint32_t completed,int progress)
+    {
+        static const unsigned seconds[4]={0,10,30,120};
+        if(!enabled_ || next_>=4 || current<since_)return;
+        const uint64_t elapsed=current-since_;
+        if(elapsed<uint64_t(seconds[next_])*1000000)return;
+        const unsigned slot=++next_;
+        /* A delayed worker emits one current snapshot, not a burst of stale
+         * catch-up samples for every missed deadline. */
+        while(next_<4 && elapsed>=uint64_t(seconds[next_])*1000000)++next_;
+        const NativeAdrenoMetalDiag diag=native_adreno_metal_diag;
+        IOLog("NabuGPU: observation=%u/4 since_ready_us=%llu snapshot=non-atomic render_proof=0 submitted=%u completed=%u progress=%08x\n",
+            slot,elapsed,submitted,completed,uint32_t(progress));
+        IOLog("NabuGPU: metal_opens=%u busy=%u bad=%u closes=%u discovery_reads=%u foreign_opens=%u foreign_type=%08x\n",
+            diag.opens,diag.busy,diag.bad,diag.closes,diag.name_reads,diag.foreign_opens,diag.foreign_type);
+        IOLog("NabuGPU: metal_calls=%u selector=%u status=%08x inflight=%u ext_entries=%u ext_selector=%u ext_status=%08x\n",
+            diag.calls,diag.last_selector,diag.last_status,diag.inflight,
+            diag.ext_entries,diag.ext_selector,diag.ext_status);
+        for(unsigned index=0;index<8;++index) {
+            const NativeAdrenoOpenRecord open=native_adreno_open_log[index];
+            if(open.name[0]) {
+                IOLog("NabuGPU: metal_open_slot=%u process=%.*s type=%08x macf=%u resolver=%u attach=%u foreign=%u\n",
+                    index,20,open.name,open.type,open.macf,open.res,open.attach,open.foreign);
+            }
+        }
+        /* These upstream counters cover methods 1..19 only. Newer selectors
+         * remain visible in the latest selector/status and raw fence fields. */
+        for(unsigned method=1;method<20;++method) {
+            const volatile uint32_t *counts=native_adreno_method_stats[method];
+            const uint32_t calls=counts[0],failures=counts[1],status=counts[2];
+            if(calls) {
+                IOLog("NabuGPU: metal_method=%u calls=%u failures=%u status=%08x\n",
+                    method,calls,failures,status);
+            }
+        }
+        IOLog("NabuGPU: observation_end=%u/4 remaining_slots=%u\n",slot,4-next_);
+    }
+};
+#endif
 void nabuGpuState(uint32_t step,uint32_t status,const char *name)
 {
     IOLog("NabuGPU: state=%s step=%u status=%08x\n",name,step,status);
@@ -74,6 +146,7 @@ class A640State final {
     NativeAdrenoSubmit submit_;
     NativeAdrenoTimer timer_;
     NativeAdrenoAbiDeviceInfo info_{};
+    NabuMetalObservation observation_;
     uint32_t watchedFence_=0;
     uint64_t watchedSince_=0;
 #endif
@@ -981,6 +1054,11 @@ IOReturn A640State::start()
         return fail(status);
     }
     ready_=true;
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+    unsigned observe=0;
+    PE_parse_boot_argn("nabu-gpu-observe",&observe,sizeof(observe));
+    observation_.start(observe==1,now(nullptr));
+#endif
     native_adreno_a6xx_stats[0]=7;
     nabuGpuState(7,0,"ready");
     dump();
@@ -1012,6 +1090,7 @@ void A640State::poll()
     uint32_t submitted=0,completed=0;
     const int progress=native_adreno_progress(&submitted,&completed);
     const uint64_t current=now(nullptr);
+    observation_.sample(current,submitted,completed,progress);
     if(completed!=watchedFence_ || submitted==completed) {
         watchedFence_=completed;
         watchedSince_=current;

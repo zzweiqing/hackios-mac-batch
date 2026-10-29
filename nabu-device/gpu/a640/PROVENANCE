@@ -22,3 +22,17 @@ SHA256 1dc63af83fc46022166b5e656b5c7b82b004798a52805152077699971673ee0a,
 line endings when committing, so the committed blob hash can differ from it.
 UniXNU/AdrenoMetal and UniXNU/NativeMetal carry the same blob, imported there
 as Import NativeMetal. No byte of the supplied header was altered here.
+
+NabuGpuMemoryPolicy.h and the NativeAdrenoMemory.h allocation overload select
+Normal-NC owned user BOs only when NABU_GPU_METAL=1. The original seven-argument
+allocator remains unchanged: write_combined=true bypasses its WB pool, chooses
+kIOMapWriteCombineCache and records NC physical spans. Existing prepared-backing
+reuse still matches the cache mode. Explicit cache-mode calls and imported pages
+retain their old behavior; no A642L cached-coherence gate is enabled.
+NativeAdrenoGpuContext.cpp gives Metal the VM's existing 4096-record bound, not
+the 16-record diagnostic pool. This allocates only CPU mapping/alias metadata at
+attach, not backing BOs or additional GPU page tables. Allocation failure remains
+fatal to bring-up. A Metal-only static assertion in NativeAdrenoVm.cpp bounds the
+two attach-time arrays to 1 MiB using their actual compiled element sizes. The
+diagnostic capacity and five bootstrap mappings are unchanged.
+These source changes do not qualify BO mapping, completion or rendering on hardware.

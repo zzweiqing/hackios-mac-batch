@@ -60,11 +60,13 @@ def sha256_file(path):
     return sha(path.read_bytes())
 
 
-def source_inventory(device):
+def source_inventory(device, metal=False):
     gpu = device / 'gpu'
     paths = sorted(p for p in gpu.rglob('*') if p.is_file() and
                    (p.suffix in SAFE_SUFFIXES or p.name in SAFE_NAMES))
     paths.append(device / 'scripts/build-nabu-adreno.py')
+    if metal:
+        paths.append(device / BINDINGS_SCRIPT)
     if any(p.is_symlink() for p in paths):
         raise ValueError('GPU source cannot be a symlink')
     return {p.relative_to(device).as_posix(): sha(p.read_bytes()) for p in paths}
@@ -155,7 +157,7 @@ def main():
     kernelcache_sha = sha256_file(kernelcache)
     if kernelcache_sha != KERNELCACHE_SHA256:
         raise SystemExit('GPU build requires the audited 21H16 kernelcache')
-    sources = source_inventory(device)
+    sources = source_inventory(device, metal=metal)
     identity = source_identity(sources)
     staged = out / 'source'
     staged.mkdir(parents=True)

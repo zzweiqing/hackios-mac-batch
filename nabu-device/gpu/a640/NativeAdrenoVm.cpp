@@ -70,6 +70,10 @@ IOReturn NativeAdrenoVm::attach(const ArmSmmu4KIo *io,ArmSmmu4KContextConfig *co
     ArmSmmu4KStreamState *streams,const NativeAdrenoVmRegion *lower,const NativeAdrenoVmRegion *upper,
     size_t max_objects,unsigned budget)
 {
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+    static_assert(NativeAdrenoVmMaxObjects*(sizeof(Mapping)+sizeof(AliasMergeState))<=1024*1024,
+        "A640 Metal VM mapping metadata exceeds its 1 MiB budget");
+#endif
     if(attached_ || mappings_ || poisoned_)return kIOReturnBusy;
     if(!io || !context || !streams || (!lower && !upper) || !max_objects || max_objects>NativeAdrenoVmMaxObjects ||
         !budget || budget>1048576 || (lower && !validBinding(*lower,0)) || (upper && !validBinding(*upper,1)))

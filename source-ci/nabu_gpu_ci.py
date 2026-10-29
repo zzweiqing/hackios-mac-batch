@@ -64,6 +64,7 @@ BINDING_SYMBOLS = ('__ZN15IOAcceleratorESC2EPK11OSMetaClass',
 BINDINGS_SOURCE = 'original-accelerator-bindings.S'
 BINDINGS_OBJECT = 'original-accelerator-bindings.o'
 BINDINGS_REPORT = 'adreno-bindings.json'
+BINDINGS_GENERATOR = 'scripts/nabu_adreno_bindings.py'
 IOGPU_MODULE = 'com.apple.iokit.IOGPUFamily'
 METAL_REQUIRED_OBJECTS = REQUIRED_OBJECTS | set(PUBLICATION_OBJECTS)
 METAL_REQUIRED_SYMBOLS = REQUIRED_SYMBOLS | PUBLICATION_SYMBOLS
@@ -85,6 +86,11 @@ def gpu_contract(profile):
 
 def accelerator_mode(profile):
     return profile == METAL_PROFILE
+
+
+def source_scripts(profile):
+    builder = 'scripts/build-nabu-adreno.py'
+    return (builder, BINDINGS_GENERATOR) if accelerator_mode(profile) else (builder,)
 
 
 def require(condition, message):
@@ -251,7 +257,9 @@ def accelerator_bindings(read, candidate, report):
                 EXTENT.fullmatch(str(extent.get('size'))) and extent.get('header_matches_report') is True,
                 'Malformed accelerator candidate extent')
         low = int(extent['candidate_va'], 16)
-        ranges.append((low, low + int(extent['size'], 16)))
+        size = int(extent['size'], 16)
+        require(size > 0 and low + size <= 1 << 64, 'Invalid accelerator candidate extent bounds')
+        ranges.append((low, low + size))
     for name, address in symbols.items():
         value = int(address, 16)
         require(any(low <= value < high for low, high in ranges),
@@ -297,10 +305,11 @@ def qualify_gpu_bundle(read, candidate, source_names, profile=PROFILE):
     sources = report.get('sources')
     require(isinstance(sources, dict) and 0 < len(sources) <= 1024 and
             set(sources) == set(source_names), 'GPU source inventory mismatch')
-    require('scripts/build-nabu-adreno.py' in sources, 'GPU source inventory lacks the actual builder')
+    scripts = source_scripts(profile)
+    require(set(scripts) <= set(sources), 'GPU source inventory lacks an actual build/bindings script')
     source_bytes = {}
     for name, digest in sources.items():
-        require(public_source(name) or name == 'scripts/build-nabu-adreno.py', 'Unexpected GPU source input')
+        require(public_source(name) or name in scripts, 'Unexpected GPU source input')
         require(isinstance(digest, str) and re.fullmatch('[0-9a-f]{64}', digest), 'Invalid GPU source digest')
         data = read('device/' + name)
         require(sha(data) == digest, 'GPU source hash mismatch: ' + name)
@@ -430,5 +439,5 @@ def qualify_gpu_candidate(upstream, device, candidate, expected_profile=PROFILE)
 
     names = [p.relative_to(device).as_posix() for p in sorted((device / 'gpu').rglob('*'))
              if p.is_file() and public_source(p.relative_to(device).as_posix())]
-    names.append('scripts/build-nabu-adreno.py')
+    names.extend(source_scripts(expected_profile))
     return qualify_gpu_bundle(read, candidate.read_bytes(), names, expected_profile)

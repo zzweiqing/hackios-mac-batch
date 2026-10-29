@@ -558,7 +558,7 @@ def run(args):
         raise DiagnosticError(
             f'candidate metaclass object {metaclass_va:#x} is not {METACLASS_ZERO:#x} zero bytes')
     returned = decode_meta_class_getter(
-        candidate_image, candidate_bytes, translate(int(original['get_meta_class'], 16)))
+        candidate_bytes, candidate_image, translate(int(original['get_meta_class'], 16)))
     if returned != metaclass_va:
         raise DiagnosticError(
             f'candidate get_meta_class returns {returned:#x}, not the translated object '
@@ -566,7 +566,7 @@ def run(args):
 
     candidate_vtable_va = translate(int(original['vtable']['va'], 16))
     candidate_table = read_table(
-        candidate_image, candidate_bytes, candidate_vtable_va, original['virtual_entries'])
+        candidate_bytes, candidate_image, candidate_vtable_va, original['virtual_entries'])
     for slot, raw in ((0, original['nondeleting_destructor']),
                       (7, original['get_meta_class'])):
         expected = translate(int(raw, 16))

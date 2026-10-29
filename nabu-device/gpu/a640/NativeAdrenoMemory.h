@@ -4,6 +4,7 @@
 #include <IOKit/IOTypes.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "NabuGpuMemoryPolicy.h"
 class IOBufferMemoryDescriptor;
 class IOMemoryDescriptor;
 struct NativeAdrenoPhysicalSpan {
@@ -151,10 +152,15 @@ public:
      * CPU native4K state and kernel page ABI are checked before allocation.
      * prepare(), raw unmapped physical segments, span/PA bounds and optional
      * physical contiguity are checked before zeroing the allocation. */
-    /* User BOs may use the WB pool and reuse matching prepared storage.
-     * The write_combined argument is reserved for uncached device firmware. */
+    /* The user-owned request keeps its ABI but selects the board's cache mode.
+     * The seven-argument allocator still honors explicit firmware/cache modes. */
     IOReturn allocate(size_t bytes,unsigned output_bits,bool contiguous,size_t byte_budget,bool pooled=false,
-        bool reuse_backing=false,bool write_combined=false);
+        bool reuse_backing=false) {
+        return allocate(bytes,output_bits,contiguous,byte_budget,pooled,reuse_backing,
+            NabuGpuOwnedBoWriteCombined(pooled));
+    }
+    IOReturn allocate(size_t bytes,unsigned output_bits,bool contiguous,size_t byte_budget,bool pooled,
+        bool reuse_backing,bool write_combined);
     /* The cache owns at most 64 allocations and 64 MiB. Matching allocations
      * retain their prepared descriptors, spans and CPU cache attributes;
      * allocate() clears every byte before reuse.

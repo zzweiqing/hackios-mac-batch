@@ -18,6 +18,10 @@ on:
         description: Build RAM console capture and gated preallocated ESP log writer (off by default)
         type: boolean
         default: false
+      gpu_userprobe:
+        description: Build a signed standalone A640 owned-BO probe (Metal profile only; not installed)
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -47,8 +51,10 @@ jobs:
           REQUESTED_REF: ${{ inputs.unixnu_ref }}
           REQUESTED_CONFIG: ${{ inputs.defconfig }}
           CAPTURE_LOGS: ${{ inputs.capture_logs }}
+          GPU_USERPROBE: ${{ inputs.gpu_userprobe }}
         run: |
           test "$REQUESTED_REF" = 245aca1a9ec5b730b1cad80fade295800d2981f1
+          if [ "$GPU_USERPROBE" = true ]; then test "$REQUESTED_CONFIG" = nabu_ufs_gpu_metal_defconfig; fi
           test -d "$DEVELOPER_DIR"
           git clone --quiet --no-checkout https://github.com/UniXNU/UniXNU.git unixnu
           git -C unixnu fetch --quiet origin "$REQUESTED_REF"
@@ -128,6 +134,10 @@ jobs:
           cd unixnu
           ./unixnu defconfig "$REQUESTED_CONFIG"
           ./unixnu build kernel
+      - name: Build the optional ABI-bound A640 userspace probe
+        if: inputs.gpu_userprobe && inputs.defconfig == 'nabu_ufs_gpu_metal_defconfig'
+        run: |
+          python3 nabu-device/scripts/build-nabu-gpu-userprobe.py --output unixnu/out/nabu/userprobe
       - name: Preserve candidate and build evidence
         if: always()
         env:
