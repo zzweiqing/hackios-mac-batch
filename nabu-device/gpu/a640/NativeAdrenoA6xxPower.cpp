@@ -319,8 +319,10 @@ IOReturn NativeAdrenoA6xxPower::buildTables()
     for (unsigned index = 3; index < ResourceCount; ++index) {
         if(index==7)continue; // xo.lvl is ARC, all other entries here are BCMs.
         const Resource &resource = resources[index];
+        /* ACV is an enable mask, not a bandwidth conversion. Its SM8150
+         * command-db width is legitimately zero (unit 1, VCD 11). */
         if (resource.length != 8 || !little32(resource.auxiliary) ||
-            !little16(resource.auxiliary+4) || resource.auxiliary[6]>=16) {
+            (index!=5 && !little16(resource.auxiliary+4)) || resource.auxiliary[6]>=16) {
             return reject("bcm-auxiliary", kIOReturnBadMedia, index,
                 resource.recordOffset + 20, resource.length, 8);
         }

@@ -17,11 +17,12 @@ constexpr uint32_t HfiRequiredBytes = QueueOffset + QueueCount * QueueWords * 4;
 constexpr uint32_t ItcmBase = 0x0;
 constexpr uint32_t DtcmBase = 0x40000;
 constexpr uint32_t TcmBytes = 0x4000;
-/* adreno_a6xx_gmu.c _load_gmu_rpmh_ucode: RPMh ARC addresses the PDC TCS
- * commands use on A640 (mx, cx, gfx). command-db must name the same ones. */
+/* _load_gmu_rpmh_ucode uses mx/cx/gfx ARC commands. This unit's live
+ * command-db resolves gfx.lvl=0x30050; the generic vendor literal 0x30090
+ * resolves xo.lvl on nabu. Never send a GPU voltage vote to the XO address. */
 constexpr uint32_t PdcMxAddress = 0x30010;
 constexpr uint32_t PdcCxAddress = 0x30000;
-constexpr uint32_t PdcGfxAddress = 0x30090;
+constexpr uint32_t PdcGfxAddress = 0x30050;
 constexpr uint32_t RscCmdOffset = 2;
 constexpr uint32_t PdcCmdOffset = 4;
 
