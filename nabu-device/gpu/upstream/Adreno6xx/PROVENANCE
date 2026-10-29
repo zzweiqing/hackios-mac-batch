@@ -2,3 +2,6 @@ Pristine copy of https://github.com/RigoLigoRLC/unixnu-adreno6xx at 83a0453e9815
 (branch unixnu-sm-t733, A642L/SM7325). Top-level sources only; tests omitted.
 Licenses: MIT (LICENSE) and GPL-2.0-only files per SPDX header (COPYING).
 The nabu A640 changes live in ../../a640 and replace same-named files at build time.
+Local deviation: native_legacy_frame_profile_dump is no longer declared or
+called in NativeAdrenoPublish.cpp. Upstream declares it weak_import, which the
+static nabu kernel link cannot leave undefined, and no nabu object defines it.

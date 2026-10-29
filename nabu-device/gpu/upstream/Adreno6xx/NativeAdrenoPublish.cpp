@@ -64,7 +64,6 @@ extern "C" void native_adreno_profile_lock_wait(uint32_t method,uint64_t us);
 extern "C" void native_adreno_profile_set_client(const char *name);
 extern "C" void native_adreno_profile_dump(void);
 extern "C" void native_adreno_profile_set_continuous_clock(uint64_t (*)(void));
-extern "C" void native_legacy_frame_profile_dump(void) __attribute__((weak_import));
 extern "C" {volatile uint32_t native_adreno_view_diag[6],native_adreno_view_kept;}   /* kept: BoCpuUnmap calls that left the view for another lease */
 }
 
@@ -2041,9 +2040,10 @@ extern "C" void native_adreno_metal_dump_stats(void)
     }
     dumpBoProfiles();
     native_adreno_profile_dump();
-    if (native_legacy_frame_profile_dump) {
-        native_legacy_frame_profile_dump();
-    }
+    /* native_legacy_frame_profile_dump is declared weak_import in the upstream
+     * A642L tree, which a static Mach-O kernel link cannot leave undefined, and no
+     * object here defines it. The hook is dropped rather than stubbed so the dump
+     * path claims only what this kernel can actually report. */
     IOLog("NativeAdrenoMetal: end\n");
 }
 
