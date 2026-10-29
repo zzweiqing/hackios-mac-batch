@@ -13,6 +13,7 @@ from nabu_logging_build import enable_logging
 from nabu_cs_stream import prepare_signature_scan
 from nabu_display_ci import (PROFILE as QEMU_LEGACY_PROFILE, CPU_PROFILE as QEMU_CPU_PRESENT_PROFILE,
                              HARDWARE_CPU_PROFILE as UFS_CPU_PRESENT_PROFILE,
+                             HARDWARE_GPU_PROFILE as UFS_GPU_PROFILE,
                              DISPLAY_PROFILES, REFERENCE as DISPLAY_REFERENCE)
 
 UPSTREAM = '245aca1a9ec5b730b1cad80fade295800d2981f1'
@@ -25,13 +26,14 @@ QEMU_CPU_UI_PROFILE = 'nabu_qemu_cpu_ui_defconfig'
 PROFILES = ('nabu_bootstrap_defconfig', 'nabu_qemu_storage_defconfig', 'nabu_qemu_root_defconfig',
             QEMU_DATA_PROFILE, QEMU_CPU_UI_PROFILE, QEMU_LEGACY_PROFILE, QEMU_CPU_PRESENT_PROFILE,
             'nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig',
-            'nabu_ufs_root_defconfig', 'nabu_ufs_data_defconfig', CPU_UI_PROFILE, UFS_CPU_PRESENT_PROFILE)
+            'nabu_ufs_root_defconfig', 'nabu_ufs_data_defconfig', CPU_UI_PROFILE, UFS_CPU_PRESENT_PROFILE,
+            UFS_GPU_PROFILE)
 OWNER_PROFILES = ('nabu_qemu_root_defconfig', 'nabu_ufs_root_defconfig',
                   'nabu_ufs_data_defconfig', CPU_UI_PROFILE, QEMU_DATA_PROFILE,
                   QEMU_CPU_UI_PROFILE, QEMU_LEGACY_PROFILE, QEMU_CPU_PRESENT_PROFILE,
-                  UFS_CPU_PRESENT_PROFILE)
+                  UFS_CPU_PRESENT_PROFILE, UFS_GPU_PROFILE)
 UFS_OWNER_PROFILES = ('nabu_ufs_root_defconfig', 'nabu_ufs_data_defconfig', CPU_UI_PROFILE,
-                      UFS_CPU_PRESENT_PROFILE)
+                      UFS_CPU_PRESENT_PROFILE, UFS_GPU_PROFILE)
 UFS_PROFILES = ('nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig',
                 'nabu_ufs_root_defconfig')
 OWNER_POLICY = {'release': 'nabu-owner-os-21h16-v1', 'asset': 'os-policy.tar.gz',
@@ -264,6 +266,16 @@ def select_ufs_cpu_present_profile(device, upstream):
     select_touch_build(upstream)
 
 
+def select_ufs_gpu_profile(device, upstream):
+    """Add the gated A640 diagnostic archive while retaining CPU presentation."""
+    _select_owner_ufs_board(device, UFS_GPU_PROFILE, UFS_CPU_PRESENT_ROOTS, data=True,
+                            archives=owner_ufs_archives(data=True) +
+                            ['build-nabu-legacy-display.py', 'build-nabu-adreno.py'])
+    _apply_owner_ufs_build(upstream, data=True, nabu_pmgr=True)
+    select_legacy_build_mode(upstream, cpu_present=True)
+    select_touch_build(upstream)
+
+
 def select_touch_build(upstream):
     kernel = upstream / 'scripts/unixnu/kernel.py'
     text = kernel.read_text(encoding='utf-8')
@@ -450,7 +462,8 @@ def validate_profile(device):
     ufs_root = name == 'nabu_ufs_root_defconfig'
     ufs_data = name == 'nabu_ufs_data_defconfig'
     ufs_cpu_ui = name == CPU_UI_PROFILE
-    ufs_cpu_present = name == UFS_CPU_PRESENT_PROFILE
+    ufs_gpu = name == UFS_GPU_PROFILE
+    ufs_cpu_present = name in (UFS_CPU_PRESENT_PROFILE, UFS_GPU_PROFILE)
     qemu_data = name == QEMU_DATA_PROFILE
     qemu_cpu_ui = name == QEMU_CPU_UI_PROFILE
     qemu_legacy = name in (QEMU_LEGACY_PROFILE, QEMU_CPU_PRESENT_PROFILE)
@@ -465,8 +478,16 @@ def validate_profile(device):
         raise ValueError('Profile requires its declared original security initializer')
     config = (device / 'configs' / name).read_text(encoding='utf-8')
     lines = config.splitlines()
+    assignments = [line.split('=', 1)[0] for line in lines if line.startswith('CONFIG_')]
+    if len(assignments) != len(set(assignments)):
+        raise ValueError('Profile config has duplicate assignments')
     disabled_features = ['BOOT_PROGRESS', 'NATIVE_AES',
-                         'SOURCE_MOCKFS', 'SHENG_PMGR']
+                         'SOURCE_MOCKFS', 'SHENG_PMGR', 'NATIVE_MOBILE_DISPLAY']
+    if ufs_gpu:
+        if 'CONFIG_XNU_NATIVE_ADRENO=y' not in lines:
+            raise ValueError('A640 diagnostic profile must enable its actual GPU archive')
+    else:
+        disabled_features.append('NATIVE_ADRENO')
     if qemu_legacy or ufs_cpu_present:
         if 'CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y' not in lines:
             raise ValueError('Legacy display profile must enable its actual backend')
@@ -497,13 +518,8 @@ def validate_profile(device):
         if any(line not in lines for line in required):
             raise ValueError('UFS root requires the full owner closure and both transports')
         if ufs_root:
-            disabled_features += ['NATIVE_RAM_BLOCK', 'NATIVE_MOBILE_DISPLAY', 'NATIVE_ADRENO']
-        else:
-            disabled_features += ['NATIVE_MOBILE_DISPLAY', 'NATIVE_ADRENO']
+            disabled_features.append('NATIVE_RAM_BLOCK')
     elif ufs_profile:
-        assignments = [line.split('=', 1)[0] for line in lines if line.startswith('CONFIG_')]
-        if len(assignments) != len(set(assignments)):
-            raise ValueError('Passive UFS config has duplicate assignments')
         required = ['CONFIG_XNU_NATIVE_UFS=y', 'CONFIG_XNU_SOURCE_CORECRYPTO14=y',
                     'CONFIG_XNU_BUILD_ARCHIVES=y', 'CONFIG_XNU_SOURCE_PTHREAD=y',
                     'CONFIG_XNU_ARM_DT_PLATFORM=y', 'CONFIG_XNU_ARMCPU=y',
@@ -512,7 +528,7 @@ def validate_profile(device):
         if any(line not in lines for line in required):
             raise ValueError('Passive UFS requires its enabled class and original crypto closure')
         disabled_features += ['OWNER_ROOT_AUDIT', 'OWNER_ROOT_TRUST', 'VERIFIED_ROOT_PROBE',
-                              'NATIVE_RAM_BLOCK', 'NATIVE_MOBILE_DISPLAY', 'NATIVE_ADRENO']
+                              'NATIVE_RAM_BLOCK']
     else:
         disabled_features.append('NATIVE_UFS')
     if name in ('nabu_bootstrap_defconfig', 'nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig'):
@@ -533,6 +549,8 @@ def validate_profile(device):
         expected += ['build-nabu-virtio.py', 'build-nabu-ufs-root.py', 'build-nabu-ram-block.py']
         if ufs_cpu_present:
             expected.append('build-nabu-legacy-display.py')
+        if ufs_gpu:
+            expected.append('build-nabu-adreno.py')
     elif ufs_root:
         expected += ['build-nabu-virtio.py', 'build-nabu-ufs-root.py']
     elif ufs_profile:
@@ -568,6 +586,8 @@ def main():
         select_ufs_cpu_ui_profile(args.device, args.upstream)
     elif args.profile == UFS_CPU_PRESENT_PROFILE:
         select_ufs_cpu_present_profile(args.device, args.upstream)
+    elif args.profile == UFS_GPU_PROFILE:
+        select_ufs_gpu_profile(args.device, args.upstream)
     elif args.profile in ('nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig'):
         select_ufs_profile(args.device, args.profile == 'nabu_ufs_readonly_defconfig')
     elif args.profile != 'nabu_bootstrap_defconfig':
@@ -633,6 +653,10 @@ def main():
         'ufs_root': args.profile == 'nabu_ufs_root_defconfig',
         'ufs_cpu_ui': args.profile == CPU_UI_PROFILE,
         'ufs_cpu_present': args.profile == UFS_CPU_PRESENT_PROFILE,
+        'ufs_gpu': args.profile == UFS_GPU_PROFILE,
+        'gpu': ({'mode': 'a640_diagnostic', 'firmware_mode': 'adt',
+                 'trigger': 'nabu-gpu=1', 'metal_accelerator': False,
+                 'runtime_qualified': False} if args.profile == UFS_GPU_PROFILE else None),
         'qemu_data': args.profile == QEMU_DATA_PROFILE,
         'qemu_cpu_ui_reference': args.profile == QEMU_CPU_UI_PROFILE,
         'qemu_legacy_discovery': args.profile == QEMU_LEGACY_PROFILE,

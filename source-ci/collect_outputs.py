@@ -13,6 +13,8 @@ from prepare_source import INPUT_SHA256, UPSTREAM
 from nabu_logging_build import qualify_logging_candidate
 from nabu_data_skeleton import qualify_data_skeleton
 from nabu_display_ci import DISPLAY_PROFILES, qualify_display_candidate
+from nabu_gpu_ci import (PROFILE as GPU_PROFILE, CONTRACT as GPU_CONTRACT,
+                         PMAP_SOURCE as GPU_PMAP_SOURCE, public_source, qualify_gpu_candidate)
 from nabu_cs_stream import qualify_signature_scan
 
 
@@ -121,6 +123,14 @@ def selected_files(upstream):
             if path.is_file():
                 add(path, path.relative_to(work))
 
+    gpu = build / 'native-adreno'
+    if gpu.is_dir():
+        for path in sorted(gpu.rglob('*')):
+            if path.is_file() and path.suffix in ('.json', '.o', '.a', '.c', '.cpp', '.h', '.log'):
+                add(path, path.relative_to(work))
+        add(work / GPU_PMAP_SOURCE.removeprefix('outputs/'),
+            Path(GPU_PMAP_SOURCE.removeprefix('outputs/')))
+
     # Small generated public storage headers and their pinned-source receipt,
     # not the SDK tree. This binds the class declarations used by UFS/VirtIO.
     storage = build / 'storage-abi'
@@ -168,6 +178,8 @@ def selected_sources(device):
         (device / 'configs/nabu_ufs_data_defconfig', 'device/configs/nabu_ufs_data_defconfig'),
         (device / 'configs/nabu_ufs_cpu_ui_defconfig', 'device/configs/nabu_ufs_cpu_ui_defconfig'),
         (device / 'configs/nabu_ufs_cpu_present_defconfig', 'device/configs/nabu_ufs_cpu_present_defconfig'),
+        (device / 'configs/nabu_ufs_gpu_defconfig', 'device/configs/nabu_ufs_gpu_defconfig'),
+        (device / 'scripts/build-nabu-adreno.py', 'device/scripts/build-nabu-adreno.py'),
         (device / 'LICENSE', 'device/LICENSE'),
         (device / 'scripts/build-nabu-platform.py', 'device/scripts/build-nabu-platform.py'),
         (device / 'scripts/nabu_armcpu_source.py', 'device/scripts/nabu_armcpu_source.py'),
@@ -199,6 +211,7 @@ def selected_sources(device):
         (source_dir / 'nabu_data_skeleton.py', 'source-ci/nabu_data_skeleton.py'),
         (source_dir / 'nabu_cs_stream.py', 'source-ci/nabu_cs_stream.py'),
         (source_dir / 'nabu_display_ci.py', 'source-ci/nabu_display_ci.py'),
+        (source_dir / 'nabu_gpu_ci.py', 'source-ci/nabu_gpu_ci.py'),
         (source_dir / 'nabu_graphics_startup.py', 'source-ci/nabu_graphics_startup.py'),
         (device / 'scripts/build-nabu-legacy-display.py', 'device/scripts/build-nabu-legacy-display.py'),
         (device / 'scripts/nabu_display_bindings.py', 'device/scripts/nabu_display_bindings.py'),
@@ -221,6 +234,9 @@ def selected_sources(device):
                 (source_dir / 'nabu_logging_build.py', 'source-ci/nabu_logging_build.py')]
     sources += [(p, 'device/usb/' + p.name) for p in sorted((device / 'usb').glob('*'))
                 if p.is_file() and (p.suffix in ('.cpp', '.h') or p.name == 'LICENSE')]
+    sources += [(p, 'device/' + p.relative_to(device).as_posix())
+                for p in sorted((device / 'gpu').rglob('*'))
+                if p.is_file() and public_source(p.relative_to(device).as_posix())]
     for path, _ in sources:
         if (path.is_symlink() or not path.is_file()
                 or not path.resolve().is_relative_to(root)
@@ -286,6 +302,8 @@ def main():
                 'qemu_legacy_discovery': prepared.get('qemu_legacy_discovery', False),
                 'qemu_cpu_present': prepared.get('qemu_cpu_present', False),
                 'ufs_cpu_present': prepared.get('ufs_cpu_present', False),
+                'ufs_gpu': prepared.get('ufs_gpu', False),
+                'gpu': ({**GPU_CONTRACT} if prepared.get('ufs_gpu') is True else None),
                 'display_reference': prepared.get('display_reference'),
                 'log_capture': prepared.get('log_capture'),
                 'signature_scan_io': prepared.get('signature_scan_io'),
@@ -344,6 +362,18 @@ def main():
                 manifest['display_qualification'] = qualify_display_candidate(
                     args.upstream, args.device, candidate, expected_profile=identity['profile'])
                 summary['display_qualified_statically'] = True
+            if identity['profile'] == GPU_PROFILE:
+                if (identity['ufs_gpu'] is not True or identity['ufs_cpu_present'] is not False or
+                        not identity.get('log_capture') or
+                        not isinstance(prepared.get('gpu'), dict) or
+                        any(prepared['gpu'].get(key) != value for key, value in GPU_CONTRACT.items()
+                            if key != 'profile') or prepared.get('runtime_qualified') is not False):
+                    raise ValueError('GPU candidate requires its diagnostic profile and persisted logging contract')
+                manifest['gpu_qualification'] = qualify_gpu_candidate(
+                    args.upstream, args.device, candidate, expected_profile=identity['profile'])
+                summary['gpu_qualified_statically'] = True
+            elif identity['ufs_gpu'] or prepared.get('gpu'):
+                raise ValueError('GPU contract is only valid for the explicit diagnostic profile')
             summary['candidate_validated'] = valid
             summary['undefined_symbol_count'] = len(macho['undefined_names'])
             manifest['macho'] = macho

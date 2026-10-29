@@ -19,6 +19,7 @@ static IOReturn nabu_log_io_result;
 static uint32_t nabu_log_io_scsi;
 extern "C" {
 volatile unsigned nabu_log_writer_state=0,nabu_log_writer_rounds=0,nabu_log_writer_failures=0;
+uint64_t nabu_log_committed_end=0;
 }
 /* 1 success, 0 bounded contention, -1 transport/gate failure. The existing root
  * read path stays read-only. Only this function can emit the bounded WRITE(10). */
@@ -280,7 +281,9 @@ static void nabuLogThread(void *,wait_result_t)
       }
       if(result==1) {
         bool first=nabu_log_writer_rounds==0;
-        newest=slot;sequence++;last_end=snapshot.end;last_lost=snapshot.lost;nabu_log_writer_rounds++;
+        newest=slot;sequence++;last_end=snapshot.end;last_lost=snapshot.lost;
+        __atomic_store_n(&nabu_log_committed_end,snapshot.end,__ATOMIC_RELEASE);
+        nabu_log_writer_rounds++;
         if(first) IOLog("NABULOG2: first snapshot committed slot=%u bytes=%u\n",slot,snapshot.length);
       }
       nabuLogPause(1000);

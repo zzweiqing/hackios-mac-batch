@@ -1,0 +1,4 @@
+Pristine copy of https://github.com/RigoLigoRLC/unixnu-adreno6xx at 83a0453e981567a30cecd6486bdb8b3b33d64683
+(branch unixnu-sm-t733, A642L/SM7325). Top-level sources only; tests omitted.
+Licenses: MIT (LICENSE) and GPL-2.0-only files per SPDX header (COPYING).
+The nabu A640 changes live in ../../a640 and replace same-named files at build time.

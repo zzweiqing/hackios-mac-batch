@@ -13,7 +13,9 @@ import tomllib
 PROFILE = 'nabu_qemu_legacy_defconfig'
 CPU_PROFILE = 'nabu_qemu_cpu_present_defconfig'
 HARDWARE_CPU_PROFILE = 'nabu_ufs_cpu_present_defconfig'
-CPU_PROFILES = (CPU_PROFILE, HARDWARE_CPU_PROFILE)
+HARDWARE_GPU_PROFILE = 'nabu_ufs_gpu_defconfig'
+HARDWARE_CPU_PROFILES = (HARDWARE_CPU_PROFILE, HARDWARE_GPU_PROFILE)
+CPU_PROFILES = (CPU_PROFILE, *HARDWARE_CPU_PROFILES)
 DISPLAY_PROFILES = (PROFILE, *CPU_PROFILES)
 REFERENCE = {
     'run_id': 40446350654,
@@ -109,7 +111,7 @@ def qualify_display_candidate(upstream, device, candidate, expected_profile=None
     if cpu == discovery or report['reference_candidate_sha256'] != REFERENCE['candidate_sha256']:
         raise ValueError('Display archive has the wrong mode or reference')
     if cpu:
-        hardware = profile == HARDWARE_CPU_PROFILE
+        hardware = profile in HARDWARE_CPU_PROFILES
         expected_scope = {'profile': profile, 'data_backend': 'volatile_ram',
                           'system_transport': 'ufs' if hardware else 'virtio',
                           'boot_pmgr': 'nabu' if hardware else 'qemu'}
