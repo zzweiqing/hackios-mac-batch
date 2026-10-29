@@ -501,12 +501,16 @@ def render_bindings(bindings):
 
 def run(args):
     global native_prelink
-    native_prelink, tool_dir = load_native_prelink(args.native_prelink)
     abi_path = args.abi or DEFAULT_ABI
     abi = load_abi(abi_path)
+    if args.predict:
+        return predict(args, abi, abi_path)
+    native_prelink, tool_dir = load_native_prelink(args.native_prelink)
 
     if not args.kernelcache.is_file():
         raise DiagnosticError(f'kernelcache not found: {args.kernelcache}')
+    if args.candidate is None:
+        raise DiagnosticError('--candidate is required unless --predict is given')
     if not args.candidate.is_file():
         raise DiagnosticError(f'candidate not found: {args.candidate}')
     if args.report is None:
@@ -638,13 +642,81 @@ def run(args):
     return report
 
 
+
+def abi_address(abi, field, index):
+    """Return one audited original address from the ABI JSON."""
+    value = abi.get(field)
+    if index is not None:
+        if not isinstance(value, list) or len(value) <= index:
+            raise DiagnosticError(f'audited ABI field {field} has no entry {index}')
+        value = value[index]
+    if not isinstance(value, str) or not value.startswith('0x'):
+        raise DiagnosticError(f'audited ABI field {field} is not a hex address')
+    try:
+        return int(value, 16)
+    except ValueError:
+        raise DiagnosticError(f'audited ABI field {field} is not a hex address: {value}')
+
+
+def predict(args, abi, abi_path):
+    """Emit the bindings the audited ABI implies under the declared slide.
+
+    This is a prediction, not a derivation. It exists because the archive must
+    exist before the kernel links, so no candidate is available yet. The
+    collector re-derives the same three aliases from the finished candidate and
+    the GPU qualifier refuses a candidate whose linked symbol table disagrees,
+    so these values can never be installed as a verified result.
+    """
+    if not args.kernelcache.is_file():
+        raise DiagnosticError(f'kernelcache not found: {args.kernelcache}')
+    digest = sha256_bytes(args.kernelcache.read_bytes())
+    bindings = {name: abi_address(abi, field, index) + args.slide
+                for name, field, index in SYMBOLS}
+    checks = {
+        'abi_instance_bytes': 'passed' if abi.get('instance_bytes') == 136 else 'failed',
+        'abi_virtual_entries': 'passed' if abi.get('virtual_entries') == 168 else 'failed',
+        'abi_metadata_overrides': 'passed' if abi.get('metadata_overrides') == [0, 1, 7] else 'failed',
+    }
+    if any(value != 'passed' for value in checks.values()):
+        raise DiagnosticError('audited ABI shape changed: ' + json.dumps(checks))
+    report = {
+        'status': 'ok',
+        'mode': 'predict',
+        'module': MODULE_ID,
+        'kernelcache': str(args.kernelcache),
+        'kernelcache_sha256': digest,
+        'abi': {'path': str(abi_path),
+                'text_sha256': abi_digest(abi, 'original_iogpu_text_sha256'),
+                'entry_window_bytes': ENTRY_WINDOW},
+        'original': {'reported_instance_bytes': abi.get('instance_bytes'),
+                     'virtual_entries': abi.get('virtual_entries'),
+                     'metadata_overrides': abi.get('metadata_overrides')},
+        'address_space': 'predicted',
+        'candidate': None,
+        'bindings': {name: hex(value) for name, value in bindings.items()},
+        'bindings_scope': 'predicted_from_audited_abi_slide',
+        'checks': checks,
+        'runtime_qualified': False,
+        'images_modified': False,
+    }
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    (args.output_dir / BINDINGS_FILE).write_text(render_bindings(bindings), encoding='utf-8')
+    report['bindings_file'] = str(args.output_dir / BINDINGS_FILE)
+    report_path = args.output_dir / REPORT_FILE
+    report['report_file'] = str(report_path)
+    report_path.write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+    return report
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--kernelcache', required=True, type=Path,
                         help='original decompressed 21H16 kernelcache')
-    parser.add_argument('--candidate', required=True, type=Path,
-                        help='candidate kernel Mach-O from NativePrelink')
+    parser.add_argument('--candidate', type=Path,
+                        help='candidate kernel Mach-O from NativePrelink; required unless predicting')
+    parser.add_argument('--predict', action='store_true',
+                        help='emit the aliases the audited ABI implies under --slide, without a candidate')
     parser.add_argument('--report', type=Path,
                         help='candidate prelink report/kernel.json (default: candidate with .json)')
     parser.add_argument('--abi', type=Path,

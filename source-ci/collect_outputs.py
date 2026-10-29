@@ -268,7 +268,8 @@ def derive_accelerator_bindings(upstream, device, candidate):
     if result.returncode:
         raise ValueError('Accelerator bindings were not derived from this candidate: ' +
                          result.stderr.strip()[-2000:])
-    return json.loads((out / 'adreno-bindings.json').read_text(encoding='utf-8'))
+    report = json.loads((out / 'adreno-bindings.json').read_text(encoding='utf-8'))
+    return {**report, 'symbols': report.get('bindings')}
 
 
 def check_ufs_candidate(upstream, device, candidate, report, read_only=False):

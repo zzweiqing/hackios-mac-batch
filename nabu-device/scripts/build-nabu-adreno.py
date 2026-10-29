@@ -225,13 +225,17 @@ def main():
         # unless the two agree, so a prediction can never be installed as verified.
         layout = os.environ.get('NABU_GPU_BINDINGS_LAYOUT', '')
         generator = device / BINDINGS_SCRIPT
-        result = subprocess.run([sys.executable, '-B', str(generator),
-                                 '--kernelcache', str(kernelcache),
-                                 '--candidate', str(Path(layout).with_suffix('.macho')),
-                                 '--report', layout,
-                                 '--abi', str(device / 'gpu/a640/ioaccelerator-base-abi.json'),
-                                 '--slide', str(SLIDE),
-                                 '--output-dir', str(out)], capture_output=True)
+        command = [sys.executable, '-B', str(generator),
+                   '--kernelcache', str(kernelcache),
+                   '--abi', str(device / 'gpu/a640/ioaccelerator-base-abi.json'),
+                   '--slide', str(SLIDE),
+                   '--output-dir', str(out)]
+        if layout:
+            command += ['--candidate', str(Path(layout).with_suffix('.macho')),
+                        '--report', layout]
+        else:
+            command.append('--predict')
+        result = subprocess.run(command, capture_output=True)
         (out / 'bindings-generator.log').write_bytes(result.stdout + result.stderr)
         plan = json.loads((out / BINDINGS_REPORT).read_text(encoding='utf-8'))
         if result.returncode or plan.get('status') != 'ok':
