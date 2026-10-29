@@ -14,7 +14,7 @@ from nabu_logging_build import qualify_logging_candidate
 from nabu_data_skeleton import qualify_data_skeleton
 from nabu_display_ci import DISPLAY_PROFILES, qualify_display_candidate
 from nabu_gpu_ci import (PROFILE as GPU_PROFILE, CONTRACT as GPU_CONTRACT,
-                         GPU_PROFILES, gpu_contract,
+                         GPU_PROFILES, accelerator_mode, gpu_contract,
                          PMAP_SOURCE as GPU_PMAP_SOURCE, public_source, qualify_gpu_candidate)
 from nabu_cs_stream import qualify_signature_scan
 
@@ -257,12 +257,14 @@ def derive_accelerator_bindings(upstream, device, candidate):
     out = upstream / 'out/nabu/tree/build/native-adreno'
     built = json.loads((out / 'build-report.json').read_text(encoding='utf-8'))
     kernelcache = built.get('kernelcache')
-    require(isinstance(kernelcache, str) and kernelcache,
-            'GPU build report does not name the kernelcache it was built against')
+    if not (isinstance(kernelcache, str) and kernelcache):
+        raise ValueError('GPU build report does not name the kernelcache it was built against')
     result = subprocess.run([
         sys.executable, '-B', str(device / 'scripts/nabu_adreno_bindings.py'),
         '--kernelcache', kernelcache, '--candidate', str(candidate),
-        '--report', str(candidate.with_suffix('.json')), '--output-dir', str(out),
+        '--report', str(candidate.with_suffix('.json')),
+        '--native-prelink', str(upstream / 'out/nabu/tree/kits/NativePrelink'),
+        '--output-dir', str(out),
     ], capture_output=True, text=True, check=False)
     (out / 'bindings-derivation.log').write_text(result.stdout + result.stderr, encoding='utf-8')
     if result.returncode:
@@ -360,7 +362,9 @@ def main():
                     'com.apple.iokit.IOSurface',
                     'com.apple.iokit.IOMobileGraphicsFamily',
                 }
-            if identity['profile'] in GPU_PROFILES:
+            if accelerator_mode(identity['profile']):
+                # Only the metal profile declares the original IOGPUFamily in its
+                # prelink roots; the diagnostic profile keeps its closure free of it.
                 required_images.add('com.apple.iokit.IOGPUFamily')
             valid = (parsed['candidate_sha256'] == summary['candidate_sha256']
                      and parsed['original_sha256'] == 'f7d1952c7a21633d212eccf288e77444fff0cc86976db5de292f6819c2ffa1b2'
@@ -393,8 +397,11 @@ def main():
                     args.upstream, args.device, candidate, expected_profile=identity['profile'])
                 summary['display_qualified_statically'] = True
             if identity['profile'] in GPU_PROFILES:
-                summary['accelerator_bindings'] = derive_accelerator_bindings(
-                    args.upstream, args.device, candidate)['symbols']
+                if accelerator_mode(identity['profile']):
+                    # The archive carries predicted bindings; only the metal candidate
+                    # can re-derive them, because only its closure has IOGPUFamily.
+                    summary['accelerator_bindings'] = derive_accelerator_bindings(
+                        args.upstream, args.device, candidate)['symbols']
                 contract = gpu_contract(identity['profile'])
                 if (identity['ufs_gpu'] is not True or identity['ufs_cpu_present'] is not False or
                         not identity.get('log_capture') or

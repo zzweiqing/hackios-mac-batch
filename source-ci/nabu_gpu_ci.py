@@ -72,6 +72,8 @@ METAL_CONTRACT = {'profile': METAL_PROFILE, 'mode': 'a640_metal', 'firmware_mode
 GPU_PROFILES = (PROFILE, METAL_PROFILE)
 CONTRACTS = {PROFILE: CONTRACT, METAL_PROFILE: METAL_CONTRACT}
 ADDRESS = re.compile('0x[0-9a-f]{16}')
+# A segment size is a byte count, not an address: the generator writes hex(size).
+EXTENT = re.compile('0x[0-9a-f]{1,16}')
 
 
 def gpu_contract(profile):
@@ -246,7 +248,7 @@ def accelerator_bindings(read, candidate, report):
     ranges = []
     for extent in extents.values():
         require(isinstance(extent, dict) and ADDRESS.fullmatch(str(extent.get('candidate_va'))) and
-                ADDRESS.fullmatch(str(extent.get('size'))) and extent.get('header_matches_report') is True,
+                EXTENT.fullmatch(str(extent.get('size'))) and extent.get('header_matches_report') is True,
                 'Malformed accelerator candidate extent')
         low = int(extent['candidate_va'], 16)
         ranges.append((low, low + int(extent['size'], 16)))
@@ -377,9 +379,14 @@ def qualify_gpu_bundle(read, candidate, source_names, profile=PROFILE):
                                   'source': selected, 'source_sha256': sha(merged),
                                   'kind': 'late' if late else 'direct'}
     if metal:
-        require(sha(read(OUTPUT + BINDINGS_OBJECT)) == members[BINDINGS_OBJECT] and
-                len(members[BINDINGS_OBJECT]) >= 16 and
-                struct.unpack_from('<4I', members[BINDINGS_OBJECT]) == (0xfeedfacf, 0x100000c, 0, 1),
+        binding_object = read(OUTPUT + BINDINGS_OBJECT)
+        binding_record = report.get('bindings')
+        require(isinstance(binding_record, dict) and
+                binding_record.get('object') == BINDINGS_OBJECT and
+                sha(binding_object) == binding_record.get('object_sha256') and
+                binding_object == members[BINDINGS_OBJECT] and
+                len(binding_object) >= 16 and
+                struct.unpack_from('<4I', binding_object) == (0xfeedfacf, 0x100000c, 0, 1),
                 'GPU bindings object/archive identity mismatch')
     require(identity.encode() + b'\0' in candidate, 'Final GPU candidate lacks its source identity banner')
     pmap = read(PMAP_SOURCE)
