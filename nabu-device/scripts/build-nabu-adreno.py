@@ -91,15 +91,21 @@ def text_bytes(path):
     count = struct.unpack_from('<I', data, 16)[0]
     at = 32
     for _ in range(count):
+        if at + 8 > len(data):
+            break
         command, size = struct.unpack_from('<II', data, at)
         if command == 0x19:
             sections = struct.unpack_from('<I', data, at + 64)[0]
             for index in range(sections):
                 section = at + 72 + 80 * index
+                if section + 80 > len(data):
+                    break
                 if data[section:section + 16].rstrip(b'\0') != b'__text':
                     continue
-                offset, extent = struct.unpack_from('<QQ', data, section + 48)[0:2]
-                if offset + extent > len(data):
+                # section_64: size is the u64 at +40, offset the u32 at +48.
+                extent = struct.unpack_from('<Q', data, section + 40)[0]
+                offset = struct.unpack_from('<I', data, section + 48)[0]
+                if not extent or offset + extent > len(data):
                     raise ValueError('Truncated __text in ' + path.name)
                 return data[offset:offset + extent]
         at += size
