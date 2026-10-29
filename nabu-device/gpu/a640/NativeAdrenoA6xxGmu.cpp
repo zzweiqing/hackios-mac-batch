@@ -674,7 +674,7 @@ IOReturn NativeAdrenoA6xxGmu::start(const NativeAdrenoA6xxGmuConfig &config)
     if (config.buffers[4].bytes < HfiRequiredBytes || config.buffers[3].bytes > 0x100000 ||
         config.tables->performance[0] != 2 || config.tables->performance[1] != 2 ||
         config.tables->performance[7] != 257000 || config.tables->performance[53] != 200000 ||
-        config.tables->bandwidth[0] != 1 || (config.chipId >> 16) != 0x0604) {
+        config.tables->bandwidth[0] != 2 || (config.chipId >> 16) != 0x0604) {
         return kIOReturnBadArgument;
     }
 
@@ -794,9 +794,9 @@ IOReturn NativeAdrenoA6xxGmu::start(const NativeAdrenoA6xxGmuConfig &config)
         return result;
     }
 
-    /* hfi_gx_bw_perf_vote_cmd: ack type 1, GPU level 1 (257 MHz), bw level 0. */
+    /* hfi_gx_bw_perf_vote_cmd: ack type 1, GPU level 1 (257 MHz), bw level 1. */
     report_.phase = PerformanceVote;
-    const uint32_t votePayload[] = {1, 1, 0};
+    const uint32_t votePayload[] = {1, 1, 1};
     result = exchange(30, votePayload, 3);
     if (result) {
         return result;

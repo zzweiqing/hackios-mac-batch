@@ -58,9 +58,9 @@ struct NativeAdrenoA6xxReport {
  * kgsl_hfi.h hfi_dcvstable_cmd and hfi_bwtable_cmd without their headers). GPU
  * entry zero requests the off level; entry one requests 257 MHz at LOW_SVS, the
  * lowest qcom,gpu-pwrlevel of both nabu speed bins. GMU entry one requests 200
- * MHz at MIN_SVS (gpucc-sm8150 gpu_cc_gmu_clk_src). The bandwidth table follows
- * the upstream a640_build_bw_table shape: one DDR level carrying only commit
- * votes and two CNOC levels; GPU DDR bandwidth is left to the existing votes.
+ * MHz at MIN_SVS (gpucc-sm8150 gpu_cc_gmu_clk_src). The bandwidth table has off
+ * and active DDR levels (1799000 KB/s, 257 MHz usecase 3); CNOC is the unit's
+ * SH2/SN15/SN3 path at 100 KB/s. BCM widths, units and VCDs come from command-db.
  * Power reads the ARC indexes and BCM addresses from the running SM8150 command
  * database before changing any power register. */
 struct NativeAdrenoA6xxTables {

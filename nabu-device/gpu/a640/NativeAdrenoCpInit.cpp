@@ -94,9 +94,9 @@ IOReturn NativeAdrenoCpInit::runBootstrap(const NativeAdrenoRingIo *io,NativeAdr
     words[7]=2;
     words[8]=uint32_t(config->pwrup_reglist_iova);
     words[9]=uint32_t(config->pwrup_reglist_iova>>32);
-    IOLog("NativeAdrenoCpInit: A642L bootstrap packet=%08x/%08x/%08x/%08x/%08x/%08x\n",
+    IOLog("NativeAdrenoCpInit: A6xx bootstrap packet=%08x/%08x/%08x/%08x/%08x/%08x\n",
         words[0],words[1],words[2],words[3],words[4],words[5]);
-    IOLog("NativeAdrenoCpInit: A642L bootstrap packet=%08x/%08x/%08x/%08x/%08x/%08x\n",
+    IOLog("NativeAdrenoCpInit: A6xx bootstrap packet=%08x/%08x/%08x/%08x/%08x/%08x\n",
         words[6],words[7],words[8],words[9],words[10],words[11]);
 
     if(config->sqe_base_programmed) {

@@ -174,9 +174,9 @@ IOReturn NativeAdrenoA6xxPower::ring()
 
 IOReturn NativeAdrenoA6xxPower::buildTables()
 {
-    constexpr unsigned ResourceCount = 8;
+    constexpr unsigned ResourceCount = 10;
     static const char *const names[] = {
-        "gfx.lvl", "mx.lvl", "cx.lvl", "SH0", "MC0", "ACV", "CN0", "xo.lvl"
+        "gfx.lvl", "mx.lvl", "cx.lvl", "SH0", "MC0", "ACV", "SH2", "xo.lvl", "SN15", "SN3"
     };
     Resource resources[ResourceCount]{};
     uint32_t headers[8][2]{};
@@ -300,8 +300,8 @@ IOReturn NativeAdrenoA6xxPower::buildTables()
             }
         }
     }
-    if (seen != 0xff) {
-        return reject("required-resources", kIOReturnNotFound, ResourceCount, 0, seen, 0xff);
+    if (seen != (1u << ResourceCount) - 1) {
+        return reject("required-resources", kIOReturnNotFound, ResourceCount, 0, seen, (1u << ResourceCount) - 1);
     }
 
     /* The nabu OPP table gives LOW_SVS+1 for 257 MHz; kgsl_gmu.c subtracts the
@@ -316,10 +316,12 @@ IOReturn NativeAdrenoA6xxPower::buildTables()
         return reject("gmu-arc-level", kIOReturnUnsupported, 2,
             resources[2].auxiliaryOffset, little32(resources[2].auxiliary), 48);
     }
-    for (unsigned index = 3; index < 7; ++index) {
+    for (unsigned index = 3; index < ResourceCount; ++index) {
+        if(index==7)continue; // xo.lvl is ARC, all other entries here are BCMs.
         const Resource &resource = resources[index];
-        if (resource.length != 8) {
-            return reject("bcm-auxiliary-size", kIOReturnBadMedia, index,
+        if (resource.length != 8 || !little32(resource.auxiliary) ||
+            !little16(resource.auxiliary+4) || resource.auxiliary[6]>=16) {
+            return reject("bcm-auxiliary", kIOReturnBadMedia, index,
                 resource.recordOffset + 20, resource.length, 8);
         }
     }
@@ -354,21 +356,46 @@ IOReturn NativeAdrenoA6xxPower::buildTables()
     tables_.performance[52] = gmuVote;
     tables_.performance[53] = 200000;
 
-    /* hfi_bwtable_cmd in the a640_build_bw_table shape: one DDR level whose
-     * three BCM commands only commit (no bandwidth), and two CNOC levels for
-     * CN0 (commit only, then the minimal valid y vote of one). */
-    tables_.bandwidth[0] = 1;                       // bw_level_num
-    tables_.bandwidth[1] = 1;                       // cnoc_cmds_num
-    tables_.bandwidth[2] = 3;                       // ddr_cmds_num
-    tables_.bandwidth[3] = 1;                       // cnoc_wait_bitmask
-    tables_.bandwidth[4] = 1;                       // ddr_wait_bitmask
-    tables_.bandwidth[5] = resources[6].address;    // cnoc_cmd_addrs[0] = CN0
-    tables_.bandwidth[11] = Bit(30);                // cnoc level 0
-    tables_.bandwidth[17] = Bit(30) | Bit(29) | 1;  // cnoc level 1
-    for (unsigned index = 0; index < 3; ++index) {
-        tables_.bandwidth[23 + index] = resources[index + 3].address;
-        tables_.bandwidth[31 + index] = Bit(30);
-    }
+    /* The unit's CNOC path is GPU -> SH2 -> SN15 -> SN3. Its 257 MHz
+     * pwrlevel requests DDR usecase 3 (1799000 KB/s). Follow KGSL's live BCM
+     * width/unit conversion and VCD grouping, instead of assuming CN0 alone
+     * or leaving the GPU's DDR vote at the off entry. */
+    tables_.bandwidth[0] = 2; // off and the fixed 257 MHz bandwidth
+    tables_.bandwidth[1] = 3;
+    tables_.bandwidth[2] = 3;
+    auto bandwidthGroup=[&](unsigned indices[3],const uint32_t busWidths[3],
+        uint32_t kbps,unsigned addressAt,unsigned dataAt,unsigned rowStride,unsigned waitAt) {
+        for(unsigned i=1;i<3;++i) {
+            const unsigned selected=indices[i];unsigned j=i;
+            while(j && resources[indices[j-1]].auxiliary[6]>resources[selected].auxiliary[6]) {
+                indices[j]=indices[j-1];--j;
+            }
+            indices[j]=selected;
+        }
+        for(unsigned i=0;i<3;++i) {
+            const unsigned index=indices[i];
+            const Resource &resource=resources[index];
+            const bool commit=i==2 || resource.auxiliary[6]!=resources[indices[i+1]].auxiliary[6];
+            const uint32_t commitBit=commit?Bit(30):0;
+            uint32_t vote=8; // ACV_APPS = BIT(3), KGSL bcm_update_acv_req.
+            if(index!=5) {
+                const unsigned slot=index==3?0:(index==4?1:(index==6?0:(index==8?1:2)));
+                uint64_t peak=uint64_t(kbps)*1000*little16(resource.auxiliary+4)/busWidths[slot];
+                peak=peak/little32(resource.auxiliary);
+                vote=peak>0x3fff?0x3fff:(peak?uint32_t(peak):1u);
+            }
+            tables_.bandwidth[addressAt+i]=resource.address;
+            tables_.bandwidth[dataAt+i]=commitBit;
+            tables_.bandwidth[dataAt+rowStride+i]=commitBit|Bit(29)|vote;
+            if(commit)tables_.bandwidth[waitAt]|=Bit(i);
+            IOLog("NativeAdrenoA6xx: BCM=%s vcd=%u address=%05x vote=%08x\n",
+                names[index],resource.auxiliary[6],resource.address,commitBit|Bit(29)|vote);
+        }
+    };
+    unsigned ddr[3]={3,4,5},cnoc[3]={6,8,9};
+    const uint32_t ddrWidths[3]={16,4,4},cnocWidths[3]={8,8,8};
+    bandwidthGroup(ddr,ddrWidths,1799000,23,31,8,4);
+    bandwidthGroup(cnoc,cnocWidths,100,5,11,6,3);
 
     return kIOReturnSuccess;
 }
@@ -529,8 +556,8 @@ IOReturn NativeAdrenoA6xxPower::sendQmp(const char *message)
 
 /* Active-only ARC votes for the parent rails and XO through an unused APPS
  * DRV2 active TCS (sm8150 apps_rsc: drv-id 2, tcs-offset 0xd00, two active
- * TCSes first). Bandwidth is not voted here; the CPU path keeps DDR and the
- * config NoC up. */
+ * TCSes first). The GMU applies the bandwidth table's CNOC and DDR votes
+ * during HFI startup; these parent rail votes remain held by the host. */
 IOReturn NativeAdrenoA6xxPower::voteRails()
 {
     constexpr unsigned CommandCount = 4;

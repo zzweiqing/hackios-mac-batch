@@ -14,9 +14,9 @@
  * object formerly used for the A660 debug buffer (debug()/debug_iova). The
  * contiguous native4K table pool that translates them has no IOVA. All objects
  * are physically contiguous and page aligned; the allocator only assigns
- * addresses and sets payload CPU mappings non-cacheable before any VM reference
- * is acquired. The page-table allocation keeps its cacheable CPU mapping and
- * uses coherent SMMU table walks with store barriers. Any allocation failure
+ * addresses and sets payload and table CPU mappings non-cacheable before any VM
+ * reference is acquired. SMMU walks are non-cacheable; store barriers publish
+ * the table descriptors without relying on SM8150 cache-coherent walks. Any allocation failure
  * releases what it allocated and leaves no layout. */
 enum : uint64_t {
     GmuIcacheIova=0x4000, GmuDcacheIova=0x44000, GmuCacheBytesMax=0x3c000,
