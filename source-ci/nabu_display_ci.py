@@ -14,7 +14,12 @@ PROFILE = 'nabu_qemu_legacy_defconfig'
 CPU_PROFILE = 'nabu_qemu_cpu_present_defconfig'
 HARDWARE_CPU_PROFILE = 'nabu_ufs_cpu_present_defconfig'
 HARDWARE_GPU_PROFILE = 'nabu_ufs_gpu_defconfig'
-HARDWARE_CPU_PROFILES = (HARDWARE_CPU_PROFILE, HARDWARE_GPU_PROFILE)
+# The diagnostic profile keeps the accelerator out of the archive. This profile
+# compiles and publishes it. Both are hardware UFS profiles with the CPU
+# presentation backend, so both stay in the hardware, display and notification
+# sets; the difference is the GPU archive's contract, not the display path.
+HARDWARE_GPU_METAL_PROFILE = 'nabu_ufs_gpu_metal_defconfig'
+HARDWARE_CPU_PROFILES = (HARDWARE_CPU_PROFILE, HARDWARE_GPU_PROFILE, HARDWARE_GPU_METAL_PROFILE)
 CPU_PROFILES = (CPU_PROFILE, *HARDWARE_CPU_PROFILES)
 DISPLAY_PROFILES = (PROFILE, *CPU_PROFILES)
 REFERENCE = {

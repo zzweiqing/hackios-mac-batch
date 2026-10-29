@@ -14,6 +14,7 @@ from nabu_cs_stream import prepare_signature_scan
 from nabu_display_ci import (PROFILE as QEMU_LEGACY_PROFILE, CPU_PROFILE as QEMU_CPU_PRESENT_PROFILE,
                              HARDWARE_CPU_PROFILE as UFS_CPU_PRESENT_PROFILE,
                              HARDWARE_GPU_PROFILE as UFS_GPU_PROFILE,
+                             HARDWARE_GPU_METAL_PROFILE as UFS_GPU_METAL_PROFILE,
                              DISPLAY_PROFILES, REFERENCE as DISPLAY_REFERENCE)
 
 UPSTREAM = '245aca1a9ec5b730b1cad80fade295800d2981f1'
@@ -27,13 +28,13 @@ PROFILES = ('nabu_bootstrap_defconfig', 'nabu_qemu_storage_defconfig', 'nabu_qem
             QEMU_DATA_PROFILE, QEMU_CPU_UI_PROFILE, QEMU_LEGACY_PROFILE, QEMU_CPU_PRESENT_PROFILE,
             'nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig',
             'nabu_ufs_root_defconfig', 'nabu_ufs_data_defconfig', CPU_UI_PROFILE, UFS_CPU_PRESENT_PROFILE,
-            UFS_GPU_PROFILE)
+            UFS_GPU_PROFILE, UFS_GPU_METAL_PROFILE)
 OWNER_PROFILES = ('nabu_qemu_root_defconfig', 'nabu_ufs_root_defconfig',
                   'nabu_ufs_data_defconfig', CPU_UI_PROFILE, QEMU_DATA_PROFILE,
                   QEMU_CPU_UI_PROFILE, QEMU_LEGACY_PROFILE, QEMU_CPU_PRESENT_PROFILE,
-                  UFS_CPU_PRESENT_PROFILE, UFS_GPU_PROFILE)
+                  UFS_CPU_PRESENT_PROFILE, UFS_GPU_PROFILE, UFS_GPU_METAL_PROFILE)
 UFS_OWNER_PROFILES = ('nabu_ufs_root_defconfig', 'nabu_ufs_data_defconfig', CPU_UI_PROFILE,
-                      UFS_CPU_PRESENT_PROFILE, UFS_GPU_PROFILE)
+                      UFS_CPU_PRESENT_PROFILE, UFS_GPU_PROFILE, UFS_GPU_METAL_PROFILE)
 UFS_PROFILES = ('nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig',
                 'nabu_ufs_root_defconfig')
 OWNER_POLICY = {'release': 'nabu-owner-os-21h16-v1', 'asset': 'os-policy.tar.gz',
@@ -61,6 +62,10 @@ CPU_UI_ROOTS = ROOT_COMPONENTS + GRAPHICS_ROOTS
 HID_ROOTS = ['com.apple.iokit.IOHIDFamily',
              'com.apple.iokit.IOHIDEventDriverSafeBoot']
 UFS_CPU_PRESENT_ROOTS = CPU_UI_ROOTS + HID_ROOTS
+# The Metal profile also prelinks the original IOGPUFamily, which supplies
+# the IOAcceleratorES base class the published accelerator subclasses. The
+# diagnostic profile keeps the closure it was already qualified against.
+UFS_GPU_METAL_ROOTS = UFS_CPU_PRESENT_ROOTS + ['com.apple.iokit.IOGPUFamily']
 # Opt-in native text console magnification (boot arg nabu-vc-scale=1..4).
 # The patch is inert without the argument, so no profile gains a dependency.
 VC_TEXT_SCALE = {'name': 'nabu-vc-text-scale.patch',
@@ -276,6 +281,32 @@ def select_ufs_gpu_profile(device, upstream):
     select_touch_build(upstream)
 
 
+def select_ufs_gpu_metal_profile(device, upstream):
+    """Publish the A640 accelerator from the qualified CPU presentation.
+
+    The closure adds the original IOGPUFamily so the accelerator binds the real
+    IOAcceleratorES base class, and the archive producer is told to compile and
+    stage the publication objects with their original-base bindings.
+    """
+    _select_owner_ufs_board(device, UFS_GPU_METAL_PROFILE, UFS_GPU_METAL_ROOTS, data=True,
+                            archives=owner_ufs_archives(data=True) +
+                            ['build-nabu-legacy-display.py', 'build-nabu-adreno.py'])
+    _apply_owner_ufs_build(upstream, data=True, nabu_pmgr=True)
+    select_legacy_build_mode(upstream, cpu_present=True)
+    select_touch_build(upstream)
+    select_gpu_metal_build(upstream)
+
+
+def select_gpu_metal_build(upstream):
+    kernel = upstream / 'scripts/unixnu/kernel.py'
+    text = kernel.read_text(encoding='utf-8')
+    anchor = '    build_archives(ctx, env)\n'
+    if text.count(anchor) != 1:
+        raise ValueError('Expected one archive build entry')
+    kernel.write_text(text.replace(anchor, "    env['NABU_GPU_METAL'] = '1'\n" + anchor, 1),
+                      encoding='utf-8')
+
+
 def select_touch_build(upstream):
     kernel = upstream / 'scripts/unixnu/kernel.py'
     text = kernel.read_text(encoding='utf-8')
@@ -462,14 +493,16 @@ def validate_profile(device):
     ufs_root = name == 'nabu_ufs_root_defconfig'
     ufs_data = name == 'nabu_ufs_data_defconfig'
     ufs_cpu_ui = name == CPU_UI_PROFILE
-    ufs_gpu = name == UFS_GPU_PROFILE
-    ufs_cpu_present = name in (UFS_CPU_PRESENT_PROFILE, UFS_GPU_PROFILE)
+    ufs_gpu = name in (UFS_GPU_PROFILE, UFS_GPU_METAL_PROFILE)
+    ufs_gpu_metal = name == UFS_GPU_METAL_PROFILE
+    ufs_cpu_present = name in (UFS_CPU_PRESENT_PROFILE, UFS_GPU_PROFILE, UFS_GPU_METAL_PROFILE)
     qemu_data = name == QEMU_DATA_PROFILE
     qemu_cpu_ui = name == QEMU_CPU_UI_PROFILE
     qemu_legacy = name in (QEMU_LEGACY_PROFILE, QEMU_CPU_PRESENT_PROFILE)
     qemu_owner = qemu_data or qemu_cpu_ui or qemu_legacy
     ufs_owner = name in UFS_OWNER_PROFILES
-    roots = (UFS_CPU_PRESENT_ROOTS if ufs_cpu_present else
+    roots = (UFS_GPU_METAL_ROOTS if ufs_gpu_metal else
+             UFS_CPU_PRESENT_ROOTS if ufs_cpu_present else
              CPU_UI_ROOTS if ufs_cpu_ui or qemu_cpu_ui or qemu_legacy else
              ROOT_COMPONENTS if owner_root else ['com.apple.filesystems.apfs'])
     if board['kernel']['prelink']['roots'] != roots:
@@ -485,7 +518,7 @@ def validate_profile(device):
                          'SOURCE_MOCKFS', 'SHENG_PMGR', 'NATIVE_MOBILE_DISPLAY']
     if ufs_gpu:
         if 'CONFIG_XNU_NATIVE_ADRENO=y' not in lines:
-            raise ValueError('A640 diagnostic profile must enable its actual GPU archive')
+            raise ValueError('A640 GPU profile must enable its actual GPU archive')
     else:
         disabled_features.append('NATIVE_ADRENO')
     if qemu_legacy or ufs_cpu_present:
@@ -588,6 +621,8 @@ def main():
         select_ufs_cpu_present_profile(args.device, args.upstream)
     elif args.profile == UFS_GPU_PROFILE:
         select_ufs_gpu_profile(args.device, args.upstream)
+    elif args.profile == UFS_GPU_METAL_PROFILE:
+        select_ufs_gpu_metal_profile(args.device, args.upstream)
     elif args.profile in ('nabu_ufs_passive_defconfig', 'nabu_ufs_readonly_defconfig'):
         select_ufs_profile(args.device, args.profile == 'nabu_ufs_readonly_defconfig')
     elif args.profile != 'nabu_bootstrap_defconfig':
@@ -653,8 +688,12 @@ def main():
         'ufs_root': args.profile == 'nabu_ufs_root_defconfig',
         'ufs_cpu_ui': args.profile == CPU_UI_PROFILE,
         'ufs_cpu_present': args.profile == UFS_CPU_PRESENT_PROFILE,
-        'ufs_gpu': args.profile == UFS_GPU_PROFILE,
-        'gpu': ({'mode': 'a640_diagnostic', 'firmware_mode': 'adt',
+        'ufs_gpu': args.profile in (UFS_GPU_PROFILE, UFS_GPU_METAL_PROFILE),
+        'ufs_gpu_metal': args.profile == UFS_GPU_METAL_PROFILE,
+        'gpu': ({'mode': 'a640_metal', 'firmware_mode': 'adt', 'trigger': 'nabu-gpu=1',
+                 'metal_accelerator': True, 'runtime_qualified': False}
+                if args.profile == UFS_GPU_METAL_PROFILE else
+                {'mode': 'a640_diagnostic', 'firmware_mode': 'adt',
                  'trigger': 'nabu-gpu=1', 'metal_accelerator': False,
                  'runtime_qualified': False} if args.profile == UFS_GPU_PROFILE else None),
         'qemu_data': args.profile == QEMU_DATA_PROFILE,

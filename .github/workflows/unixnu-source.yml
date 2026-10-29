@@ -70,7 +70,7 @@ jobs:
           echo "SOURCE_INPUT_SHA256=$actual" >> "$GITHUB_ENV"
           echo "UNIXNU_IPSW=$RUNNER_TEMP/ipsw-21h16-small.zip" >> "$GITHUB_ENV"
       - name: Fetch the private 21H16 OS owner policy
-        if: contains(fromJSON('["nabu_qemu_root_defconfig","nabu_qemu_data_defconfig","nabu_qemu_cpu_ui_defconfig","nabu_qemu_legacy_defconfig","nabu_qemu_cpu_present_defconfig","nabu_ufs_root_defconfig","nabu_ufs_data_defconfig","nabu_ufs_cpu_ui_defconfig","nabu_ufs_cpu_present_defconfig","nabu_ufs_gpu_defconfig"]'), inputs.defconfig)
+        if: contains(fromJSON('["nabu_qemu_root_defconfig","nabu_qemu_data_defconfig","nabu_qemu_cpu_ui_defconfig","nabu_qemu_legacy_defconfig","nabu_qemu_cpu_present_defconfig","nabu_ufs_root_defconfig","nabu_ufs_data_defconfig","nabu_ufs_cpu_ui_defconfig","nabu_ufs_cpu_present_defconfig","nabu_ufs_gpu_defconfig","nabu_ufs_gpu_metal_defconfig"]'), inputs.defconfig)
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
           PRIVATE_INPUTS_REPO: ${{ vars.PRIVATE_INPUTS_REPO }}
@@ -83,7 +83,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/owner-policy-download/os-policy.tar.gz" -C "$RUNNER_TEMP/owner-policy"
           echo "UNIXNU_OWNER_POLICY=$RUNNER_TEMP/owner-policy" >> "$GITHUB_ENV"
       - name: Fetch the private 21H16 SystemOS owner policy
-        if: contains(fromJSON('["nabu_qemu_root_defconfig","nabu_qemu_data_defconfig","nabu_qemu_cpu_ui_defconfig","nabu_qemu_legacy_defconfig","nabu_qemu_cpu_present_defconfig","nabu_ufs_root_defconfig","nabu_ufs_data_defconfig","nabu_ufs_cpu_ui_defconfig","nabu_ufs_cpu_present_defconfig","nabu_ufs_gpu_defconfig"]'), inputs.defconfig)
+        if: contains(fromJSON('["nabu_qemu_root_defconfig","nabu_qemu_data_defconfig","nabu_qemu_cpu_ui_defconfig","nabu_qemu_legacy_defconfig","nabu_qemu_cpu_present_defconfig","nabu_ufs_root_defconfig","nabu_ufs_data_defconfig","nabu_ufs_cpu_ui_defconfig","nabu_ufs_cpu_present_defconfig","nabu_ufs_gpu_defconfig","nabu_ufs_gpu_metal_defconfig"]'), inputs.defconfig)
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
           PRIVATE_INPUTS_REPO: ${{ vars.PRIVATE_INPUTS_REPO }}
@@ -96,7 +96,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/systemos-policy-download/systemos-policy.tar.gz" -C "$RUNNER_TEMP/systemos-policy"
           echo "UNIXNU_OWNER_POLICY_SYSTEMOS=$RUNNER_TEMP/systemos-policy" >> "$GITHUB_ENV"
       - name: Fetch the qualified private display reference
-        if: contains(fromJSON('["nabu_qemu_legacy_defconfig","nabu_qemu_cpu_present_defconfig","nabu_ufs_cpu_present_defconfig","nabu_ufs_gpu_defconfig"]'), inputs.defconfig)
+        if: contains(fromJSON('["nabu_qemu_legacy_defconfig","nabu_qemu_cpu_present_defconfig","nabu_ufs_cpu_present_defconfig","nabu_ufs_gpu_defconfig","nabu_ufs_gpu_metal_defconfig"]'), inputs.defconfig)
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
           PRIVATE_INPUTS_REPO: ${{ vars.PRIVATE_INPUTS_REPO }}

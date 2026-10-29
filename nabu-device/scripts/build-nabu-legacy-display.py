@@ -82,7 +82,8 @@ def sha(path):
 def validate_cpu_profile(lines, profile, hardware_pmgr):
     modes = {'nabu_qemu_cpu_present_defconfig': False,
              'nabu_ufs_cpu_present_defconfig': True,
-             'nabu_ufs_gpu_defconfig': True}
+             'nabu_ufs_gpu_defconfig': True,
+             'nabu_ufs_gpu_metal_defconfig': True}
     if profile not in modes:
         raise ValueError('CPU notifications require an explicit CPU presentation profile')
     hardware = modes[profile]

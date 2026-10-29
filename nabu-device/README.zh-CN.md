@@ -1,8 +1,12 @@
 # nabu G0 源码构建输入
 
-本目录只描述 UniXNU 固定源码与 iPadOS 17.7 / 21H16 输入下的 G0 构建候选。
-它编译并预链 XNU、原始 CoreCrypto 注册/APFS 依赖闭包及平台/pthread 归档；不包含系统卷、
+本节描述 UniXNU 固定源码与 iPadOS 17.7 / 21H16 输入下的 G0 构建候选。
+它编译并预链 XNU、原始 CoreCrypto 注册/APFS 依赖闭包及平台/pthread 归档；G0 本身不包含系统卷、
 Apple launchd、UFS 真机访问、显示或可启动 iPadOS 包。
+
+本目录另含后续真机配置：`nabu_ufs_gpu_defconfig`（UFS owner root、RAM Data、触控、CPU 显示与
+A640 诊断）、`nabu_ufs_cpu_present_defconfig` 及对应 `platform/`、`gpu/`、`usb/`、`ufs/` 源。
+它们的能力、安装身份与未验收项只在根目录 `CURRENT_STATUS.zh-CN.md` 维护。
 
 `nabu_bootstrap_defconfig` 有意关闭 BootProgress、mockfs、物理存储、AES、VirtIO 和显示。
 构建成功只证明源码候选通过链接和静态预链；仍须用候选绑定的 QEMU 回归，才能确认所选

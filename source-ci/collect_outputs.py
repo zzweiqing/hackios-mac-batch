@@ -14,6 +14,7 @@ from nabu_logging_build import qualify_logging_candidate
 from nabu_data_skeleton import qualify_data_skeleton
 from nabu_display_ci import DISPLAY_PROFILES, qualify_display_candidate
 from nabu_gpu_ci import (PROFILE as GPU_PROFILE, CONTRACT as GPU_CONTRACT,
+                         GPU_PROFILES, gpu_contract,
                          PMAP_SOURCE as GPU_PMAP_SOURCE, public_source, qualify_gpu_candidate)
 from nabu_cs_stream import qualify_signature_scan
 
@@ -126,7 +127,7 @@ def selected_files(upstream):
     gpu = build / 'native-adreno'
     if gpu.is_dir():
         for path in sorted(gpu.rglob('*')):
-            if path.is_file() and path.suffix in ('.json', '.o', '.a', '.c', '.cpp', '.h', '.log'):
+            if path.is_file() and path.suffix in ('.json', '.o', '.a', '.c', '.cpp', '.h', '.log', '.S'):
                 add(path, path.relative_to(work))
         add(work / GPU_PMAP_SOURCE.removeprefix('outputs/'),
             Path(GPU_PMAP_SOURCE.removeprefix('outputs/')))
@@ -179,6 +180,7 @@ def selected_sources(device):
         (device / 'configs/nabu_ufs_cpu_ui_defconfig', 'device/configs/nabu_ufs_cpu_ui_defconfig'),
         (device / 'configs/nabu_ufs_cpu_present_defconfig', 'device/configs/nabu_ufs_cpu_present_defconfig'),
         (device / 'configs/nabu_ufs_gpu_defconfig', 'device/configs/nabu_ufs_gpu_defconfig'),
+        (device / 'configs/nabu_ufs_gpu_metal_defconfig', 'device/configs/nabu_ufs_gpu_metal_defconfig'),
         (device / 'scripts/build-nabu-adreno.py', 'device/scripts/build-nabu-adreno.py'),
         (device / 'LICENSE', 'device/LICENSE'),
         (device / 'scripts/build-nabu-platform.py', 'device/scripts/build-nabu-platform.py'),
@@ -245,6 +247,30 @@ def selected_sources(device):
     return sources
 
 
+def derive_accelerator_bindings(upstream, device, candidate):
+    """Derive the original-base bindings from the finished candidate.
+
+    The GPU archive must exist before the kernel links, so it carries predicted
+    addresses. Re-deriving them from the candidate that was actually produced is
+    what lets the GPU qualifier refuse a candidate whose linked values disagree.
+    """
+    out = upstream / 'out/nabu/tree/build/native-adreno'
+    built = json.loads((out / 'build-report.json').read_text(encoding='utf-8'))
+    kernelcache = built.get('kernelcache')
+    require(isinstance(kernelcache, str) and kernelcache,
+            'GPU build report does not name the kernelcache it was built against')
+    result = subprocess.run([
+        sys.executable, '-B', str(device / 'scripts/nabu_adreno_bindings.py'),
+        '--kernelcache', kernelcache, '--candidate', str(candidate),
+        '--report', str(candidate.with_suffix('.json')), '--output-dir', str(out),
+    ], capture_output=True, text=True, check=False)
+    (out / 'bindings-derivation.log').write_text(result.stdout + result.stderr, encoding='utf-8')
+    if result.returncode:
+        raise ValueError('Accelerator bindings were not derived from this candidate: ' +
+                         result.stderr.strip()[-2000:])
+    return json.loads((out / 'adreno-bindings.json').read_text(encoding='utf-8'))
+
+
 def check_ufs_candidate(upstream, device, candidate, report, read_only=False):
     """Qualify this object's inherited dispatch against this prelinked candidate."""
     out = upstream / 'out/nabu/tree/build/native-ufs'
@@ -303,7 +329,8 @@ def main():
                 'qemu_cpu_present': prepared.get('qemu_cpu_present', False),
                 'ufs_cpu_present': prepared.get('ufs_cpu_present', False),
                 'ufs_gpu': prepared.get('ufs_gpu', False),
-                'gpu': ({**GPU_CONTRACT} if prepared.get('ufs_gpu') is True else None),
+                'ufs_gpu_metal': prepared.get('ufs_gpu_metal', False),
+                'gpu': ({**gpu_contract(prepared.get('profile'))} if prepared.get('ufs_gpu') is True else None),
                 'display_reference': prepared.get('display_reference'),
                 'log_capture': prepared.get('log_capture'),
                 'signature_scan_io': prepared.get('signature_scan_io'),
@@ -332,6 +359,8 @@ def main():
                     'com.apple.iokit.IOSurface',
                     'com.apple.iokit.IOMobileGraphicsFamily',
                 }
+            if identity['profile'] in GPU_PROFILES:
+                required_images.add('com.apple.iokit.IOGPUFamily')
             valid = (parsed['candidate_sha256'] == summary['candidate_sha256']
                      and parsed['original_sha256'] == 'f7d1952c7a21633d212eccf288e77444fff0cc86976db5de292f6819c2ffa1b2'
                      and parsed['slide'] == -0x1360000
@@ -362,18 +391,21 @@ def main():
                 manifest['display_qualification'] = qualify_display_candidate(
                     args.upstream, args.device, candidate, expected_profile=identity['profile'])
                 summary['display_qualified_statically'] = True
-            if identity['profile'] == GPU_PROFILE:
+            if identity['profile'] in GPU_PROFILES:
+                summary['accelerator_bindings'] = derive_accelerator_bindings(
+                    args.upstream, args.device, candidate)['symbols']
+                contract = gpu_contract(identity['profile'])
                 if (identity['ufs_gpu'] is not True or identity['ufs_cpu_present'] is not False or
                         not identity.get('log_capture') or
                         not isinstance(prepared.get('gpu'), dict) or
-                        any(prepared['gpu'].get(key) != value for key, value in GPU_CONTRACT.items()
+                        any(prepared['gpu'].get(key) != value for key, value in contract.items()
                             if key != 'profile') or prepared.get('runtime_qualified') is not False):
-                    raise ValueError('GPU candidate requires its diagnostic profile and persisted logging contract')
+                    raise ValueError('GPU candidate requires its explicit profile and persisted logging contract')
                 manifest['gpu_qualification'] = qualify_gpu_candidate(
                     args.upstream, args.device, candidate, expected_profile=identity['profile'])
                 summary['gpu_qualified_statically'] = True
             elif identity['ufs_gpu'] or prepared.get('gpu'):
-                raise ValueError('GPU contract is only valid for the explicit diagnostic profile')
+                raise ValueError('GPU contract is only valid for the explicit GPU profiles')
             summary['candidate_validated'] = valid
             summary['undefined_symbol_count'] = len(macho['undefined_names'])
             manifest['macho'] = macho

@@ -15,6 +15,9 @@
 #include "NabuSmmuPolicy.h"
 #include "ArmSmmu4KMmio.h"
 #include "AdrenoPM4.h"
+#include "NativeAdrenoABI.h"
+#include "NativeAdrenoSubmit.h"
+#include "NativeAdrenoTimer.h"
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
@@ -25,6 +28,17 @@
 
 extern "C" uint64_t (*native_adreno_vm_now_us)(void);
 extern "C" volatile uint32_t native_adreno_pool_mib;
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+/* Publication path. The diagnostic archive links none of these objects, so
+ * they must not be referenced there. */
+extern "C" IOReturn native_adreno_initialize_classes(void);
+extern "C" IOReturn native_adreno_publish(NativeAdrenoVm *,NativeAdrenoSubmit *,NativeAdrenoRing *,
+    const NativeAdrenoRingClock *,const NativeAdrenoTimer *,const NativeAdrenoAbiDeviceInfo *,uint32_t,uint32_t);
+extern "C" void native_adreno_fault(void);
+extern "C" void native_adreno_dma_stopped(void);
+extern "C" void native_adreno_gpu_interrupt(bool failed);
+extern "C" int native_adreno_progress(uint32_t *,uint32_t *);
+#endif
 extern "C" {
 volatile uint64_t native_adreno_fence_phys=0;
 volatile uint32_t native_adreno_a6xx_stats[24];
@@ -56,6 +70,13 @@ class A640State final {
     NativeAdrenoGmuContextReport gmuContextReport_{};
     NativeAdrenoGmuContextReport gpuContextReport_{};
     NativeAdrenoRing ring_;
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+    NativeAdrenoSubmit submit_;
+    NativeAdrenoTimer timer_;
+    NativeAdrenoAbiDeviceInfo info_{};
+    uint32_t watchedFence_=0;
+    uint64_t watchedSince_=0;
+#endif
     NativeAdrenoIrq irq_;
     ArmSmmu4KMmio smmuMmio_{};
     ArmSmmu4KIo smmuIo_{};
@@ -328,9 +349,17 @@ void A640State::gpuInterrupt(void *cookie)
         __atomic_store_n(&self->hardwareIrqFailed_,1,__ATOMIC_RELEASE);
         native_adreno_smmu_disable_irq(self->resources_.gpuInterrupt);
     }
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+    if(failed || (result.flags&NativeAdrenoIrqFence)) {
+        /* Fence completion and faults drive the published scheduler; this is
+         * an explicit no-op before a publish. */
+        native_adreno_gpu_interrupt(failed);
+    }
+#else
     if(failed || (result.flags&NativeAdrenoIrqFence)) {
         if(failed)self->ring_.recordFault();
     }
+#endif
 }
 
 IOReturn A640State::checkGpuTranslations()
@@ -783,6 +812,47 @@ IOReturn A640State::startCp()
 
     IOLog("NabuGPU: proof=cp-scratch-fence chip=%08x scratch=%08x fence=%u/%u gmem=100000/100000\n",
         resources_.chipId,native_adreno_a6xx_stats[10],fence,ring_.completedFence());
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+    /* Publish only after the live VM, ring, submit and timer are attached and
+     * the core is closed. A failure must leave the service unpublished, so it
+     * returns into the fail path instead of being logged and ignored. */
+    const IOReturn registered=native_adreno_initialize_classes();
+    if(registered && registered!=kIOReturnBusy) {
+        IOLog("NativeAdrenoA6xx: publication class registration failed %08x\n",registered);
+        return registered;
+    }
+    status=submit_.attach(gpuContext_.vm(),&ring_);
+    if(status) {
+        return status;
+    }
+    const NativeAdrenoTimeIo time{this,gpuRead};
+    status=timer_.attach(&time,NativeAdrenoTimeCp);
+    if(status) {
+        return status;
+    }
+    info_={};
+    info_.chip_id=resources_.chipId;          /* ADT qcom,chipid 0x06040001 */
+    info_.gmem_bytes=resources_.gmemBytes;    /* ADT 0x100000 */
+    info_.gmem_base=0x100000;                 /* A640 HwInit 0xE0B/0xE0D route 1..2 MiB */
+    info_.uche_trap_base=0x1fffffffff000;     /* A640 HwInit 0xE09/0xE0A */
+    info_.va_start=0x20000000;                /* client VA contract, not A640-verified */
+    info_.va_size=0x60000000;
+    info_.highest_bank_bit=resources_.highestBankBit;
+    info_.ubwc_swizzle=0;                     /* not established for A640; 6 is A642L only */
+    info_.macrotile_mode=0;                   /* not established for A640 */
+    info_.ubwc_version=resources_.ubwcMode;   /* ADT qcom,ubwc-mode 3 */
+    info_.flags=NativeAdrenoDeviceClientIova; /* no cached-coherent claim yet */
+    const IOReturn published=native_adreno_publish(gpuContext_.vm(),&submit_,&ring_,&clock_,
+        &timer_,&info_,32,gpuContextReport_.output_bits);
+    if(published) {
+        IOLog("NativeAdrenoA6xx: publish failed %08x\n",published);
+        return published;
+    }
+    /* A zero return only means the service registered; the accelerator result is
+     * reported separately through MetalStatus/MetalAvailable. */
+    IOLog("NativeAdrenoA6xx: service published chip=%08x input_bits=32 output_bits=%u\n",
+        info_.chip_id,gpuContextReport_.output_bits);
+#endif
     return kIOReturnSuccess;
 }
 
@@ -801,6 +871,11 @@ IOReturn A640State::fail(IOReturn status)
     failedGmuReport_=gmu_.report();
     failureCaptured_=true;
     ring_.recordFault();
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+    /* No-op before a publish; afterwards it marks the published core failed so
+     * a mounted client cannot keep opening it. */
+    native_adreno_fault();
+#endif
     native_adreno_checkpoint("failed");
     bool stopped=true;
     if(cpTouched_) {
@@ -820,6 +895,9 @@ IOReturn A640State::fail(IOReturn status)
     native_adreno_a6xx_stats[20]=stopped;
     native_adreno_a6xx_stats[21]=uint32_t(gmuStopped);
     if(stopped && !gmuStopped) {
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+        native_adreno_dma_stopped();
+#endif
         power_.stop(true);
     }
     dump();
@@ -930,11 +1008,28 @@ void A640State::poll()
 
     const IOReturn status=__atomic_load_n(&hardwareIrqFailed_,__ATOMIC_ACQUIRE)?
         kIOReturnIOError:kIOReturnSuccess;
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+    uint32_t submitted=0,completed=0;
+    const int progress=native_adreno_progress(&submitted,&completed);
+    const uint64_t current=now(nullptr);
+    if(completed!=watchedFence_ || submitted==completed) {
+        watchedFence_=completed;
+        watchedSince_=current;
+    }
+    const bool timeout=submitted!=completed && current-watchedSince_>500000;
+    if(status || progress || timeout) {
+        ready_=false;
+        native_adreno_a6xx_stats[0]=8;
+        fail(status?status:(timeout?kIOReturnTimeout:kIOReturnIOError));
+        return;
+    }
+#else
     if(status) {
         ready_=false;
         native_adreno_a6xx_stats[0]=8;
         fail(status);
     }
+#endif
 }
 
 void A640State::dump() const

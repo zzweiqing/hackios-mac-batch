@@ -162,8 +162,12 @@ IOReturn NativeAdrenoVm::preflight(const NativeAdrenoMemory *memory,unsigned upp
     if(!memory || upper>1 || !regions_[upper].arena || !memory->backed() || memory->quarantined() ||
         !memory->bytes() || !memory->spanCount() || !(permissions&ArmSmmu4KRead) || (permissions&~15u) ||
         writeback>2 || (shareability!=2 && shareability!=3))return kIOReturnBadArgument;
+    const bool firmware=memory->cpuCacheMode()==NativeAdrenoCpuCacheMode::FirmwareUncached;
+    if(firmware && (!memory->imported() || memory->spanCount()!=1 || memory->readOnly() ||
+        permissions!=(ArmSmmu4KRead|ArmSmmu4KWrite) || writeback!=0 ||
+        memory->spans()[0].writeback!=0)) return kIOReturnUnsupported;
     if(memory->cpuCacheMode()==NativeAdrenoCpuCacheMode::Unknown || shareability!=2 ||
-        (memory->cpuCacheMode()!=NativeAdrenoCpuCacheMode::NormalUncached && !cached_coherent_imports_)) {
+        (memory->cpuCacheMode()!=NativeAdrenoCpuCacheMode::NormalUncached && !firmware && !cached_coherent_imports_)) {
         return kIOReturnUnsupported;
     }
     const ArmSmmu4KLiveArena *a=regions_[upper].arena;
