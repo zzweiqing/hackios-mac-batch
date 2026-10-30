@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "NativeAdrenoA6xxZap.h"
+#include "NativeAdrenoKernelTime.h"
+#include "NabuScmCall.h"
 #include <IOKit/IOLib.h>
 #include <string.h>
 
@@ -9,47 +11,41 @@ uint32_t word(const uint8_t *p)
     return uint32_t(p[0])|(uint32_t(p[1])<<8)|(uint32_t(p[2])<<16)|(uint32_t(p[3])<<24);
 }
 
-/* SCM arguments follow qcom_scm-smc.c: x1 encodes argument count and type,
- * x2 onward hold PAS ID and physical addresses. An interrupted call resumes
- * with x0=1 and the secure world's x6 continuation value. */
-int64_t scm(uint32_t initialFunction,uint32_t info,uint64_t arg0,uint64_t arg1,
-    uint64_t arg2,int64_t *transport)
+void scmInvoke(void *,NabuScmRegisters *regs)
 {
-    uint64_t function=initialFunction;
-    uint64_t continuation=0;
-    for(unsigned attempt=0;attempt<16;++attempt) {
-        IOLog("NativeAdrenoZap: SCM begin attempt=%u function=%llx info=%x arg=%llx/%llx/%llx\n",
-            attempt,function,info,arg0,arg1,arg2);
-        register uint64_t x0 __asm__("x0")=function;
-        register uint64_t x1 __asm__("x1")=info;
-        register uint64_t x2 __asm__("x2")=arg0;
-        register uint64_t x3 __asm__("x3")=arg1;
-        register uint64_t x4 __asm__("x4")=arg2;
-        register uint64_t x5 __asm__("x5")=0;
-        register uint64_t x6 __asm__("x6")=continuation;
-        register uint64_t x7 __asm__("x7")=0;
-        __asm__ volatile("dsb sy\n\tsmc #0\n\tisb" :
-            "+r"(x0),"+r"(x1),"+r"(x2),"+r"(x3),"+r"(x4),
-            "+r"(x5),"+r"(x6),"+r"(x7) : :
-            "x8","x9","x10","x11","x12","x13","x14","x15","x16","x17","memory","cc");
-        const uint64_t result0=x0,result1=x1,result6=x6;
-        *transport=int32_t(result0);
-        IOLog("NativeAdrenoZap: SCM returned function=%x transport=%lld result=%lld continuation=%llx\n",
-            initialFunction,*transport,int64_t(result1),result6);
-        if(result0==1) {
-            function=1;
-            continuation=result6;
-            continue;
-        }
-        if(int32_t(result0)==-12) {
-            function=initialFunction;
-            continuation=0;
-            IOSleep(1);
-            continue;
-        }
-        return int32_t(result1);
+    register uint64_t x0 __asm__("x0")=regs->x[0];
+    register uint64_t x1 __asm__("x1")=regs->x[1];
+    register uint64_t x2 __asm__("x2")=regs->x[2];
+    register uint64_t x3 __asm__("x3")=regs->x[3];
+    register uint64_t x4 __asm__("x4")=regs->x[4];
+    register uint64_t x5 __asm__("x5")=regs->x[5];
+    register uint64_t x6 __asm__("x6")=regs->x[6];
+    register uint64_t x7 __asm__("x7")=regs->x[7];
+    __asm__ volatile("dsb sy\n\tsmc #0\n\tisb" :
+        "+r"(x0),"+r"(x1),"+r"(x2),"+r"(x3),"+r"(x4),
+        "+r"(x5),"+r"(x6),"+r"(x7) : :
+        "x8","x9","x10","x11","x12","x13","x14","x15","x16","x17","memory","cc");
+    regs->x[0]=x0;regs->x[1]=x1;regs->x[6]=x6;
+}
+
+IOReturn scm(uint32_t initialFunction,uint32_t info,uint64_t arg0,uint64_t arg1,
+    uint64_t arg2,int64_t *transport,int64_t *result)
+{
+    IOLog("NativeAdrenoZap: SCM begin function=%x info=%x arg=%llx/%llx/%llx limit_us=%llu\n",
+        initialFunction,info,arg0,arg1,arg2,NabuScmTimeoutUs);
+    const NabuScmIo io{nullptr,scmInvoke,NativeAdrenoKernelTime::now_us,NativeAdrenoKernelTime::wait_us};
+    const NabuScmReply reply=nabuScmCall(io,initialFunction,info,arg0,arg1,arg2);
+    *transport=reply.transport;*result=reply.result;
+    IOLog("NativeAdrenoZap: SCM end function=%x stop=%s calls=%u interrupted=%u busy=%u elapsed_us=%llu transport=%lld result=%lld continuation=%llx\n",
+        initialFunction,nabuScmStopName(reply.stop),reply.calls,reply.interrupted,reply.busy,
+        reply.elapsed_us,reply.transport,reply.result,reply.continuation);
+    switch(reply.stop) {
+    case NabuScmStop::Complete:return kIOReturnSuccess;
+    case NabuScmStop::Deadline:
+    case NabuScmStop::CallBudget:return kIOReturnTimeout;
+    case NabuScmStop::BusyBudget:return kIOReturnBusy;
+    default:return kIOReturnIOError;
     }
-    return -1;
 }
 }
 
@@ -78,12 +74,14 @@ IOReturn NativeAdrenoA6xxZap::load(const NativeAdrenoA6xxResources &resources,vo
         memoryBytes>window.bytes) {
         return kIOReturnBadArgument;
     }
-    result_=scm(0xc2000601,1,0x02000601,0,0,&transport_);
+    IOReturn status=scm(0xc2000601,1,0x02000601,0,0,&transport_,&result_);
+    if(status)return status;
     uint32_t pasBase=0x42000200;
     if(!transport_ && result_==1) {
         convention_=64;
     } else {
-        result_=scm(0x82000601,1,0x02000601,0,0,&transport_);
+        status=scm(0x82000601,1,0x02000601,0,0,&transport_,&result_);
+        if(status)return status;
         if(transport_ || result_!=1) {
             IOLog("NativeAdrenoZap: ARM SCM convention unavailable transport=%lld result=%lld\n",
                 transport_,result_);
@@ -98,7 +96,7 @@ IOReturn NativeAdrenoA6xxZap::load(const NativeAdrenoA6xxResources &resources,vo
     IOLog("NativeAdrenoZap: SCM convention=%u\n",convention_);
 
     const size_t metadataBytes=size_t((native_adreno_zap_metadata_image_size+4095)&~UINT64_C(4095));
-    IOReturn status=metadata_.allocate(metadataBytes,convention_==64?40:32,true,metadataBytes,false,false,true);
+    status=metadata_.allocate(metadataBytes,convention_==64?40:32,true,metadataBytes,false,false,true);
     if(status) {
         return status;
     }
@@ -111,13 +109,15 @@ IOReturn NativeAdrenoA6xxZap::load(const NativeAdrenoA6xxResources &resources,vo
     }
 
     phase_=2;
-    result_=scm(pasBase|1,0x82,pasId,metadata_.spans()[0].physical,0,&transport_);
+    status=scm(pasBase|1,0x82,pasId,metadata_.spans()[0].physical,0,&transport_,&result_);
+    if(status)return status;
     if(transport_ || result_) {
         return kIOReturnNotPermitted;
     }
     phase_=3;
-    result_=scm(pasBase|2,3,pasId,window.physical,
-        (uint64_t(memoryBytes)+4095)&~UINT64_C(4095),&transport_);
+    status=scm(pasBase|2,3,pasId,window.physical,
+        (uint64_t(memoryBytes)+4095)&~UINT64_C(4095),&transport_,&result_);
+    if(status)return status;
     if(transport_ || result_) {
         return kIOReturnNotPermitted;
     }
@@ -132,7 +132,8 @@ IOReturn NativeAdrenoA6xxZap::load(const NativeAdrenoA6xxResources &resources,vo
     IOLog("NativeAdrenoZap: reserved shader copy completed\n");
 
     phase_=5;
-    result_=scm(pasBase|5,1,pasId,0,0,&transport_);
+    status=scm(pasBase|5,1,pasId,0,0,&transport_,&result_);
+    if(status)return status;
     if(transport_ || result_) {
         return kIOReturnNotPermitted;
     }
