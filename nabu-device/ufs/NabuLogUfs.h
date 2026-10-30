@@ -47,8 +47,9 @@ static int nabuLogIo(bool write,uint64_t lba,uint32_t blocks,uint8_t *data,bool 
   nabu_log_io_reason=result==kIOReturnSuccess?"ok":"transport";
   return result==kIOReturnSuccess?1:-1;
 }
-/* Counter-based pacing must not wait for an unproved timer interrupt. Yield
- * the CPU on each pass so root I/O can finish; both time and work are bounded. */
+/* Keep the counter deadline, but give each priority depression an expiry.
+ * XNU's zero-ms yield has no restoration timer and can starve forever under
+ * continuous single-CPU load, before this loop gets to check its deadline. */
 static void nabuLogPause(unsigned milliseconds)
 {
   uint64_t deadline;
@@ -56,7 +57,7 @@ static void nabuLogPause(unsigned milliseconds)
   unsigned budget=milliseconds>1000?1000000:milliseconds*1000;
   do {
     nabu_boot_watch_poll();
-    thread_yield_internal(0);
+    thread_yield_internal(1);
   } while(budget-- && mach_absolute_time()<deadline);
 }
 static int nabuLogRead(void *,uint64_t lba,uint32_t blocks,uint8_t *data)
@@ -176,7 +177,7 @@ static void nabuLogThread(void *,wait_result_t)
   }
   nabu_log_writer_state=1;
   IOLog("NABULOG2: writer entered; counter-paced scheduling; opening volume\n");
-  thread_yield_internal(0); /* root bring-up may still own the transport */
+  thread_yield_internal(1); /* finite priority depression while root I/O runs */
   {
     bool opened=false;
     uint64_t open_deadline;

@@ -101,7 +101,8 @@ static void nabuBusyWaitUs (uint32_t usec)
 static void nabuCooperativeYield (void)
 {
   for (unsigned i = 0; i < 1000; ++i) {
-    thread_yield_internal (0);
+    // XNU's zero interval leaves priority depressed without a recovery timer.
+    thread_yield_internal (1);
   }
 }
 '''

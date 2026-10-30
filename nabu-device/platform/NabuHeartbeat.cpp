@@ -93,7 +93,8 @@ void counter_sleep(unsigned interval)
 	uint64_t deadline;
 	clock_interval_to_deadline(interval * 1000, kMillisecondScale, &deadline);
 	while (mach_absolute_time() < deadline) {
-		thread_yield_internal(0);
+		// Zero has no priority-restoration timer in XNU and can starve this loop.
+		thread_yield_internal(1);
 	}
 }
 
