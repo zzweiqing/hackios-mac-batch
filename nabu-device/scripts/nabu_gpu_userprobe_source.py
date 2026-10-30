@@ -8,6 +8,45 @@ PARENTS_BEFORE = '\tfor (size_t i = sizeof("/private/var/ngpu/") - 1; parent[i];
 PARENTS_AFTER = ('\t/* NABU_GPU_USERPROBE_PARENTS_V1: create ngpu before its children. */\n'
                  '\tfor (size_t i = sizeof("/private/var/") - 1; parent[i]; ++i) {\n')
 CACHE_ENTRY_COUNT = 4
+EXEC_ANCHOR = 'static int\nexec_activate_image(struct image_params *imgp)\n{\n'
+EXEC_LOCAL = '\tint nabu_probe_target = 0; /* NABU_GPU_USERPROBE_EXEC_V1 */\n'
+EXEC_ENTER = '''\tnabu_probe_target = !strcmp(excpath, "/private/var/ngpu/bin/nabu-gpu-userprobe");
+\tif (nabu_probe_target) nabu_gpu_userprobe_exec_note(0, proc_getpid(p), 0);
+'''
+EXEC_RETURN = '\tif (nabu_probe_target) nabu_gpu_userprobe_exec_note(1, proc_getpid(p), error);\n'
+EXEC_HELPER = '''/* NABU_GPU_USERPROBE_PROCESS_V1: observation only; never changes exec/exit. */
+static uint32_t nabu_probe_process[6];
+static int nabu_gpu_userprobe_process_enabled(void)
+{
+\tint enabled = 0;
+\treturn PE_parse_boot_argn("nabu-gpu-userprobe", &enabled, sizeof(enabled)) && enabled == 1;
+}
+static void nabu_gpu_userprobe_exec_note(unsigned returned, int pid, int error)
+{
+\tif (!nabu_gpu_userprobe_process_enabled()) return;
+\t__atomic_store_n(&nabu_probe_process[3], (uint32_t)pid, __ATOMIC_RELAXED);
+\tif (returned) __atomic_store_n(&nabu_probe_process[2], (uint32_t)error, __ATOMIC_RELAXED);
+\t__atomic_fetch_add(&nabu_probe_process[returned ? 1 : 0], 1, __ATOMIC_RELAXED);
+}
+void nabu_gpu_userprobe_exit_note(int pid, int status)
+{
+\tif (pid <= 0 || (uint32_t)pid != __atomic_load_n(&nabu_probe_process[3], __ATOMIC_RELAXED) ||
+\t    !nabu_gpu_userprobe_process_enabled()) return;
+\t__atomic_store_n(&nabu_probe_process[5], (uint32_t)status, __ATOMIC_RELAXED);
+\t__atomic_fetch_add(&nabu_probe_process[4], 1, __ATOMIC_RELAXED);
+}
+void nabu_gpu_userprobe_exec_snapshot(uint32_t out[6])
+{
+\tfor (unsigned i = 0; i < 6; ++i) out[i] = __atomic_load_n(&nabu_probe_process[i], __ATOMIC_RELAXED);
+}
+
+'''
+EXIT_ANCHOR = ('int\nexit_with_reason(proc_t p, int rv, int *retval, boolean_t thread_can_terminate, boolean_t perf_notify,\n'
+                '    int jetsam_flags, struct os_reason *exit_reason)\n{\n')
+EXIT_HOOK = '''\t/* NABU_GPU_USERPROBE_EXIT_V1: a successful exit must also leave evidence. */
+\textern void nabu_gpu_userprobe_exit_note(int, int);
+\tnabu_gpu_userprobe_exit_note(proc_getpid(p), rv);
+'''
 RAM_HELPER = r'''/* NABU_GPU_USERPROBE_INLINE_V1 */
 #include "NabuGpuUserprobeAddon.h"
 static OSData *nabu_gpu_userprobe_retained;
@@ -46,6 +85,9 @@ RAM_GATE = '''  uint32_t nabu_probe = 0;
 DATA_BRANCH = '''\t/* NABU_GPU_USERPROBE_JOB_V1 */
 \tuint32_t nabu_probe = 0;
 \tif (PE_parse_boot_argn("nabu-gpu-userprobe", &nabu_probe, sizeof(nabu_probe)) && nabu_probe == 1) {
+\t\textern void nabu_gpu_userprobe_exec_snapshot(uint32_t out[6]);
+\t\textern void (*nabu_log_probe_process_snapshot)(uint32_t *);
+\t\t__atomic_store_n(&nabu_log_probe_process_snapshot, nabu_gpu_userprobe_exec_snapshot, __ATOMIC_RELEASE);
 \t\tnative_gpu_addon_install(p, scratch);
 \t\tif (native_gpu_addon_files != 4 || native_gpu_addon_failed || native_gpu_addon_error) {
 \t\t\tprintf("NabuGPU: userprobe addon refused files=%d failed=%d error=%d render_proof=0\\n",
@@ -98,8 +140,42 @@ def data_source(text, restore=False):
             raise ValueError('GPU userprobe Data source changed after patching')
         if text.count(PARENTS_AFTER) != 1 or PARENTS_BEFORE in text:
             raise ValueError('GPU userprobe parent creation changed after patching')
-        return text.replace(DATA_BRANCH, '', 1).replace(PARENTS_AFTER, PARENTS_BEFORE, 1) if restore else text
+        result = text.replace(DATA_BRANCH, '', 1).replace(PARENTS_AFTER, PARENTS_BEFORE, 1) if restore else text
+        return exec_source(result, restore=restore)
     if restore:
         return text
     text = once(text, PARENTS_BEFORE, PARENTS_AFTER)
-    return once(text, DATA_ANCHOR, DATA_ANCHOR + DATA_BRANCH)
+    return exec_source(once(text, DATA_ANCHOR, DATA_ANCHOR + DATA_BRANCH))
+
+
+def exec_source(text, restore=False):
+    enter = '\tDTRACE_PROC1(exec, uintptr_t, excpath);\n'
+    returned = '\tkfree_type(struct nameidata, ndp);\n\n\treturn error;\n'
+    if 'NABU_GPU_USERPROBE_PROCESS_V1' in text and EXEC_HELPER not in text:
+        raise ValueError('GPU userprobe process helper changed')
+    if EXEC_HELPER in text:
+        for expected in (EXEC_ANCHOR + EXEC_LOCAL, enter + EXEC_ENTER, EXEC_RETURN + returned):
+            if text.count(expected) != 1:
+                raise ValueError('GPU userprobe process observer changed')
+        if not restore:
+            return text
+        for old, new in ((EXEC_HELPER, ''), (EXEC_LOCAL, ''), (EXEC_ENTER, ''), (EXEC_RETURN, '')):
+            text = once(text, old, new)
+        return text
+    if restore:
+        return text
+    text = once(text, EXEC_ANCHOR, EXEC_HELPER + EXEC_ANCHOR + EXEC_LOCAL)
+    text = once(text, enter, enter + EXEC_ENTER)
+    return once(text, returned, EXEC_RETURN + returned)
+
+
+def exit_source(text, restore=False):
+    if 'NABU_GPU_USERPROBE_EXIT_V1' in text and EXIT_HOOK not in text:
+        raise ValueError('GPU userprobe exit observer changed')
+    if EXIT_HOOK in text:
+        if text.count(EXIT_ANCHOR + EXIT_HOOK) != 1:
+            raise ValueError('GPU userprobe exit observer changed')
+        return once(text, EXIT_HOOK, '') if restore else text
+    if restore:
+        return text
+    return once(text, EXIT_ANCHOR, EXIT_ANCHOR + EXIT_HOOK)

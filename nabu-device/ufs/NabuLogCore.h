@@ -13,6 +13,10 @@ struct nb_log_snapshot { uint64_t end, first, lost; uint32_t length; };
 void nabu_capture_append(const char *,unsigned);
 int nabu_capture_snapshot(struct nb_log_snapshot *);
 int nabu_capture_copy(uint64_t,unsigned,uint8_t *);
+/* Optional owner-probe callbacks. Disabled builds supply no GPU dependency;
+ * the writer invokes only a registered bounded RAM-only snapshot callback. */
+extern void (*nabu_log_probe_poll)(void);
+extern void (*nabu_log_probe_process_snapshot)(uint32_t *);
 #ifdef __cplusplus
 }
 #endif
@@ -20,6 +24,8 @@ int nabu_capture_copy(uint64_t,unsigned,uint8_t *);
 static uint8_t nabu_capture_ring[NB_LOG_CAPACITY];
 static unsigned nabu_capture_lock;
 static uint64_t nabu_capture_end, nabu_capture_lost;
+void (*nabu_log_probe_poll)(void)=0;
+void (*nabu_log_probe_process_snapshot)(uint32_t *)=0;
 static int nb_capture_try(void) {
   unsigned expected=0;
   return __atomic_compare_exchange_n(&nabu_capture_lock,&expected,1,0,__ATOMIC_ACQUIRE,__ATOMIC_RELAXED);

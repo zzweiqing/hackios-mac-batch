@@ -52,9 +52,13 @@ struct NativeAdrenoMetalDiag {
     uint32_t grants;
 };
 struct NativeAdrenoOpenRecord {char name[20]; uint32_t type, macf, res, attach, foreign;};
+struct NativeAdrenoClientText {char name[20]; char text[64];};
 extern NativeAdrenoMetalDiag native_adreno_metal_diag;
 extern NativeAdrenoOpenRecord native_adreno_open_log[8];
+extern NativeAdrenoClientText native_adreno_client_text[4];
 extern volatile uint32_t native_adreno_method_stats[20][4];
+extern void (*nabu_log_probe_poll)(void);
+extern void (*nabu_log_probe_process_snapshot)(uint32_t *);
 }
 extern "C" void nabu_capture_append(const char *,unsigned);
 #endif
@@ -64,6 +68,58 @@ volatile uint32_t native_adreno_a6xx_stats[24];
 }
 
 namespace {
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+/* Called only by the existing ESP writer, outside its transport lock. It
+ * reads bounded software state, never polls hardware or waits for g.lock. */
+void nabuGpuProbeWriterSample()
+{
+    static unsigned samples;
+    static uint64_t next;
+    uint64_t current=0;
+    if(samples>=64 || NativeAdrenoKernelTime::now_us(nullptr,&current))return;
+    if(current<next || next==UINT64_MAX)return;
+    next=current>=UINT64_MAX-10000000?UINT64_MAX:current+10000000;
+    const unsigned sample=++samples;
+    const NativeAdrenoMetalDiag diag=native_adreno_metal_diag;
+    uint32_t process[6]={};
+    void (*snapshot)(uint32_t *)=__atomic_load_n(&nabu_log_probe_process_snapshot,__ATOMIC_ACQUIRE);
+    if(snapshot)snapshot(process);
+    char line[256],report[64];
+    auto emit=[&](int bytes) {
+        if(bytes>0 && unsigned(bytes)<sizeof(line))nabu_capture_append(line,unsigned(bytes));
+    };
+    auto text=[&](const char *source) {
+        for(unsigned i=0;i<sizeof(report)-1;++i) {
+            const unsigned char ch=static_cast<unsigned char>(source[i]);
+            report[i]=ch>=32 && ch<127?char(ch):'_';
+            if(!ch){report[i]=0;break;}
+        }
+        report[sizeof(report)-1]=0;
+    };
+    emit(snprintf(line,sizeof(line),
+        "NabuGPU: writer_probe=%u now_us=%llu opens=%u closes=%u calls=%u selector=%u status=%08x marks=%u snapshot=non-atomic render_proof=0\n",
+        sample,static_cast<unsigned long long>(current),diag.opens,diag.closes,diag.calls,
+        diag.last_selector,diag.last_status,diag.marks_total));
+    emit(snprintf(line,sizeof(line),
+        "NabuGPU: writer_exec=%u hook=%u attempts=%u returned=%u error=%u pid=%u exits=%u exit_status=%x\n",
+        sample,snapshot?1u:0u,process[0],process[1],process[2],process[3],process[4],process[5]));
+    text(diag.report);
+    emit(snprintf(line,sizeof(line),"NabuGPU: writer_meta=%u opener=%.*s text=%s\n",
+        sample,17,diag.opener[0],report));
+    for(unsigned i=0;i<4;++i) {
+        const NativeAdrenoClientText client=native_adreno_client_text[i];
+        if(strncmp(client.name,"nabu-gpu-user",13))continue;
+        text(client.text);
+        emit(snprintf(line,sizeof(line),"NabuGPU: writer_client=%u name=%.*s text=%s\n",
+            sample,20,client.name,report));
+    }
+    emit(snprintf(line,sizeof(line),
+        "NabuGPU: writer_marks=%u total=%u last=%x/%x/%x/%x macf=%x resolver=%x attach=%u ext=%u/%08x\n",
+        sample,diag.marks_total,diag.marks[(diag.marks_total-1)&15],diag.marks[(diag.marks_total-2)&15],
+        diag.marks[(diag.marks_total-3)&15],diag.marks[(diag.marks_total-4)&15],
+        diag.chk_macf,diag.chk_res,diag.attach_status,diag.ext_entries,diag.ext_status));
+}
+#endif
 #if defined(NABU_GPU_METAL) && NABU_GPU_METAL
 /* Snapshot only fixed software counters: the full upstream dump can print
  * thousands of history rows and is unsuitable for the 10 ms hardware worker. */
@@ -1095,6 +1151,7 @@ IOReturn A640State::start()
     unsigned probe=0;
     PE_parse_boot_argn("nabu-gpu-userprobe",&probe,sizeof(probe));
     observation_.enableProbe(probe==1);
+    if(probe==1)__atomic_store_n(&nabu_log_probe_poll,nabuGpuProbeWriterSample,__ATOMIC_RELEASE);
 #endif
     native_adreno_a6xx_stats[0]=7;
     nabuGpuState(7,0,"ready");

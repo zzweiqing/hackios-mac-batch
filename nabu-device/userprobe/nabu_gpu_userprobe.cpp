@@ -42,6 +42,40 @@ struct Buffer {
     volatile uint32_t *cpu = nullptr;
 };
 
+// Existing AGX diagnostic open types only: no new GPU selector or admission.
+uint16_t stage_marker(const char *stage) {
+    static const char *const names[] = {"entry", "open", "query", "device_info", "queue_create",
+        "input_alloc", "input_cpu_map", "input_gpu_map", "output_alloc", "output_cpu_map", "output_gpu_map",
+        "status_before", "submit", "wait_fence", "status_after", "report", "output_cpu_unmap", "output_free",
+        "input_cpu_unmap", "input_free", "queue_close", "complete"};
+    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+        if (!std::strcmp(stage, names[i])) return uint16_t(0x6401 + i);
+    return 0x64ff;
+}
+
+bool marker_line(void *cookie, bool (*mark)(void *, uint16_t), const char *line) {
+    if (!mark || !line) return false;
+    size_t bytes = 0;
+    while (bytes < 64 && line[bytes]) {
+        const unsigned char ch = static_cast<unsigned char>(line[bytes++]);
+        if (ch < 32 || ch >= 127) return false;
+    }
+    if (!bytes || bytes >= 64 || !mark(cookie, 0x7fff)) return false;
+    for (size_t i = 0; i < bytes; ++i)
+        if (!mark(cookie, uint16_t(0x7000 | static_cast<unsigned char>(line[i])))) return false;
+    return true;
+}
+
+int final_line(const Outcome &result, uint32_t closed, char line[64]) {
+    const bool pass = result.verified && result.completed && !result.status &&
+        !result.cleanup_status && !closed && !result.cleanup_deferred;
+    const int bytes = std::snprintf(line, 64, "NF p=%u s=%x c=%x x=%x f=%llu d=%u t=%x", pass ? 1u : 0u,
+        result.status, result.cleanup_status, closed,
+        static_cast<unsigned long long>(result.fence <= UINT32_MAX ? result.fence : 0),
+        unsigned(result.cleanup_deferred), unsigned(stage_marker(result.stage)));
+    return bytes > 0 && bytes < 64 ? bytes : 0;
+}
+
 static void visibility_barrier() {
 #if defined(__aarch64__) || defined(__arm64__)
     __asm__ volatile("dsb sy" ::: "memory");
@@ -220,6 +254,7 @@ static Outcome run(const Transport &transport) {
 #ifndef NABU_GPU_USERPROBE_TEST
 #include <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <mach/mach.h>
 #include <signal.h>
 #include <unistd.h>
@@ -231,18 +266,21 @@ struct IOKit {
     kern_return_t (*services)(mach_port_t, CFDictionaryRef, mach_port_t *) = nullptr;
     mach_port_t (*next)(mach_port_t) = nullptr;
     kern_return_t (*release)(mach_port_t) = nullptr;
+    kern_return_t (*retain)(mach_port_t) = nullptr;
     CFTypeRef (*property)(mach_port_t, CFStringRef, CFAllocatorRef, uint32_t) = nullptr;
     kern_return_t (*registry_id)(mach_port_t, uint64_t *) = nullptr;
     kern_return_t (*open)(mach_port_t, mach_port_t, uint32_t, mach_port_t *) = nullptr;
     kern_return_t (*close)(mach_port_t) = nullptr;
     kern_return_t (*method)(mach_port_t, uint32_t, const void *, size_t, void *, size_t *) = nullptr;
     mach_port_t connection = MACH_PORT_NULL;
+    mach_port_t service = MACH_PORT_NULL;
     bool load() {
         library = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW | RTLD_LOCAL);
         if (!library) return false;
 #define LOAD(field, name) field = reinterpret_cast<decltype(field)>(dlsym(library, name)); if (!field) return false
         LOAD(matching, "IOServiceMatching"); LOAD(services, "IOServiceGetMatchingServices");
         LOAD(next, "IOIteratorNext"); LOAD(release, "IOObjectRelease");
+        LOAD(retain, "IOObjectRetain");
         LOAD(property, "IORegistryEntryCreateCFProperty"); LOAD(registry_id, "IORegistryEntryGetRegistryEntryID");
         LOAD(open, "IOServiceOpen"); LOAD(close, "IOServiceClose"); LOAD(method, "IOConnectCallStructMethod");
 #undef LOAD
@@ -252,10 +290,25 @@ struct IOKit {
         auto &io = *static_cast<IOKit *>(cookie);
         return uint32_t(io.method(io.connection, method, in, in_bytes, out, out_bytes));
     }
-    static void trace(void *, const char *stage) {
-        std::printf("NABU_USERPROBE stage=%s\n", stage); std::fflush(stdout);
+    static bool marker(void *cookie, uint16_t value) {
+        auto &io = *static_cast<IOKit *>(cookie);
+        if (!io.service) return false;
+        mach_port_t extra = MACH_PORT_NULL;
+        const uint32_t status = uint32_t(io.open(io.service, mach_task_self(), 0x41470000u | value, &extra));
+        const bool refused = status == 0xe00002c7u && !extra; // kIOReturnUnsupported, no connection
+        if (extra) (void)io.close(extra);
+        return refused;
+    }
+    static void trace(void *cookie, const char *stage) {
+        (void)marker(cookie, nabu_userprobe::stage_marker(stage));
+        std::printf("NABU_USERPROBE stage=%s\n", stage);
     }
 };
+void nonblocking_output(int fd) {
+    const int flags = fcntl(fd, F_GETFL);
+    // A diagnostic tty must not hold up a GPU request or its watchdog.
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) (void)close(fd);
+}
 void watchdog(int) {
     static const char line[] = "NABU_USERPROBE result=watchdog kernel_call_completion_unknown\n";
     (void)write(STDERR_FILENO, line, sizeof(line) - 1);
@@ -264,6 +317,8 @@ void watchdog(int) {
 } // namespace
 
 int main(int argc, char **argv) {
+    nonblocking_output(STDOUT_FILENO);
+    nonblocking_output(STDERR_FILENO);
     if (argc != 2 || std::strcmp(argv[1], "--run-owned-bo")) {
         std::fprintf(stderr, "Usage: nabu-gpu-userprobe --run-owned-bo\nOwned BO proof only; no Metal rendering or installation.\n");
         return 2;
@@ -274,7 +329,7 @@ int main(int argc, char **argv) {
     }
     alarm(15);
     IOKit io;
-    if (!io.load()) { std::fprintf(stderr, "NABU_USERPROBE result=fail stage=iokit_load\n"); return 1; }
+    if (!io.load()) { std::fprintf(stderr, "NABU_USERPROBE result=fail stage=iokit_load\n"); return 10; }
     CFMutableDictionaryRef match = io.matching("AGXAccelerator");
     mach_port_t iterator = MACH_PORT_NULL;
     const uint32_t matched = match ? uint32_t(io.services(MACH_PORT_NULL, match, &iterator)) : nabu_userprobe::kMalformed;
@@ -302,18 +357,35 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "NABU_USERPROBE result=fail stage=service_identity status=%08x release=%08x\n",
                      identified, released); return 1;
     }
+    if (io.retain(service) != 0) {
+        (void)io.release(service);
+        std::fprintf(stderr, "NABU_USERPROBE result=fail stage=service_retain\n"); return 11;
+    }
+    io.service = service;
+    (void)IOKit::marker(&io, nabu_userprobe::stage_marker("entry"));
+    (void)IOKit::marker(&io, nabu_userprobe::stage_marker("open"));
     const uint32_t opened = uint32_t(io.open(service, mach_task_self(), 0x4147, &io.connection));
     const uint32_t service_release = uint32_t(io.release(service));
     std::printf("NABU_USERPROBE registry=%llu abi_sha256=%s open=%08x service_release=%08x\n",
                 static_cast<unsigned long long>(registry), NABU_USERPROBE_ABI_SHA256, opened, service_release);
     if (opened || !io.connection || service_release) {
         const uint32_t closed = io.connection ? uint32_t(io.close(io.connection)) : 0;
+        nabu_userprobe::Outcome failure;
+        failure.stage = "open"; failure.status = opened ? opened : nabu_userprobe::kMalformed;
+        char line[64];
+        if (nabu_userprobe::final_line(failure, closed, line))
+            (void)nabu_userprobe::marker_line(&io, IOKit::marker, line);
+        (void)io.release(io.service);
         std::fprintf(stderr, "NABU_USERPROBE result=fail stage=open close=%08x\n", closed); return 1;
     }
     const auto outcome = nabu_userprobe::run({&io, IOKit::call, IOKit::trace});
     const uint32_t closed = uint32_t(io.close(io.connection));
+    char summary[64];
+    if (nabu_userprobe::final_line(outcome, closed, summary))
+        (void)nabu_userprobe::marker_line(&io, IOKit::marker, summary);
+    const uint32_t diagnostic_release = uint32_t(io.release(io.service));
     alarm(0);
-    const bool pass = outcome.verified && outcome.completed && !outcome.status && !outcome.cleanup_status && !closed;
+    const bool pass = outcome.verified && outcome.completed && !outcome.status && !outcome.cleanup_status && !closed && !diagnostic_release;
     std::printf("NABU_USERPROBE result=%s stage=%s status=%08x cleanup_stage=%s cleanup=%08x close=%08x "
                 "initial=%08x observed=%08x guards=%08x/%08x fence=%llu completed=%u deferred=%u render_proof=0\n",
                 pass ? "pass" : "fail", outcome.stage, outcome.status, outcome.cleanup_stage, outcome.cleanup_status, closed,

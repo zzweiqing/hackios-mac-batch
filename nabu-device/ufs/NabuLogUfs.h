@@ -226,6 +226,10 @@ static void nabuLogThread(void *,wait_result_t)
     uint64_t last_end=~0ULL,last_lost=~0ULL;
     unsigned snapshot_stalls=0,copy_stalls=0;
     for(;;) {
+      /* No console, GPU lock or MMIO: the opt-in owner probe can leave its
+       * software state even when the GPU worker's sleep/console path stalls. */
+      void (*probe_poll)(void)=__atomic_load_n(&nabu_log_probe_poll,__ATOMIC_ACQUIRE);
+      if(probe_poll) probe_poll();
       struct nb_log_snapshot snapshot;
       if(!nabu_capture_snapshot(&snapshot)) {
         if(snapshot_stalls++==300)

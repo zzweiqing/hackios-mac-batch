@@ -8,14 +8,14 @@ from pathlib import Path
 import shutil
 
 
-def gpu_userprobe_data_source(text, restore=False):
+def gpu_userprobe_data_source(text, restore=False, exit_observer=False):
     # Disabled profiles do not load the probe transform or its boot inputs.
     import importlib.util
     spec = importlib.util.spec_from_file_location('gpu_userprobe_boot_source',
         Path(__file__).with_name('nabu_gpu_userprobe_source.py'))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.data_source(text, restore=restore)
+    return module.exit_source(text, restore=restore) if exit_observer else module.data_source(text, restore=restore)
 
 
 def replace_once(text, old, new):
@@ -314,6 +314,8 @@ def apply(root, device):
             result = transform(result)
         if relative == 'bsd/kern/kern_exec.c' and os.environ.get('NABU_GPU_USERPROBE') == '1':
             result = gpu_userprobe_data_source(result)
+        if relative == 'bsd/kern/kern_exit.c' and os.environ.get('NABU_GPU_USERPROBE') == '1':
+            result = gpu_userprobe_data_source(result, exit_observer=True)
         path.write_text(result, encoding='utf-8')
         changed[relative] = hashlib.sha256(result.encode()).hexdigest()
     for name in ('NabuLogCore.h', 'NabuLogFormat.h'):
@@ -357,6 +359,12 @@ if __name__ == '__main__':
                 after = gpu_userprobe_data_source(after, restore=True)
             if before != after:
                 path.write_text(after, encoding='utf-8')
+        exit_path = a.root / '.cache/xnu-work/bsd/kern/kern_exit.c'
+        if exit_path.exists():
+            before = exit_path.read_text(encoding='utf-8')
+            if 'NABU_GPU_USERPROBE_EXIT_V1' in before:
+                after = gpu_userprobe_data_source(before, restore=True, exit_observer=True)
+                exit_path.write_text(after, encoding='utf-8')
     elif a.device:
         apply(a.root, a.device)
     else:

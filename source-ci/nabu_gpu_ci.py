@@ -235,12 +235,15 @@ def qualify_userprobe_boot(read, candidate):
             'GPU userprobe boot input identity mismatch')
     constants = {}
     cache_entries = None
+    process_constants = {}
     for item in ast.parse(generator.decode('utf-8')).body:
         if isinstance(item, ast.Assign) and len(item.targets) == 1 and isinstance(item.targets[0], ast.Name):
             if item.targets[0].id in ('RAM_HELPER', 'RAM_GATE', 'DATA_BRANCH', 'PARENTS_BEFORE', 'PARENTS_AFTER'):
                 constants[item.targets[0].id] = ast.literal_eval(item.value).encode()
             elif item.targets[0].id == 'CACHE_ENTRY_COUNT':
                 cache_entries = ast.literal_eval(item.value)
+            elif item.targets[0].id in ('EXEC_HELPER', 'EXEC_LOCAL', 'EXEC_ENTER', 'EXEC_RETURN', 'EXIT_HOOK'):
+                process_constants[item.targets[0].id] = ast.literal_eval(item.value).encode()
     require({'RAM_HELPER', 'RAM_GATE', 'DATA_BRANCH'} <= set(constants) and
             all(constants.values()), 'GPU userprobe source generator contract changed')
     ram = read(prefix + 'NativeRamBlock.cpp')
@@ -268,12 +271,28 @@ def qualify_userprobe_boot(read, candidate):
         require(cache_entries == 4 and b'native_gpu_addon_files != 4' in constants['DATA_BRANCH'] and
                 b'cache_point[] = "/System/Library/xpc"' in constants['DATA_BRANCH'],
                 'Owner job-cache source contract changed')
-    definitions, _ = candidate_definitions(candidate, METAL_PROFILE, {'_native_ram_block_gpu_addon'})
+    process_bound = bool(process_constants)
+    if process_bound:
+        require(set(process_constants) == {'EXEC_HELPER', 'EXEC_LOCAL', 'EXEC_ENTER', 'EXEC_RETURN', 'EXIT_HOOK'} and
+                all(data.count(process_constants[key]) == 1 for key in ('EXEC_HELPER', 'EXEC_LOCAL', 'EXEC_ENTER', 'EXEC_RETURN')),
+                'Actual XNU source lacks the bounded probe exec observer')
+        exit_path = 'outputs/tree/.cache/xnu-work/bsd/kern/kern_exit.c'
+        exit_source = read(exit_path)
+        require(exit_source.count(process_constants['EXIT_HOOK']) == 1 and
+                capture.get('hooks', {}).get('bsd/kern/kern_exit.c') == sha(exit_source),
+                'Actual XNU source lacks the bounded probe exit observer')
+    extra_required = {'_native_ram_block_gpu_addon'}
+    if process_bound:
+        extra_required |= {'_nabu_gpu_userprobe_exit_note', '_nabu_gpu_userprobe_exec_snapshot',
+                           '_nabu_log_probe_poll', '_nabu_log_probe_process_snapshot'}
+    definitions, _ = candidate_definitions(candidate, METAL_PROFILE, extra_required)
     require(b'NabuGPU: userprobe addon' in candidate and b'nabu-gpu-userprobe-addon' in candidate,
             'Final kernel lacks GPU userprobe boot code')
     return {'mode': 'closed_inline_abi1_probe', 'trigger': 'nabu-gpu-userprobe=1',
             **({'parent_root_creation': True} if parents_fixed else {}),
             **({'owner_job_cache': True, 'addon_files': 4} if cache_entries == 4 else {}),
+            **({'process_observer': True, 'exit_source_sha256': sha(exit_source),
+                'process_symbols': {name: definitions[name] for name in sorted(extra_required)}} if process_bound else {}),
             'header_sha256': sha(header), 'generator_sha256': sha(generator),
             'ram_source_sha256': sha(ram), 'ram_object_sha256': sha(obj),
             'ram_archive_sha256': sha(archive), 'data_source_sha256': sha(data),
