@@ -7,6 +7,7 @@ DATA_ANCHOR = 'native_gpu_addon_prepare(proc_t p, user_addr_t scratch)\n{\n'
 PARENTS_BEFORE = '\tfor (size_t i = sizeof("/private/var/ngpu/") - 1; parent[i]; ++i) {\n'
 PARENTS_AFTER = ('\t/* NABU_GPU_USERPROBE_PARENTS_V1: create ngpu before its children. */\n'
                  '\tfor (size_t i = sizeof("/private/var/") - 1; parent[i]; ++i) {\n')
+CACHE_ENTRY_COUNT = 4
 RAM_HELPER = r'''/* NABU_GPU_USERPROBE_INLINE_V1 */
 #include "NabuGpuUserprobeAddon.h"
 static OSData *nabu_gpu_userprobe_retained;
@@ -46,7 +47,7 @@ DATA_BRANCH = '''\t/* NABU_GPU_USERPROBE_JOB_V1 */
 \tuint32_t nabu_probe = 0;
 \tif (PE_parse_boot_argn("nabu-gpu-userprobe", &nabu_probe, sizeof(nabu_probe)) && nabu_probe == 1) {
 \t\tnative_gpu_addon_install(p, scratch);
-\t\tif (native_gpu_addon_files != 2 || native_gpu_addon_failed || native_gpu_addon_error) {
+\t\tif (native_gpu_addon_files != 4 || native_gpu_addon_failed || native_gpu_addon_error) {
 \t\t\tprintf("NabuGPU: userprobe addon refused files=%d failed=%d error=%d render_proof=0\\n",
 \t\t\t    native_gpu_addon_files, native_gpu_addon_failed, native_gpu_addon_error);
 \t\t\treturn;
@@ -60,6 +61,17 @@ DATA_BRANCH = '''\t/* NABU_GPU_USERPROBE_JOB_V1 */
 \t\tprintf("NabuGPU: userprobe addon files=%d written=%d same=%d job_stage=%d job_status=%d render_proof=0\\n",
 \t\t    native_gpu_addon_files, native_gpu_addon_written, native_gpu_addon_same,
 \t\t    native_gpu_addon2_stage, native_gpu_addon2_status);
+\t\tif (native_gpu_addon2_stage != 5 || native_gpu_addon2_status) return;
+\t\t/* The original launchd accepts system jobs from its verified cache.
+\t\t * Keep every original job and let its original loader authenticate this
+\t\t * owner-signed cache through the explicitly supplied trust module. */
+\t\tstatic const char cache_source[] = "/private/var/ngpu/cache";
+\t\tstatic const char cache_point[] = "/System/Library/xpc";
+\t\tnative_gpu_addon_mount(p, scratch, 0x400, cache_source, sizeof(cache_source),
+\t\t    cache_point, sizeof(cache_point), "/System/Library/xpc/foreground_user_endpoints.plist",
+\t\t    "/System/Library/xpc/launchd.plist.sig", &native_gpu_addon_stage, &native_gpu_addon_status);
+\t\tprintf("NabuGPU: userprobe cache_stage=%d cache_status=%d owner_signed=1 original_jobs_preserved=1 render_proof=0\\n",
+\t\t    native_gpu_addon_stage, native_gpu_addon_status);
 \t\treturn;
 \t}
 '''
