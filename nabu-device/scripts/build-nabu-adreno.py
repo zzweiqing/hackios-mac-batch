@@ -137,6 +137,9 @@ def main():
     if sys.platform != 'darwin':
         raise SystemExit('Apple archive compilation runs in the macOS GitHub Actions workflow')
     metal = os.environ.get('NABU_GPU_METAL') == '1'
+    userprobe = os.environ.get('NABU_GPU_USERPROBE') == '1'
+    if userprobe and not metal:
+        raise SystemExit('GPU userprobe boot support is not part of the diagnostic profile')
     for name in ('XNU_NATIVE_ADRENO', 'XNU_NATIVE_UFS', 'XNU_OWNER_ROOT_TRUST', 'NABU_CAPTURE_LOG'):
         if os.environ.get(name) != '1':
             raise SystemExit('A640 diagnostic requires ' + name + '=1')
@@ -269,6 +272,7 @@ def main():
               'archive_sha256': sha(archive.read_bytes()),
               'kernelcache': str(kernelcache), 'kernelcache_sha256': kernelcache_sha,
               'metal_accelerator': metal, 'runtime_qualified': False, 'hardware_tested': False,
+              'gpu_userprobe_boot_support': userprobe,
               'requires_pmap_64bit': True, 'pmap_sync_64bit_verified': True,
               'pmap_source_sha256': sha(pmap_bytes), 'startup': 'EARLY_BOOT thread; wait IOBSD',
               'trigger': 'nabu-gpu=1', 'irq_mode': 'synchronous worker polling',

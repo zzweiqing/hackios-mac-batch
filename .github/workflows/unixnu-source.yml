@@ -61,6 +61,7 @@ jobs:
           git -C unixnu checkout --quiet --detach "$REQUESTED_REF"
           log_args=()
           if [ "$CAPTURE_LOGS" = true ]; then log_args+=(--capture-logs); fi
+          if [ "$GPU_USERPROBE" = true ]; then log_args+=(--gpu-userprobe); fi
           python3 source-ci/prepare_source.py --upstream unixnu --device nabu-device --profile "$REQUESTED_CONFIG" --report "$RUNNER_TEMP/source-prepare.json" "${log_args[@]}"
       - name: Fetch the pinned private small input
         env:

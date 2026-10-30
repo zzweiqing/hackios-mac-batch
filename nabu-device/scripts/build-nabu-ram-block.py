@@ -40,8 +40,22 @@ def main():
         raise SystemExit('Refuse to reuse an existing NativeRamBlock output; use a fresh build root')
     out.mkdir(parents=True)
     persistent_store = os.environ.get('XNU_NATIVE_UFS') == '1'
+    userprobe = os.environ.get('NABU_GPU_USERPROBE') == '1'
+    if userprobe and (os.environ.get('NABU_GPU_METAL') != '1' or not persistent_store or
+                      os.environ.get('XNU_OWNER_DATA_MOUNT') != '1'):
+        raise SystemExit('GPU userprobe boot support requires the Metal/UFS/Data profile')
     source = out / 'NativeRamBlock.cpp'
     text = original.read_text(encoding='utf-8')
+    support = None
+    if userprobe:
+        from nabu_gpu_userprobe_source import ram_source as gpu_userprobe_source
+        header = Path(os.environ['UNIXNU_DEVICE']) / 'platform/NabuGpuUserprobeAddon.h'
+        header_data = header.read_bytes()
+        (out / header.name).write_bytes(header_data)
+        text = gpu_userprobe_source(text)
+        support = {'header_sha256': hashlib.sha256(header_data).hexdigest(),
+                   'generator_sha256': hashlib.sha256(Path(__file__).with_name(
+                       'nabu_gpu_userprobe_source.py').read_bytes()).hexdigest()}
     source.write_text(text if persistent_store else volatile_source(text), encoding='utf-8')
     obj = out / 'NativeRamBlock.o'
     command = platform.compile_command(record, source, obj)
@@ -73,6 +87,7 @@ def main():
         'source': 'drivers/NativeRamBlock/NativeRamBlock.cpp',
         'actual_source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
         'optional_ufs_persistence': persistent_store,
+        'gpu_userprobe_addon': support,
         'object_sha256': hashlib.sha256(data).hexdigest(),
         'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
         'compiled': True, 'linked': False, 'hardware_tested': False,

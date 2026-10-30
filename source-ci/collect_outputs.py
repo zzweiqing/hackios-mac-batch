@@ -121,7 +121,8 @@ def selected_files(upstream):
             elif relative == 'native-ufs' and (path.suffix in ('.cpp', '.h') or
                                                path.name in ('NativeUfs.o', 'compile.log')):
                 add(path, path.relative_to(work))
-            elif relative == 'native-ram-block' and path.name in ('NativeRamBlock.o', 'NativeRamBlock.cpp', 'compile.log'):
+            elif relative == 'native-ram-block' and path.name in (
+                    'NativeRamBlock.o', 'NativeRamBlock.cpp', 'compile.log', 'NabuGpuUserprobeAddon.h'):
                 add(path, path.relative_to(work))
 
     display = build / 'native-legacy-display'
@@ -190,6 +191,8 @@ def selected_sources(device):
         (device / 'scripts/build-nabu-adreno.py', 'device/scripts/build-nabu-adreno.py'),
         (device / 'scripts/nabu_adreno_bindings.py', 'device/scripts/nabu_adreno_bindings.py'),
         (device / 'scripts/build-nabu-gpu-userprobe.py', 'device/scripts/build-nabu-gpu-userprobe.py'),
+        (device / 'scripts/nabu_gpu_userprobe_source.py', 'device/scripts/nabu_gpu_userprobe_source.py'),
+        (device / 'platform/NabuGpuUserprobeAddon.h', 'device/platform/NabuGpuUserprobeAddon.h'),
         (device / 'userprobe/nabu_gpu_userprobe.cpp', 'device/userprobe/nabu_gpu_userprobe.cpp'),
         (device / 'LICENSE', 'device/LICENSE'),
         (device / 'scripts/build-nabu-platform.py', 'device/scripts/build-nabu-platform.py'),
@@ -342,6 +345,7 @@ def main():
                 'ufs_cpu_present': prepared.get('ufs_cpu_present', False),
                 'ufs_gpu': prepared.get('ufs_gpu', False),
                 'ufs_gpu_metal': prepared.get('ufs_gpu_metal', False),
+                'gpu_userprobe_boot': prepared.get('gpu_userprobe_boot', False),
                 'gpu': ({**gpu_contract(prepared.get('profile'))} if prepared.get('ufs_gpu') is True else None),
                 'display_reference': prepared.get('display_reference'),
                 'log_capture': prepared.get('log_capture'),
@@ -420,6 +424,8 @@ def main():
                     raise ValueError('GPU candidate requires its explicit profile and persisted logging contract')
                 manifest['gpu_qualification'] = qualify_gpu_candidate(
                     args.upstream, args.device, candidate, expected_profile=identity['profile'])
+                if prepared.get('gpu_userprobe_boot') is True and not manifest['gpu_qualification'].get('userprobe_boot'):
+                    raise ValueError('Requested GPU userprobe boot support was not qualified')
                 summary['gpu_qualified_statically'] = True
             elif identity['ufs_gpu'] or prepared.get('gpu'):
                 raise ValueError('GPU contract is only valid for the explicit GPU profiles')

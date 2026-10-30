@@ -15,6 +15,7 @@ Neither profile claims a runtime capability: ``runtime_qualified`` and
 ``hardware_tested`` stay false, and compiling the publication path is not
 evidence that the service was published.
 """
+import ast
 import hashlib
 import json
 from pathlib import PurePosixPath
@@ -172,7 +173,7 @@ def archive_members(data):
     return result
 
 
-def candidate_definitions(data, profile=PROFILE):
+def candidate_definitions(data, profile=PROFILE, extra_required=()):
     """Return (section definitions, absolute original-base bindings)."""
     require(len(data) >= 32 and struct.unpack_from('<4I', data) == (0xfeedfacf, 0x100000c, 0, 2),
             'GPU candidate is not an ARM64 executable')
@@ -192,7 +193,7 @@ def candidate_definitions(data, profile=PROFILE):
     require(offset + number * 16 <= len(data) and strings + length <= len(data),
             'Invalid GPU symbol table bounds')
     metal = accelerator_mode(profile)
-    required = METAL_REQUIRED_SYMBOLS if metal else REQUIRED_SYMBOLS
+    required = set(METAL_REQUIRED_SYMBOLS if metal else REQUIRED_SYMBOLS) | set(extra_required)
     forbidden = set() if metal else FORBIDDEN_SYMBOLS
     found, bindings = {}, {}
     for index in range(number):
@@ -217,6 +218,55 @@ def candidate_definitions(data, profile=PROFILE):
     require(set(found) == required,
             ('Missing GPU definitions: ' if metal else 'Missing GPU diagnostic definitions: ') + missing)
     return found, bindings
+
+
+def qualify_userprobe_boot(read, candidate):
+    """Bind the optional closed addon transport to compiled RAM and XNU inputs."""
+    prefix = 'outputs/tree/build/native-ram-block/'
+    ram_report = json_object(read(prefix + 'build-report.json'))
+    support = ram_report.get('gpu_userprobe_addon')
+    require(isinstance(support, dict) and ram_report.get('compiled') is True,
+            'Missing compiled GPU userprobe RAM support')
+    header = read('device/platform/NabuGpuUserprobeAddon.h')
+    generator = read('device/scripts/nabu_gpu_userprobe_source.py')
+    require(support.get('header_sha256') == sha(header) and
+            support.get('generator_sha256') == sha(generator) and
+            read(prefix + 'NabuGpuUserprobeAddon.h') == header,
+            'GPU userprobe boot input identity mismatch')
+    constants = {}
+    for item in ast.parse(generator.decode('utf-8')).body:
+        if isinstance(item, ast.Assign) and len(item.targets) == 1 and isinstance(item.targets[0], ast.Name):
+            if item.targets[0].id in ('RAM_HELPER', 'RAM_GATE', 'DATA_BRANCH'):
+                constants[item.targets[0].id] = ast.literal_eval(item.value).encode()
+    require(set(constants) == {'RAM_HELPER', 'RAM_GATE', 'DATA_BRANCH'} and
+            all(constants.values()), 'GPU userprobe source generator contract changed')
+    ram = read(prefix + 'NativeRamBlock.cpp')
+    require(ram_report.get('actual_source_sha256') == sha(ram) and
+            ram.count(constants['RAM_HELPER']) == 1 and ram.count(constants['RAM_GATE']) == 1,
+            'Actual RAM source lacks the closed inline GPU userprobe transport')
+    obj = read(prefix + 'NativeRamBlock.o')
+    archive = read(prefix + 'libNativeRamBlock.a')
+    members = archive_members(archive)
+    require(ram_report.get('object_sha256') == sha(obj) and
+            ram_report.get('archive_sha256') == sha(archive) and
+            set(members) == {'NativeRamBlock.o'} and members['NativeRamBlock.o'] == obj,
+            'GPU userprobe RAM object/archive binding mismatch')
+    data_path = 'outputs/tree/.cache/xnu-work/bsd/kern/kern_exec.c'
+    data = read(data_path)
+    capture = json_object(read('outputs/tree/build/nabu-log/source-report.json'))
+    require(data.count(constants['DATA_BRANCH']) == 1 and capture.get('gpu_userprobe_boot') is True and
+            capture.get('hooks', {}).get('bsd/kern/kern_exec.c') == sha(data),
+            'Actual XNU source lacks the opt-in owner probe job')
+    definitions, _ = candidate_definitions(candidate, METAL_PROFILE, {'_native_ram_block_gpu_addon'})
+    require(b'NabuGPU: userprobe addon' in candidate and b'nabu-gpu-userprobe-addon' in candidate,
+            'Final kernel lacks GPU userprobe boot code')
+    return {'mode': 'closed_inline_abi1_probe', 'trigger': 'nabu-gpu-userprobe=1',
+            'header_sha256': sha(header), 'generator_sha256': sha(generator),
+            'ram_source_sha256': sha(ram), 'ram_object_sha256': sha(obj),
+            'ram_archive_sha256': sha(archive), 'data_source_sha256': sha(data),
+            'ram_entry': definitions['_native_ram_block_gpu_addon'],
+            'apple_jobs_replaced': False, 'compiled': True, 'runtime_qualified': False,
+            'hardware_tested': False, 'rendering_qualified': False}
 
 
 def accelerator_bindings(read, candidate, report):
@@ -421,6 +471,11 @@ def qualify_gpu_bundle(read, candidate, source_names, profile=PROFILE):
                 'Accelerator original-base bindings do not match the candidate symbol table')
         result['bindings'] = bindings
         result['final_bindings'] = bound
+        if report.get('gpu_userprobe_boot_support') is True:
+            result['userprobe_boot'] = qualify_userprobe_boot(read, candidate)
+    else:
+        require(not report.get('gpu_userprobe_boot_support'),
+                'Diagnostic GPU profile contains userprobe boot support')
     return result
 
 

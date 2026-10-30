@@ -602,9 +602,12 @@ def main():
     p.add_argument('--report', type=Path, required=True)
     p.add_argument('--profile', choices=PROFILES, default=PROFILES[0])
     p.add_argument('--capture-logs', action='store_true', help='Build the explicit RAM/ESP logging capability; writes remain opt-in')
+    p.add_argument('--gpu-userprobe', action='store_true', help='Enable the closed ABI1 probe addon boot transport')
     args = p.parse_args()
     if args.capture_logs and args.profile not in UFS_OWNER_PROFILES:
         raise SystemExit('Log persistence is only qualified for explicit hardware UFS owner profiles')
+    if args.gpu_userprobe and (args.profile != UFS_GPU_METAL_PROFILE or not args.capture_logs):
+        raise SystemExit('GPU userprobe boot support requires the explicit captured Metal profile')
     if args.profile == 'nabu_ufs_root_defconfig':
         select_ufs_root_profile(args.device, args.upstream)
     elif args.profile == 'nabu_ufs_data_defconfig':
@@ -627,6 +630,14 @@ def main():
         select_ufs_profile(args.device, args.profile == 'nabu_ufs_readonly_defconfig')
     elif args.profile != 'nabu_bootstrap_defconfig':
         select_storage_profile(args.device, args.upstream, args.profile == 'nabu_qemu_root_defconfig')
+    if args.gpu_userprobe:
+        kernel = args.upstream / 'scripts/unixnu/kernel.py'
+        text = kernel.read_text(encoding='utf-8')
+        anchor = '    build_archives(ctx, env)\n'
+        if text.count(anchor) != 1:
+            raise ValueError('Expected one archive entry for GPU userprobe support')
+        kernel.write_text(text.replace(anchor, "    env['NABU_GPU_USERPROBE'] = '1'\n" + anchor, 1),
+                          encoding='utf-8')
     board = validate_profile(args.device)
     head = subprocess.check_output(['git', '-C', str(args.upstream), 'rev-parse', 'HEAD'], text=True).strip()
     if head != UPSTREAM:
@@ -690,6 +701,7 @@ def main():
         'ufs_cpu_present': args.profile == UFS_CPU_PRESENT_PROFILE,
         'ufs_gpu': args.profile in (UFS_GPU_PROFILE, UFS_GPU_METAL_PROFILE),
         'ufs_gpu_metal': args.profile == UFS_GPU_METAL_PROFILE,
+        'gpu_userprobe_boot': args.gpu_userprobe,
         'gpu': ({'mode': 'a640_metal', 'firmware_mode': 'adt', 'trigger': 'nabu-gpu=1',
                  'metal_accelerator': True, 'runtime_qualified': False}
                 if args.profile == UFS_GPU_METAL_PROFILE else

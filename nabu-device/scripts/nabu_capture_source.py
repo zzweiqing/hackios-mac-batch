@@ -3,8 +3,19 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
+
+
+def gpu_userprobe_data_source(text, restore=False):
+    # Disabled profiles do not load the probe transform or its boot inputs.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('gpu_userprobe_boot_source',
+        Path(__file__).with_name('nabu_gpu_userprobe_source.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.data_source(text, restore=restore)
 
 
 def replace_once(text, old, new):
@@ -301,6 +312,8 @@ def apply(root, device):
         result = path.read_text(encoding='utf-8')
         for transform in transforms:
             result = transform(result)
+        if relative == 'bsd/kern/kern_exec.c' and os.environ.get('NABU_GPU_USERPROBE') == '1':
+            result = gpu_userprobe_data_source(result)
         path.write_text(result, encoding='utf-8')
         changed[relative] = hashlib.sha256(result.encode()).hexdigest()
     for name in ('NabuLogCore.h', 'NabuLogFormat.h'):
@@ -322,6 +335,7 @@ def apply(root, device):
         'user_exception_delivery_unchanged': True,
         'exit_panic_state': 'existing SpringBoard error-exit panic only; no new panic trigger',
         'data_mount_trace': 'NABU_CAPTURE_V2_3' in (xnu / 'bsd/kern/kern_exec.c').read_text(),
+        'gpu_userprobe_boot': os.environ.get('NABU_GPU_USERPROBE') == '1',
         'data_trace_stages': {'1': 'seed ready', '2': 'mount enter',
                               '3': 'mount returned', '4': 'lookup returned',
                               '5': 'validation/skeleton returned', '6': 'prepare returned'},
@@ -339,6 +353,8 @@ if __name__ == '__main__':
         if path.exists():
             before = path.read_text(encoding='utf-8')
             after = patch_data_mount(before, restore=True)
+            if 'NABU_GPU_USERPROBE_JOB_V1' in after:
+                after = gpu_userprobe_data_source(after, restore=True)
             if before != after:
                 path.write_text(after, encoding='utf-8')
     elif a.device:
