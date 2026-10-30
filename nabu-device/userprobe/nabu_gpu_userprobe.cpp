@@ -108,8 +108,10 @@ static Outcome run(const Transport &transport) {
         if (!call("device_info", NativeAdrenoMethodGetDeviceInfo, nullptr, 0, &info, sizeof(info))) return false;
         uint64_t iovas[2]{};
         if (!addresses(params, info, iovas)) return invalid(kWrongDevice);
+        NativeAdrenoAbiQueue create_request{};
         NativeAdrenoAbiQueueReply created{};
-        if (!call("queue_create", NativeAdrenoMethodCreateQueue, nullptr, 0, &created, sizeof(created))) return false;
+        if (!call("queue_create", NativeAdrenoMethodCreateQueue, &create_request, sizeof(create_request),
+                  &created, sizeof(created))) return false;
         queue = created.queue;
         if (!queue || queue >= NativeAdrenoAbiMaxQueues) { queue = 0; return invalid(kMalformed); }
         for (unsigned i = 0; i < 2; ++i) {
