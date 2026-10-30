@@ -56,6 +56,7 @@ extern NativeAdrenoMetalDiag native_adreno_metal_diag;
 extern NativeAdrenoOpenRecord native_adreno_open_log[8];
 extern volatile uint32_t native_adreno_method_stats[20][4];
 }
+extern "C" void nabu_capture_append(const char *,unsigned);
 #endif
 extern "C" {
 volatile uint64_t native_adreno_fence_phys=0;
@@ -70,16 +71,49 @@ class NabuMetalObservation final {
     bool enabled_=false;
     unsigned next_=0;
     uint64_t since_=0;
+    bool probeEnabled_=false;
+    unsigned probeSamples_=0;
+    uint64_t probeNext_=0;
+    void probeSample(uint64_t current,uint32_t submitted,uint32_t completed)
+    {
+        if(!probeEnabled_ || probeSamples_>=32 || current<since_)return;
+        const uint64_t elapsed=current-since_;
+        if(elapsed<probeNext_ || probeNext_==UINT64_MAX)return;
+        probeNext_=elapsed>=UINT64_MAX-10000000?UINT64_MAX:elapsed+10000000;
+        const unsigned sample=++probeSamples_;
+        const NativeAdrenoMetalDiag diag=native_adreno_metal_diag;
+        char line[256],report[sizeof(diag.report)];
+        for(unsigned i=0;i<sizeof(report);++i) {
+            const unsigned char ch=static_cast<unsigned char>(diag.report[i]);
+            report[i]=ch>=32 && ch<127?char(ch):'_';
+            if(!ch){report[i]=0;break;}
+        }
+        report[sizeof(report)-1]=0;
+        int bytes=snprintf(line,sizeof(line),
+            "NabuGPU: userprobe_tick=%u since_ready_us=%llu opens=%u closes=%u calls=%u selector=%u status=%08x inflight=%u submitted=%u completed=%u snapshot=non-atomic render_proof=0\n",
+            sample,static_cast<unsigned long long>(elapsed),diag.opens,diag.closes,diag.calls,diag.last_selector,diag.last_status,
+            diag.inflight,submitted,completed);
+        if(bytes>0 && unsigned(bytes)<sizeof(line))nabu_capture_append(line,unsigned(bytes));
+        bytes=snprintf(line,sizeof(line),"NabuGPU: userprobe_report=%u opener=%.*s text=%s\n",
+            sample,17,diag.opener[0],report);
+        if(bytes>0 && unsigned(bytes)<sizeof(line))nabu_capture_append(line,unsigned(bytes));
+    }
 public:
     void start(bool enabled,uint64_t current)
     {
         enabled_=enabled;next_=0;since_=current;
+        probeEnabled_=false;probeSamples_=0;probeNext_=0;
         if(enabled_) {
             IOLog("NabuGPU: Metal observations enabled slots=4 at_seconds=0,10,30,120\n");
         }
     }
+    void enableProbe(bool enabled) {probeEnabled_=enabled;}
     void sample(uint64_t current,uint32_t submitted,uint32_t completed,int progress)
     {
+        /* The explicit user probe gets at most 32 pairs of GPU software-state
+         * records through the existing RAM ring, independent of IOLog console
+         * routing. This neither adds a thread nor changes the GPU verdict. */
+        probeSample(current,submitted,completed);
         static const unsigned seconds[4]={0,10,30,120};
         if(!enabled_ || next_>=4 || current<since_)return;
         const uint64_t elapsed=current-since_;
@@ -1058,6 +1092,9 @@ IOReturn A640State::start()
     unsigned observe=0;
     PE_parse_boot_argn("nabu-gpu-observe",&observe,sizeof(observe));
     observation_.start(observe==1,now(nullptr));
+    unsigned probe=0;
+    PE_parse_boot_argn("nabu-gpu-userprobe",&probe,sizeof(probe));
+    observation_.enableProbe(probe==1);
 #endif
     native_adreno_a6xx_stats[0]=7;
     nabuGpuState(7,0,"ready");

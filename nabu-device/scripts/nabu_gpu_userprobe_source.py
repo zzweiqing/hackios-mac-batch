@@ -4,6 +4,9 @@ RAM_ANCHOR = 'extern "C" int native_ram_block_gpu_addon(const uint8_t **data,uin
 RAM_MARKER = '/* NABU_GPU_USERPROBE_INLINE_V1 */'
 DATA_MARKER = '\t/* NABU_GPU_USERPROBE_JOB_V1 */\n'
 DATA_ANCHOR = 'native_gpu_addon_prepare(proc_t p, user_addr_t scratch)\n{\n'
+PARENTS_BEFORE = '\tfor (size_t i = sizeof("/private/var/ngpu/") - 1; parent[i]; ++i) {\n'
+PARENTS_AFTER = ('\t/* NABU_GPU_USERPROBE_PARENTS_V1: create ngpu before its children. */\n'
+                 '\tfor (size_t i = sizeof("/private/var/") - 1; parent[i]; ++i) {\n')
 RAM_HELPER = r'''/* NABU_GPU_USERPROBE_INLINE_V1 */
 #include "NabuGpuUserprobeAddon.h"
 static OSData *nabu_gpu_userprobe_retained;
@@ -81,7 +84,10 @@ def data_source(text, restore=False):
     if DATA_MARKER in text:
         if text.count(DATA_BRANCH) != 1:
             raise ValueError('GPU userprobe Data source changed after patching')
-        return text.replace(DATA_BRANCH, '', 1) if restore else text
+        if text.count(PARENTS_AFTER) != 1 or PARENTS_BEFORE in text:
+            raise ValueError('GPU userprobe parent creation changed after patching')
+        return text.replace(DATA_BRANCH, '', 1).replace(PARENTS_AFTER, PARENTS_BEFORE, 1) if restore else text
     if restore:
         return text
+    text = once(text, PARENTS_BEFORE, PARENTS_AFTER)
     return once(text, DATA_ANCHOR, DATA_ANCHOR + DATA_BRANCH)

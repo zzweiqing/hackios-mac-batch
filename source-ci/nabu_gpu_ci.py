@@ -236,9 +236,9 @@ def qualify_userprobe_boot(read, candidate):
     constants = {}
     for item in ast.parse(generator.decode('utf-8')).body:
         if isinstance(item, ast.Assign) and len(item.targets) == 1 and isinstance(item.targets[0], ast.Name):
-            if item.targets[0].id in ('RAM_HELPER', 'RAM_GATE', 'DATA_BRANCH'):
+            if item.targets[0].id in ('RAM_HELPER', 'RAM_GATE', 'DATA_BRANCH', 'PARENTS_BEFORE', 'PARENTS_AFTER'):
                 constants[item.targets[0].id] = ast.literal_eval(item.value).encode()
-    require(set(constants) == {'RAM_HELPER', 'RAM_GATE', 'DATA_BRANCH'} and
+    require({'RAM_HELPER', 'RAM_GATE', 'DATA_BRANCH'} <= set(constants) and
             all(constants.values()), 'GPU userprobe source generator contract changed')
     ram = read(prefix + 'NativeRamBlock.cpp')
     require(ram_report.get('actual_source_sha256') == sha(ram) and
@@ -257,10 +257,15 @@ def qualify_userprobe_boot(read, candidate):
     require(data.count(constants['DATA_BRANCH']) == 1 and capture.get('gpu_userprobe_boot') is True and
             capture.get('hooks', {}).get('bsd/kern/kern_exec.c') == sha(data),
             'Actual XNU source lacks the opt-in owner probe job')
+    parents_fixed = 'PARENTS_AFTER' in constants
+    if parents_fixed:
+        require(data.count(constants['PARENTS_AFTER']) == 1 and constants['PARENTS_BEFORE'] not in data,
+                'Actual XNU addon installer still skips its missing ngpu root directory')
     definitions, _ = candidate_definitions(candidate, METAL_PROFILE, {'_native_ram_block_gpu_addon'})
     require(b'NabuGPU: userprobe addon' in candidate and b'nabu-gpu-userprobe-addon' in candidate,
             'Final kernel lacks GPU userprobe boot code')
     return {'mode': 'closed_inline_abi1_probe', 'trigger': 'nabu-gpu-userprobe=1',
+            **({'parent_root_creation': True} if parents_fixed else {}),
             'header_sha256': sha(header), 'generator_sha256': sha(generator),
             'ram_source_sha256': sha(ram), 'ram_object_sha256': sha(obj),
             'ram_archive_sha256': sha(archive), 'data_source_sha256': sha(data),
