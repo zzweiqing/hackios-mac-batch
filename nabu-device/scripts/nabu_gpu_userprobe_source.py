@@ -41,6 +41,53 @@ void nabu_gpu_userprobe_exec_snapshot(uint32_t out[6])
 }
 
 '''
+EXEC_TRACE_DECL_ANCHOR = 'struct image_params;    /* Forward */\n'
+EXEC_TRACE_DECL = 'static void nabu_gpu_userprobe_exec_stage(int, struct image_params *, const char *, int);\n'
+EXEC_TRACE_HELPER = '''/* NABU_GPU_USERPROBE_EXEC_STAGES_V1: only the already selected exec PID. */
+static unsigned nabu_probe_exec_trace_count;
+extern void nabu_capture_append(const char *, unsigned);
+static void nabu_gpu_userprobe_exec_stage(int pid, struct image_params *imgp, const char *stage, int result)
+{
+\tif (pid <= 0 || (uint32_t)pid != __atomic_load_n(&nabu_probe_process[3], __ATOMIC_RELAXED) ||
+\t    !nabu_gpu_userprobe_process_enabled() ||
+\t    __atomic_fetch_add(&nabu_probe_exec_trace_count, 1, __ATOMIC_RELAXED) >= 32) return;
+\tchar line[224];
+\t/* getattr has succeeded before either of these two call sites. */
+\tconst struct vnode_attr *va = (!strcmp(stage, "mac_exec") || !strcmp(stage, "authorize")) ? imgp->ip_vattr : NULL;
+\tconst int bytes = snprintf(line, sizeof(line),
+\t    "NabuGPU: probe_exec_stage=%s pid=%d result=%d mac_return=%d csflags=%x flags=%x mode=%o size=%llu\\n",
+\t    stage, pid, result, imgp->ip_mac_return, (unsigned)imgp->ip_csflags, (unsigned)imgp->ip_flags,
+\t    va ? (unsigned)va->va_mode : 0, va ? (unsigned long long)va->va_data_size : 0);
+\tif (bytes > 0 && (unsigned)bytes < sizeof(line)) nabu_capture_append(line, (unsigned)bytes);
+}
+
+'''
+# Every replacement preserves the original check, return value and order. These
+# are per-probe records in the existing RAM capture, not a global exec tracer.
+EXEC_TRACE_PAIRS = (
+    ('\terror = namei(ndp);\n\tif (error) {\n\t\tif (error == ERESTART)',
+     '\terror = namei(ndp);\n\tnabu_gpu_userprobe_exec_stage(proc_getpid(p), imgp, "lookup", error);\n'
+     '\tif (error) {\n\t\tif (error == ERESTART)'),
+    ('\terror = exec_check_permissions(imgp);\n',
+     '\terror = exec_check_permissions(imgp);\n'
+     '\tnabu_gpu_userprobe_exec_stage(proc_getpid(p), imgp, "permissions", error);\n'),
+    ('\t\terror = (*execsw[i].ex_imgact)(imgp);\n',
+     '\t\terror = (*execsw[i].ex_imgact)(imgp);\n'
+     '\t\tnabu_gpu_userprobe_exec_stage(proc_getpid(p), imgp, "image", error);\n'),
+    ('\terror = mac_vnode_check_exec(imgp->ip_vfs_context, vp, imgp);\n',
+     '\terror = mac_vnode_check_exec(imgp->ip_vfs_context, vp, imgp);\n'
+     '\tnabu_gpu_userprobe_exec_stage(proc_getpid(p), imgp, "mac_exec", error);\n'),
+    ('\tif ((error = vnode_authorize(vp, NULL, action, imgp->ip_vfs_context)) != 0) {\n',
+     '\terror = vnode_authorize(vp, NULL, action, imgp->ip_vfs_context);\n'
+     '\tnabu_gpu_userprobe_exec_stage(proc_getpid(p), imgp, "authorize", error);\n'
+     '\tif (error != 0) {\n'),
+    ('\tlret = load_machfile(imgp, mach_header, thread, &map, &load_result);\n',
+     '\tlret = load_machfile(imgp, mach_header, thread, &map, &load_result);\n'
+     '\tnabu_gpu_userprobe_exec_stage(proc_getpid(p), imgp, "mach_load", (int)lret);\n'),
+    ('\terror = exec_handle_sugid(imgp);\n',
+     '\terror = exec_handle_sugid(imgp);\n'
+     '\tnabu_gpu_userprobe_exec_stage(proc_getpid(p), imgp, "sugid", error);\n'),
+)
 EXIT_ANCHOR = ('int\nexit_with_reason(proc_t p, int rv, int *retval, boolean_t thread_can_terminate, boolean_t perf_notify,\n'
                 '    int jetsam_flags, struct os_reason *exit_reason)\n{\n')
 EXIT_HOOK = '''\t/* NABU_GPU_USERPROBE_EXIT_V1: a successful exit must also leave evidence. */
@@ -148,7 +195,33 @@ def data_source(text, restore=False):
     return exec_source(once(text, DATA_ANCHOR, DATA_ANCHOR + DATA_BRANCH))
 
 
+def exec_trace_source(text, restore=False):
+    marker = '/* NABU_GPU_USERPROBE_EXEC_STAGES_V1:'
+    if marker in text and EXEC_TRACE_HELPER not in text:
+        raise ValueError('GPU userprobe exec stage helper changed')
+    if EXEC_TRACE_HELPER in text:
+        if text.count(EXEC_TRACE_DECL_ANCHOR + EXEC_TRACE_DECL) != 1 or any(
+                text.count(after) != 1 for _, after in EXEC_TRACE_PAIRS):
+            raise ValueError('GPU userprobe exec stage hooks changed')
+        if not restore:
+            return text
+        text = once(text, EXEC_TRACE_DECL, '')
+        text = once(text, EXEC_TRACE_HELPER, '')
+        for before, after in EXEC_TRACE_PAIRS:
+            text = once(text, after, before)
+        return text
+    if restore:
+        return text
+    text = once(text, EXEC_TRACE_DECL_ANCHOR, EXEC_TRACE_DECL_ANCHOR + EXEC_TRACE_DECL)
+    text = once(text, EXEC_HELPER, EXEC_HELPER + EXEC_TRACE_HELPER)
+    for before, after in EXEC_TRACE_PAIRS:
+        text = once(text, before, after)
+    return text
+
+
 def exec_source(text, restore=False):
+    if restore:
+        text = exec_trace_source(text, restore=True)
     enter = '\tDTRACE_PROC1(exec, uintptr_t, excpath);\n'
     returned = '\tkfree_type(struct nameidata, ndp);\n\n\treturn error;\n'
     if 'NABU_GPU_USERPROBE_PROCESS_V1' in text and EXEC_HELPER not in text:
@@ -158,7 +231,7 @@ def exec_source(text, restore=False):
             if text.count(expected) != 1:
                 raise ValueError('GPU userprobe process observer changed')
         if not restore:
-            return text
+            return exec_trace_source(text)
         for old, new in ((EXEC_HELPER, ''), (EXEC_LOCAL, ''), (EXEC_ENTER, ''), (EXEC_RETURN, '')):
             text = once(text, old, new)
         return text
@@ -166,7 +239,7 @@ def exec_source(text, restore=False):
         return text
     text = once(text, EXEC_ANCHOR, EXEC_HELPER + EXEC_ANCHOR + EXEC_LOCAL)
     text = once(text, enter, enter + EXEC_ENTER)
-    return once(text, returned, EXEC_RETURN + returned)
+    return exec_trace_source(once(text, returned, EXEC_RETURN + returned))
 
 
 def exit_source(text, restore=False):

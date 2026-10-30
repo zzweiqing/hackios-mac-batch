@@ -1001,8 +1001,8 @@ IOReturn A640State::startCp()
     info_.va_start=0x20000000;                /* client VA contract, not A640-verified */
     info_.va_size=0x60000000;
     info_.highest_bank_bit=resources_.highestBankBit;
-    info_.ubwc_swizzle=0;                     /* not established for A640; 6 is A642L only */
-    info_.macrotile_mode=0;                   /* not established for A640 */
+    info_.ubwc_swizzle=6;                     /* UBWC 3.0 keeps bank swizzle levels 2 and 3. */
+    info_.macrotile_mode=0;                   /* 4 channels; 8-channel mode starts at UBWC 3.1. */
     info_.ubwc_version=resources_.ubwcMode;   /* ADT qcom,ubwc-mode 3 */
     info_.flags=NativeAdrenoDeviceClientIova; /* no cached-coherent claim yet */
     const IOReturn published=native_adreno_publish(gpuContext_.vm(),&submit_,&ring_,&clock_,

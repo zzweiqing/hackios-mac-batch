@@ -236,6 +236,7 @@ def qualify_userprobe_boot(read, candidate):
     constants = {}
     cache_entries = None
     process_constants = {}
+    exec_trace_constants = {}
     for item in ast.parse(generator.decode('utf-8')).body:
         if isinstance(item, ast.Assign) and len(item.targets) == 1 and isinstance(item.targets[0], ast.Name):
             if item.targets[0].id in ('RAM_HELPER', 'RAM_GATE', 'DATA_BRANCH', 'PARENTS_BEFORE', 'PARENTS_AFTER'):
@@ -244,6 +245,8 @@ def qualify_userprobe_boot(read, candidate):
                 cache_entries = ast.literal_eval(item.value)
             elif item.targets[0].id in ('EXEC_HELPER', 'EXEC_LOCAL', 'EXEC_ENTER', 'EXEC_RETURN', 'EXIT_HOOK'):
                 process_constants[item.targets[0].id] = ast.literal_eval(item.value).encode()
+            elif item.targets[0].id in ('EXEC_TRACE_HELPER', 'EXEC_TRACE_DECL', 'EXEC_TRACE_PAIRS'):
+                exec_trace_constants[item.targets[0].id] = ast.literal_eval(item.value)
     require({'RAM_HELPER', 'RAM_GATE', 'DATA_BRANCH'} <= set(constants) and
             all(constants.values()), 'GPU userprobe source generator contract changed')
     ram = read(prefix + 'NativeRamBlock.cpp')
@@ -281,6 +284,14 @@ def qualify_userprobe_boot(read, candidate):
         require(exit_source.count(process_constants['EXIT_HOOK']) == 1 and
                 capture.get('hooks', {}).get('bsd/kern/kern_exit.c') == sha(exit_source),
                 'Actual XNU source lacks the bounded probe exit observer')
+    if exec_trace_constants:
+        require(set(exec_trace_constants) == {'EXEC_TRACE_HELPER', 'EXEC_TRACE_DECL', 'EXEC_TRACE_PAIRS'} and
+                data.count(exec_trace_constants['EXEC_TRACE_HELPER'].encode()) == 1 and
+                data.count(exec_trace_constants['EXEC_TRACE_DECL'].encode()) == 1 and
+                all(data.count(after.encode()) == 1 for _, after in exec_trace_constants['EXEC_TRACE_PAIRS']),
+                'Actual XNU source lacks the bounded probe exec-stage observations')
+        require(b'NabuGPU: probe_exec_stage=' in candidate,
+                'Final kernel lacks the probe exec-stage record format')
     extra_required = {'_native_ram_block_gpu_addon'}
     if process_bound:
         extra_required |= {'_nabu_gpu_userprobe_exit_note', '_nabu_gpu_userprobe_exec_snapshot',
@@ -291,6 +302,7 @@ def qualify_userprobe_boot(read, candidate):
     return {'mode': 'closed_inline_abi1_probe', 'trigger': 'nabu-gpu-userprobe=1',
             **({'parent_root_creation': True} if parents_fixed else {}),
             **({'owner_job_cache': True, 'addon_files': 4} if cache_entries == 4 else {}),
+            **({'exec_stage_observer': True, 'exec_stage_records_maximum': 32} if exec_trace_constants else {}),
             **({'process_observer': True, 'exit_source_sha256': sha(exit_source),
                 'process_symbols': {name: definitions[name] for name in sorted(extra_required)}} if process_bound else {}),
             'header_sha256': sha(header), 'generator_sha256': sha(generator),

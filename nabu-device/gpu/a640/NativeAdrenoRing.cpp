@@ -172,13 +172,17 @@ IOReturn NativeAdrenoRing::emitPrologue(uint32_t at,bool reset,uint32_t *end)
 {
     const uint32_t mask=(uint32_t)(ring_bytes_/4-1);
     if(nativeAdrenoA6xx(generation_)) {
-        uint32_t words[6]={0};
-        const uint32_t disable=0x101,start=0xd;
+        uint32_t words[7]={0};
+        const uint32_t disable=0x101,start=0xd,invalidate=RingCacheInvalidate;
         size_t count=packet(words,0,RingSetMarker,&disable,1);
-        count=packet(words,count,RingSetMarker,&start,1);
         if(reset) {
             count=packet(words,count,RingWaitForIdle,nullptr,0);
+            /* Context entry must invalidate UCHE before the new user's IBs,
+             * as a6xx_set_pagetable() and KGSL a6xx_rb_context_switch() do. */
+            count=packet(words,count,RingFenceOpcode,&invalidate,1);
         }
+        count=packet(words,count,RingSetMarker,&start,1);
+        if(count!=(reset?7u:4u))return poison();
         for(size_t i=0;i<count;++i) {
             ring_[(at+i)&mask]=words[i];
         }
@@ -490,7 +494,7 @@ IOReturn NativeAdrenoRing::submitWords(const uint32_t *words, size_t word_count,
         fence_bytes_ >= RingProfileOffset + RingProfileSlotBytes * RingProfileSlots &&
         !profileWindows_[profileSlot] && NativeAdrenoGpuProfile::active();
     const uint32_t frameExtra = nativeAdrenoA6xx(generation_) ?
-        (framed ? 4 + (reset ? 1 : 0) + RingFenceWords + 8 : RingFenceWords) :
+        (framed ? 4 + (reset ? 3 : 0) + RingFenceWords + 8 : RingFenceWords) :
         (framed ? RingPrologueWords + (reset ? RingResetWords : 0) + RingFramedFenceWords : RingFenceWords);
     const uint32_t extra = frameExtra + (profiling ? RingProfileWords : 0);
     if (word_count > size_words - extra - 8) {
