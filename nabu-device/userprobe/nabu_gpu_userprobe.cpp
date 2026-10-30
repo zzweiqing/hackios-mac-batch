@@ -319,6 +319,11 @@ void watchdog(int) {
 int main(int argc, char **argv) {
     nonblocking_output(STDOUT_FILENO);
     nonblocking_output(STDERR_FILENO);
+    // Keep stage text in this bounded buffer until GPU cleanup and the final
+    // marker are done, including when stdout is an automatically line-buffered tty.
+    static char console_buffer[4096];
+    if (std::setvbuf(stdout, console_buffer, _IOFBF, sizeof(console_buffer)) != 0)
+        (void)close(STDOUT_FILENO);
     if (argc != 2 || std::strcmp(argv[1], "--run-owned-bo")) {
         std::fprintf(stderr, "Usage: nabu-gpu-userprobe --run-owned-bo\nOwned BO proof only; no Metal rendering or installation.\n");
         return 2;
