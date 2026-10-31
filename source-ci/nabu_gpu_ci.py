@@ -275,6 +275,18 @@ def qualify_userprobe_boot(read, candidate):
                 b'(native_gpu_addon_files != 4 && native_gpu_addon_files != 5)' in constants['DATA_BRANCH']) and
                 b'cache_point[] = "/System/Library/xpc"' in constants['DATA_BRANCH'],
                 'Owner job-cache source contract changed')
+    # The NativeAdrenoMetal bundle over /System/Library/Extensions, only after the verified cache mount.
+    plugin_bound = b'NABU_GPU_USERPROBE_PLUGIN_V1' in constants['DATA_BRANCH']
+    if plugin_bound:
+        branch = constants['DATA_BRANCH']
+        require(cache_entries == 4 and b'native_gpu_addon_files != 8' in branch and b'native_gpu_addon_files != 9' in branch and
+                b'plugin_point[] = "/System/Library/Extensions"' in branch and
+                b'"/System/Library/Extensions/NativeAdrenoMetal.bundle/Info.plist"' in branch and
+                branch.index(b'cache_point[] = "/System/Library/xpc"') < branch.index(b'plugin_point[]') and
+                b'#define NABU_GPU_USERPROBE_PLUGIN_ADDON_MAX 15728640u' in header and
+                b'"addons/NativeAdrenoMetal.bundle/NativeAdrenoMetal", 0755' in header,
+                'Owner Metal plugin transport contract changed')
+        require(b'NabuGPU: userprobe plugin_stage=' in candidate, 'Final kernel lacks the plugin mount record')
     process_bound = bool(process_constants)
     if process_bound:
         require(set(process_constants) == {'EXEC_HELPER', 'EXEC_LOCAL', 'EXEC_ENTER', 'EXEC_RETURN', 'EXIT_HOOK'} and
@@ -305,6 +317,7 @@ def qualify_userprobe_boot(read, candidate):
             **({'owner_job_cache': True, 'addon_files': 4} if cache_entries == 4 else {}),
             **({'turnip_library_transport': True}
                if b'native_gpu_addon_files != 5' in constants['DATA_BRANCH'] else {}),
+            **({'metal_plugin_transport': True, 'plugin_addon_files': [8, 9]} if plugin_bound else {}),
             **({'exec_stage_observer': True, 'exec_stage_records_maximum': 32} if exec_trace_constants else {}),
             **({'process_observer': True, 'exit_source_sha256': sha(exit_source),
                 'process_symbols': {name: definitions[name] for name in sorted(extra_required)}} if process_bound else {}),

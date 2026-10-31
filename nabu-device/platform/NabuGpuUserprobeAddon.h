@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* Closed ABI1 probe addon, with an optional owner-signed launchd job cache and,
- * with that cache, an optional owner-signed Turnip library for the Vulkan known-image test. */
+ * with that cache, an optional owner-signed Turnip library for the Vulkan known-image test
+ * or the owner-signed NativeAdrenoMetal plugin bundle for the original Metal discovery. */
 #ifndef NABU_GPU_USERPROBE_ADDON_H
 #define NABU_GPU_USERPROBE_ADDON_H
 #include <stdint.h>
@@ -15,6 +16,12 @@
 #define NABU_GPU_USERPROBE_PLIST_MAX 4096u
 #define NABU_GPU_USERPROBE_CACHE_MAX 2097152u
 #define NABU_GPU_USERPROBE_SIGNATURE_MAX 65536u
+/* The NativeAdrenoMetal plugin form: within the DarwinBoot 16 MiB ADT read together with the ~290 KB base ADT. */
+#define NABU_GPU_USERPROBE_PLUGIN_ADDON_MAX 15728640u
+#define NABU_GPU_USERPROBE_PLUGIN_INFO_MAX 4096u
+#define NABU_GPU_USERPROBE_PLUGIN_EXE_MAX 67108864u
+#define NABU_GPU_USERPROBE_PLUGIN_SEAL_MAX 65536u
+#define NABU_GPU_USERPROBE_PLUGIN_PUBLISH_MAX 16u
 
 static inline uint32_t nabu_probe_u32(const uint8_t *p)
 {
@@ -33,18 +40,48 @@ static inline int nabu_probe_zero(const uint8_t *p, uint64_t bytes)
     return 1;
 }
 
+/* The closed file kinds. Forms: 2 (probe, job), 4 (+ cache, signature), 5 (+ Turnip) and
+ * 8/9 (+ the NativeAdrenoMetal bundle, 9 with the publish marker). */
+struct nabu_gpu_userprobe_kind {
+    const char *name;
+    uint32_t mode;
+    uint64_t max;
+};
+static const struct nabu_gpu_userprobe_kind nabu_gpu_userprobe_kinds[] = {
+    {"bin/nabu-gpu-userprobe", 0755, NABU_GPU_USERPROBE_EXE_MAX},
+    {"daemons/org.hackios.nabu-gpu-userprobe.plist", 0644, NABU_GPU_USERPROBE_PLIST_MAX},
+    {"cache/launchd.plist", 0644, NABU_GPU_USERPROBE_CACHE_MAX},
+    {"cache/launchd.plist.sig", 0644, NABU_GPU_USERPROBE_SIGNATURE_MAX},
+    {"bin/libvulkan_freedreno.dylib", 0644, NABU_GPU_USERPROBE_TURNIP_MAX},
+    {"addons/NativeAdrenoMetal.bundle/Info.plist", 0644, NABU_GPU_USERPROBE_PLUGIN_INFO_MAX},
+    {"addons/NativeAdrenoMetal.bundle/NativeAdrenoMetal", 0755, NABU_GPU_USERPROBE_PLUGIN_EXE_MAX},
+    {"addons/NativeAdrenoMetal.bundle/libvulkan_freedreno.dylib", 0755, NABU_GPU_USERPROBE_TURNIP_MAX},
+    {"addons/NativeAdrenoMetal.bundle/_CodeSignature/CodeResources", 0644, NABU_GPU_USERPROBE_PLUGIN_SEAL_MAX},
+    {"addons/NativeAdrenoMetal.publish", 0644, NABU_GPU_USERPROBE_PLUGIN_PUBLISH_MAX},
+};
+#define NABU_GPU_USERPROBE_KIND_COUNT (sizeof(nabu_gpu_userprobe_kinds) / sizeof(nabu_gpu_userprobe_kinds[0]))
+/* The exact kind set of each form, bit i for nabu_gpu_userprobe_kinds[i]. */
+#define NABU_GPU_USERPROBE_SET_PROBE 0x003u
+#define NABU_GPU_USERPROBE_SET_CACHE 0x00fu
+#define NABU_GPU_USERPROBE_SET_TURNIP 0x01fu
+#define NABU_GPU_USERPROBE_SET_PLUGIN 0x1efu
+#define NABU_GPU_USERPROBE_SET_PUBLISH 0x3efu
+
 static inline int nabu_gpu_userprobe_addon_valid(const uint8_t *data, uint64_t bytes)
 {
-    static const char executable[] = "bin/nabu-gpu-userprobe";
-    static const char job[] = "daemons/org.hackios.nabu-gpu-userprobe.plist";
-    static const char cache[] = "cache/launchd.plist";
-    static const char signature[] = "cache/launchd.plist.sig";
-    static const char turnip[] = "bin/libvulkan_freedreno.dylib";
     if (!data || bytes < 24 || memcmp(data, "NGPUADD2", 8) ||
         nabu_probe_u32(data + 12) || nabu_probe_u64(data + 16) != bytes) return 0;
-    const unsigned count=nabu_probe_u32(data + 8);
-    if(count!=2 && count!=4 && count!=5)return 0;
-    const uint64_t limit = count == 5 ? NABU_GPU_USERPROBE_TURNIP_ADDON_MAX : NABU_GPU_USERPROBE_ADDON_MAX;
+    const unsigned count = nabu_probe_u32(data + 8);
+    unsigned expected;
+    uint64_t limit;
+    switch (count) {
+    case 2: expected = NABU_GPU_USERPROBE_SET_PROBE; limit = NABU_GPU_USERPROBE_ADDON_MAX; break;
+    case 4: expected = NABU_GPU_USERPROBE_SET_CACHE; limit = NABU_GPU_USERPROBE_ADDON_MAX; break;
+    case 5: expected = NABU_GPU_USERPROBE_SET_TURNIP; limit = NABU_GPU_USERPROBE_TURNIP_ADDON_MAX; break;
+    case 8: expected = NABU_GPU_USERPROBE_SET_PLUGIN; limit = NABU_GPU_USERPROBE_PLUGIN_ADDON_MAX; break;
+    case 9: expected = NABU_GPU_USERPROBE_SET_PUBLISH; limit = NABU_GPU_USERPROBE_PLUGIN_ADDON_MAX; break;
+    default: return 0;
+    }
     if (bytes > limit) return 0;
     uint64_t at = 24;
     unsigned seen = 0;
@@ -60,22 +97,20 @@ static inline int nabu_gpu_userprobe_addon_valid(const uint8_t *data, uint64_t b
         const uint64_t packed_padded = (packed + 7) & ~UINT64_C(7);
         if (bytes - at < name_padded || bytes - at - name_padded < packed_padded) return 0;
         unsigned kind = 0;
-        if (name_bytes == sizeof(executable) && !memcmp(data + at, executable, sizeof(executable)) &&
-            mode == 0755 && size && size <= NABU_GPU_USERPROBE_EXE_MAX) kind = 1;
-        if (name_bytes == sizeof(job) && !memcmp(data + at, job, sizeof(job)) &&
-            mode == 0644 && size && size <= NABU_GPU_USERPROBE_PLIST_MAX) kind = 2;
-        if (count>=4 && name_bytes == sizeof(cache) && !memcmp(data + at, cache, sizeof(cache)) &&
-            mode == 0644 && size && size <= NABU_GPU_USERPROBE_CACHE_MAX) kind = 4;
-        if (count>=4 && name_bytes == sizeof(signature) && !memcmp(data + at, signature, sizeof(signature)) &&
-            mode == 0644 && size && size <= NABU_GPU_USERPROBE_SIGNATURE_MAX) kind = 8;
-        if (count==5 && name_bytes == sizeof(turnip) && !memcmp(data + at, turnip, sizeof(turnip)) &&
-            mode == 0644 && size && size <= NABU_GPU_USERPROBE_TURNIP_MAX) kind = 16;
+        for (unsigned k = 0; k < NABU_GPU_USERPROBE_KIND_COUNT; ++k) {
+            const struct nabu_gpu_userprobe_kind *entry = &nabu_gpu_userprobe_kinds[k];
+            if ((expected & (1u << k)) && name_bytes == strlen(entry->name) + 1 &&
+                !memcmp(data + at, entry->name, name_bytes) && mode == entry->mode && size && size <= entry->max) {
+                kind = 1u << k;
+                break;
+            }
+        }
         if (!kind || (seen & kind) ||
             !nabu_probe_zero(data + at + name_bytes, name_padded - name_bytes) ||
             !nabu_probe_zero(data + at + name_padded + packed, packed_padded - packed)) return 0;
         seen |= kind;
         at += name_padded + packed_padded;
     }
-    return seen == (count==5?31u:count==4?15u:3u) && at == bytes;
+    return seen == expected && at == bytes;
 }
 #endif

@@ -57,6 +57,9 @@ extern NativeAdrenoMetalDiag native_adreno_metal_diag;
 extern NativeAdrenoOpenRecord native_adreno_open_log[8];
 extern volatile uint32_t native_adreno_open_log_count;
 extern NativeAdrenoClientText native_adreno_client_text[4];
+/* The Metal plugin's telemetry rows (NativeAdrenoPublish.cpp marker stream). */
+extern char native_adreno_metal_rows[48][96];
+extern volatile uint32_t native_adreno_metal_rows_seq;
 extern volatile uint32_t native_adreno_method_stats[20][4];
 extern void (*nabu_log_probe_poll)(void);
 extern void (*nabu_log_probe_process_snapshot)(uint32_t *);
@@ -107,12 +110,36 @@ void nabuGpuProbeWriterSample()
     text(diag.report);
     emit(snprintf(line,sizeof(line),"NabuGPU: writer_meta=%u opener=%.*s text=%s\n",
         sample,17,diag.opener[0],report));
+    /* Every process's own text row: the probe's and any Metal plugin client's failure reason. */
     for(unsigned i=0;i<4;++i) {
         const NativeAdrenoClientText client=native_adreno_client_text[i];
-        if(strncmp(client.name,"nabu-gpu-user",13))continue;
+        if(!client.name[0])continue;
         text(client.text);
         emit(snprintf(line,sizeof(line),"NabuGPU: writer_client=%u name=%.*s text=%s\n",
             sample,20,client.name,report));
+    }
+    /* The render server's plugin lines: its Turnip/status line and the processes that started the plugin. */
+    text(diag.report2);
+    emit(snprintf(line,sizeof(line),"NabuGPU: writer_report2=%u text=%s\n",sample,report));
+    char starters[3][17];
+    for(unsigned i=0;i<3;++i) {
+        char name[sizeof(report)]={};
+        memcpy(name,diag.starter[i],sizeof(diag.starter[i])-1);
+        text(name);
+        snprintf(starters[i],sizeof(starters[i]),"%.16s",report[0]?report:"-");
+    }
+    emit(snprintf(line,sizeof(line),"NabuGPU: writer_starters=%u a=%s b=%s c=%s\n",
+        sample,starters[0],starters[1],starters[2]));
+    emit(snprintf(line,sizeof(line),"NabuGPU: writer_rows=%u seq=%u\n",sample,native_adreno_metal_rows_seq));
+    for(unsigned row=0,shown=0;row<48 && shown<3;++row) {
+        char cells[96];
+        memcpy(cells,native_adreno_metal_rows[row],sizeof(cells));
+        cells[sizeof(cells)-1]=0;
+        if(!cells[0])continue;
+        for(unsigned i=0;cells[i];++i)
+            if(static_cast<unsigned char>(cells[i])<32 || static_cast<unsigned char>(cells[i])>=127)cells[i]='_';
+        emit(snprintf(line,sizeof(line),"NabuGPU: writer_row=%u r=%u %s\n",sample,row,cells));
+        ++shown;
     }
     emit(snprintf(line,sizeof(line),
         "NabuGPU: writer_marks=%u total=%u last=%x/%x/%x/%x macf=%x resolver=%x attach=%u ext=%u/%08x\n",
