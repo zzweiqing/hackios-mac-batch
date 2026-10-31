@@ -287,6 +287,22 @@ def qualify_userprobe_boot(read, candidate):
                 b'"addons/NativeAdrenoMetal.bundle/NativeAdrenoMetal", 0755' in header,
                 'Owner Metal plugin transport contract changed')
         require(b'NabuGPU: userprobe plugin_stage=' in candidate, 'Final kernel lacks the plugin mount record')
+    # The ten-file form: the publish form plus an earlier boot's pipeline pack beside the bundle.
+    pack_bound = plugin_bound and b'native_gpu_addon_files != 10' in constants['DATA_BRANCH']
+    if pack_bound:
+        require(b'const int publish = native_gpu_addon_files >= 9;' in constants['DATA_BRANCH'] and
+                b'native_gpu_addon_files != 11' in constants['DATA_BRANCH'] and
+                b'"addons/NativeAdrenoMetal.m2vpack", 0644, NABU_GPU_USERPROBE_PLUGIN_PACK_MAX' in header and
+                b'#define NABU_GPU_USERPROBE_PLUGIN_PACK_MAX 8388608u' in header and
+                b'case 10: expected = NABU_GPU_USERPROBE_SET_PACK;' in header,
+                'Owner pipeline-pack transport contract changed')
+    # The published forms with the client list (the processes besides backboardd that get a native device).
+    clients_bound = pack_bound and b'"addons/NativeAdrenoMetal.clients", 0644, NABU_GPU_USERPROBE_PLUGIN_CLIENTS_MAX' in header
+    if clients_bound:
+        require(b'#define NABU_GPU_USERPROBE_PLUGIN_CLIENTS_MAX 256u' in header and
+                b'case 11: expected = NABU_GPU_USERPROBE_SET_PACK | NABU_GPU_USERPROBE_SET_CLIENTS_BIT;' in header and
+                b'(NABU_GPU_USERPROBE_SET_PUBLISH | NABU_GPU_USERPROBE_SET_CLIENTS_BIT)' in header,
+                'Owner plugin client-list transport contract changed')
     process_bound = bool(process_constants)
     if process_bound:
         require(set(process_constants) == {'EXEC_HELPER', 'EXEC_LOCAL', 'EXEC_ENTER', 'EXEC_RETURN', 'EXIT_HOOK'} and
@@ -318,6 +334,10 @@ def qualify_userprobe_boot(read, candidate):
             **({'turnip_library_transport': True}
                if b'native_gpu_addon_files != 5' in constants['DATA_BRANCH'] else {}),
             **({'metal_plugin_transport': True, 'plugin_addon_files': [8, 9]} if plugin_bound else {}),
+            **({'pipeline_pack_transport': True, 'pipeline_pack_addon_files': 10,
+                'pipeline_pack_max': 8388608} if pack_bound else {}),
+            **({'plugin_clients_transport': True, 'plugin_clients_addon_files': [10, 11],
+                'plugin_clients_max': 256} if clients_bound else {}),
             **({'exec_stage_observer': True, 'exec_stage_records_maximum': 32} if exec_trace_constants else {}),
             **({'process_observer': True, 'exit_source_sha256': sha(exit_source),
                 'process_symbols': {name: definitions[name] for name in sorted(extra_required)}} if process_bound else {}),

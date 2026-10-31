@@ -67,6 +67,17 @@ extern volatile uint64_t native_adreno_import_fail_pa,native_adreno_import_fail_
 extern volatile uint32_t native_adreno_method_stats[20][4];
 extern void (*nabu_log_probe_poll)(void);
 extern void (*nabu_log_probe_process_snapshot)(uint32_t *);
+/* Secondary-core bring-up evidence written by the linked ArmCpu (sheng-smp=1) and the
+ * scheduler's own counts; ArmCpu only stores these, so the ESP writer is their sole reader. */
+extern volatile uint32_t armcpu_smp_requested,armcpu_smp_running,armcpu_smp_conduit,armcpu_boot_mpidr;
+extern volatile uint32_t armcpu_smp_step[8],armcpu_smp_mpidr[8],armcpu_smp_seen_mpidr[8],armcpu_smp_fail[8];
+extern volatile uint32_t armcpu_smp_sys[8][5],armcpu_core_timer[8],armcpu_core_sgi[8];
+extern volatile int32_t armcpu_smp_psci_rc[8];
+extern volatile uint64_t armcpu_ipi_interrupts,armcpu_ipi_sent;
+extern unsigned int real_ncpus;
+extern uint32_t processor_avail_count;
+unsigned int ml_get_cpu_count(void);
+unsigned int ml_get_cluster_count(void);
 }
 extern "C" void nabu_capture_append(const char *,unsigned);
 #endif
@@ -174,6 +185,22 @@ void nabuGpuProbeWriterSample()
         emit(snprintf(line,sizeof(line),
             "NabuGPU: writer_open=%u slot=%u process=%.*s type=%08x macf=%x resolver=%x attach=%u foreign=%u\n",
             sample,index,20,open.name,open.type,open.macf,open.res,open.attach,open.foreign));
+    }
+    /* Which cores ArmCpu started and the scheduler counts them in: slot 0 (boot core)
+     * always, a secondary slot once ArmCpu has touched it. */
+    emit(snprintf(line,sizeof(line),
+        "NabuGPU: writer_smp=%u req=%u run=%u conduit=%u boot=%x ncpus=%u avail=%u topo=%u clusters=%u ipi=%llu sent=%llu\n",
+        sample,armcpu_smp_requested,armcpu_smp_running,armcpu_smp_conduit,armcpu_boot_mpidr,
+        real_ncpus,processor_avail_count,ml_get_cpu_count(),ml_get_cluster_count(),
+        static_cast<unsigned long long>(armcpu_ipi_interrupts),static_cast<unsigned long long>(armcpu_ipi_sent)));
+    for(unsigned slot=0;slot<8;++slot) {
+        const uint32_t step=armcpu_smp_step[slot],fail=armcpu_smp_fail[slot],seen=armcpu_smp_seen_mpidr[slot];
+        const int32_t psci=armcpu_smp_psci_rc[slot];
+        if(slot && !step && !fail && !seen && !psci)continue;
+        emit(snprintf(line,sizeof(line),
+            "NabuGPU: writer_cpu=%u slot=%u step=%u mpidr=%x seen=%x fail=%x psci=%d el=%x sctlr=%x timer=%u sgi=%u\n",
+            sample,slot,step,armcpu_smp_mpidr[slot],seen,fail,psci,armcpu_smp_sys[slot][0],
+            armcpu_smp_sys[slot][1],armcpu_core_timer[slot],armcpu_core_sgi[slot]));
     }
 }
 #endif

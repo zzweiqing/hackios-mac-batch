@@ -22,6 +22,10 @@
 #define NABU_GPU_USERPROBE_PLUGIN_EXE_MAX 67108864u
 #define NABU_GPU_USERPROBE_PLUGIN_SEAL_MAX 65536u
 #define NABU_GPU_USERPROBE_PLUGIN_PUBLISH_MAX 16u
+/* An earlier boot's pipeline-cache pack (SHEXP001), imported by the published plugin before its device opens. */
+#define NABU_GPU_USERPROBE_PLUGIN_PACK_MAX 8388608u
+/* Processes besides backboardd that get their own native Metal device (NativeAdrenoMetalPlugin.mm listedClient). */
+#define NABU_GPU_USERPROBE_PLUGIN_CLIENTS_MAX 256u
 
 static inline uint32_t nabu_probe_u32(const uint8_t *p)
 {
@@ -40,8 +44,9 @@ static inline int nabu_probe_zero(const uint8_t *p, uint64_t bytes)
     return 1;
 }
 
-/* The closed file kinds. Forms: 2 (probe, job), 4 (+ cache, signature), 5 (+ Turnip) and
- * 8/9 (+ the NativeAdrenoMetal bundle, 9 with the publish marker). */
+/* The closed file kinds. Forms: 2 (probe, job), 4 (+ cache, signature), 5 (+ Turnip),
+ * 8/9 (+ the NativeAdrenoMetal bundle, 9 with the publish marker), 10 (9 + the pipeline pack); the published
+ * plugin forms may also carry the client list (9/10 become 10/11). */
 struct nabu_gpu_userprobe_kind {
     const char *name;
     uint32_t mode;
@@ -58,6 +63,8 @@ static const struct nabu_gpu_userprobe_kind nabu_gpu_userprobe_kinds[] = {
     {"addons/NativeAdrenoMetal.bundle/libvulkan_freedreno.dylib", 0755, NABU_GPU_USERPROBE_TURNIP_MAX},
     {"addons/NativeAdrenoMetal.bundle/_CodeSignature/CodeResources", 0644, NABU_GPU_USERPROBE_PLUGIN_SEAL_MAX},
     {"addons/NativeAdrenoMetal.publish", 0644, NABU_GPU_USERPROBE_PLUGIN_PUBLISH_MAX},
+    {"addons/NativeAdrenoMetal.m2vpack", 0644, NABU_GPU_USERPROBE_PLUGIN_PACK_MAX},
+    {"addons/NativeAdrenoMetal.clients", 0644, NABU_GPU_USERPROBE_PLUGIN_CLIENTS_MAX},
 };
 #define NABU_GPU_USERPROBE_KIND_COUNT (sizeof(nabu_gpu_userprobe_kinds) / sizeof(nabu_gpu_userprobe_kinds[0]))
 /* The exact kind set of each form, bit i for nabu_gpu_userprobe_kinds[i]. */
@@ -66,6 +73,8 @@ static const struct nabu_gpu_userprobe_kind nabu_gpu_userprobe_kinds[] = {
 #define NABU_GPU_USERPROBE_SET_TURNIP 0x01fu
 #define NABU_GPU_USERPROBE_SET_PLUGIN 0x1efu
 #define NABU_GPU_USERPROBE_SET_PUBLISH 0x3efu
+#define NABU_GPU_USERPROBE_SET_PACK 0x7efu
+#define NABU_GPU_USERPROBE_SET_CLIENTS_BIT 0x800u
 
 static inline int nabu_gpu_userprobe_addon_valid(const uint8_t *data, uint64_t bytes)
 {
@@ -80,8 +89,12 @@ static inline int nabu_gpu_userprobe_addon_valid(const uint8_t *data, uint64_t b
     case 5: expected = NABU_GPU_USERPROBE_SET_TURNIP; limit = NABU_GPU_USERPROBE_TURNIP_ADDON_MAX; break;
     case 8: expected = NABU_GPU_USERPROBE_SET_PLUGIN; limit = NABU_GPU_USERPROBE_PLUGIN_ADDON_MAX; break;
     case 9: expected = NABU_GPU_USERPROBE_SET_PUBLISH; limit = NABU_GPU_USERPROBE_PLUGIN_ADDON_MAX; break;
+    case 10: expected = NABU_GPU_USERPROBE_SET_PACK; limit = NABU_GPU_USERPROBE_PLUGIN_ADDON_MAX; break;
+    case 11: expected = NABU_GPU_USERPROBE_SET_PACK | NABU_GPU_USERPROBE_SET_CLIENTS_BIT; limit = NABU_GPU_USERPROBE_PLUGIN_ADDON_MAX; break;
     default: return 0;
     }
+    /* Ten files are either the pack form or the published form with the client list: the names decide. */
+    const unsigned alternative = count == 10 ? (NABU_GPU_USERPROBE_SET_PUBLISH | NABU_GPU_USERPROBE_SET_CLIENTS_BIT) : expected;
     if (bytes > limit) return 0;
     uint64_t at = 24;
     unsigned seen = 0;
@@ -99,7 +112,7 @@ static inline int nabu_gpu_userprobe_addon_valid(const uint8_t *data, uint64_t b
         unsigned kind = 0;
         for (unsigned k = 0; k < NABU_GPU_USERPROBE_KIND_COUNT; ++k) {
             const struct nabu_gpu_userprobe_kind *entry = &nabu_gpu_userprobe_kinds[k];
-            if ((expected & (1u << k)) && name_bytes == strlen(entry->name) + 1 &&
+            if (((expected | alternative) & (1u << k)) && name_bytes == strlen(entry->name) + 1 &&
                 !memcmp(data + at, entry->name, name_bytes) && mode == entry->mode && size && size <= entry->max) {
                 kind = 1u << k;
                 break;
@@ -111,6 +124,6 @@ static inline int nabu_gpu_userprobe_addon_valid(const uint8_t *data, uint64_t b
         seen |= kind;
         at += name_padded + packed_padded;
     }
-    return seen == expected && at == bytes;
+    return (seen == expected || seen == alternative) && at == bytes;
 }
 #endif

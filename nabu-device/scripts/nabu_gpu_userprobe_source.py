@@ -138,9 +138,11 @@ DATA_BRANCH = '''\t/* NABU_GPU_USERPROBE_JOB_V1 */
 \t\t__atomic_store_n(&nabu_log_probe_process_snapshot, nabu_gpu_userprobe_exec_snapshot, __ATOMIC_RELEASE);
 \t\tnative_gpu_addon_install(p, scratch);
 \t\t/* Four files, five with the owner-signed Turnip library for the Vulkan known-image test,
-\t\t * or eight/nine with the owner-signed NativeAdrenoMetal bundle (nine: publish marker). */
+\t\t * or eight/nine/ten with the owner-signed NativeAdrenoMetal bundle (nine: publish marker,
+\t\t * ten/eleven: publish marker with the pipeline-cache pack and/or the client list). */
 \t\tif ((native_gpu_addon_files != 4 && native_gpu_addon_files != 5 && native_gpu_addon_files != 8 &&
-\t\t    native_gpu_addon_files != 9) || native_gpu_addon_failed || native_gpu_addon_error) {
+\t\t    native_gpu_addon_files != 9 && native_gpu_addon_files != 10 && native_gpu_addon_files != 11) ||
+\t\t    native_gpu_addon_failed || native_gpu_addon_error) {
 \t\t\tprintf("NabuGPU: userprobe addon refused files=%d failed=%d error=%d render_proof=0\\n",
 \t\t\t    native_gpu_addon_files, native_gpu_addon_failed, native_gpu_addon_error);
 \t\t\treturn;
@@ -177,12 +179,12 @@ DATA_BRANCH = '''\t/* NABU_GPU_USERPROBE_JOB_V1 */
 \t\tprintf("NabuGPU: userprobe cache_stage=%d cache_status=%d owner_signed=1 original_jobs_preserved=1 render_proof=0\\n",
 \t\t    native_gpu_addon_stage, native_gpu_addon_status);
 \t\tif (native_gpu_addon_stage != 5 || native_gpu_addon_status ||
-\t\t    (native_gpu_addon_files != 8 && native_gpu_addon_files != 9)) return;
+\t\t    (native_gpu_addon_files < 8 || native_gpu_addon_files > 11)) return;
 \t\t/* NABU_GPU_USERPROBE_PLUGIN_V1: the original Metal discovery loads
 \t\t * /System/Library/Extensions/<MetalPluginName>.bundle; present the owner bundle there,
 \t\t * with the sealed A10 bundle still visible below it. Scratch 0xa00..0xb1a, below mkdir's 0xc00. */
 \t\tstatic volatile int nabu_gpu_plugin_stage = 0, nabu_gpu_plugin_status = -1;
-\t\tconst int publish = native_gpu_addon_files == 9;
+\t\tconst int publish = native_gpu_addon_files >= 9;
 \t\tvnode_t marker = NULLVP;
 \t\tif (!publish && !vnode_lookup("/private/var/ngpu/addons/NativeAdrenoMetal.publish", 0, &marker, vfs_context_current())) {
 \t\t\t/* A test-mode addon must not inherit a publish marker from an earlier boot. */
