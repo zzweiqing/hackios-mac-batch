@@ -316,6 +316,39 @@ void watchdog(int) {
 }
 } // namespace
 
+#if NABU_USERPROBE_TURNIP
+#include "NativeTurnipSmoke.h"
+namespace nabu_turnip_stage {
+// The library is the owner-signed Turnip build in the same /usr/bin union as this executable.
+bool library(char *path, size_t size) {
+    uint32_t bytes = uint32_t(size);
+    char self[1024];
+    if (_NSGetExecutablePath(self, &bytes) != 0) return false;
+    char *slash = std::strrchr(self, '/');
+    if (!slash) return false;
+    *slash = 0;
+    const int written = std::snprintf(path, size, "%s/libvulkan_freedreno.dylib", self);
+    return written > 0 && size_t(written) < size && access(path, R_OK) == 0;
+}
+// Every smoke stage leaves the same open-type 0x4147 marker the plugin uses (0x6001.., 0x6f/0x6e on failure);
+// the summary line "NT ..." goes to the kernel text row for this process, like the owned-BO "NF" line.
+void run(IOKit *io, const char *path) {
+    setenv("TU_DARWIN_SERVICE", "IOAcceleratorES", 1);
+    setenv("TU_DARWIN_OPEN_TYPE", "0x4147", 1);
+    auto mark = [io](uint32_t value) { (void)IOKit::marker(io, uint16_t(value)); };
+    auto report = [io](const char *text) { (void)nabu_userprobe::marker_line(io, IOKit::marker, text); };
+    const turnip::Result r = turnip::runWatched(mark, report, path);
+    char line[64];
+    const int bytes = std::snprintf(line, sizeof(line), "NT p=%u s=%d r=%d v=%d c=%d g=%d/%d", r.ok ? 1u : 0u,
+        r.stage, r.vkResult, r.verified, r.computeWords, r.renderTriangle, r.renderOther);
+    if (bytes > 0 && size_t(bytes) < sizeof(line)) (void)nabu_userprobe::marker_line(io, IOKit::marker, line);
+    std::printf("NABU_USERPROBE turnip=%s stage=%d vk=%d fill=%d compute=%d compute_stage=%d triangle=%d other=%d "
+                "render_stage=%d error=%s\n", r.ok ? "pass" : "fail", r.stage, r.vkResult, r.verified, r.computeWords,
+                r.computeStage, r.renderTriangle, r.renderOther, r.renderStage, turnip::gFirstError);
+}
+}  // namespace nabu_turnip_stage
+#endif
+
 int main(int argc, char **argv) {
     nonblocking_output(STDOUT_FILENO);
     nonblocking_output(STDERR_FILENO);
@@ -388,8 +421,23 @@ int main(int argc, char **argv) {
     char summary[64];
     if (nabu_userprobe::final_line(outcome, closed, summary))
         (void)nabu_userprobe::marker_line(&io, IOKit::marker, summary);
-    const uint32_t diagnostic_release = uint32_t(io.release(io.service));
     alarm(0);
+#if NABU_USERPROBE_TURNIP
+    // The owned-BO verdict above is final and already reported. Only after it passed, and only
+    // when the owner-signed Turnip library sits beside this executable, run the Vulkan known-image
+    // test on its own connection: fill buffer, compute shader, then a rendered triangle read back.
+    char library[1024];
+    if (outcome.verified && !outcome.status && !outcome.cleanup_status && !closed &&
+        nabu_turnip_stage::library(library, sizeof(library))) {
+        // This process has one kernel text row; the Turnip lines replace the NF line. The ESP writer
+        // samples that row every 10 s, so wait past one sample before overwriting the owned-BO verdict.
+        sleep(11);
+        alarm(150);  // the smoke watchdog reports at 15, 45 and 90 s; this bounds a wedged kernel call
+        nabu_turnip_stage::run(&io, library);
+        alarm(0);
+    }
+#endif
+    const uint32_t diagnostic_release = uint32_t(io.release(io.service));
     const bool pass = outcome.verified && outcome.completed && !outcome.status && !outcome.cleanup_status && !closed && !diagnostic_release;
     std::printf("NABU_USERPROBE result=%s stage=%s status=%08x cleanup_stage=%s cleanup=%08x close=%08x "
                 "initial=%08x observed=%08x guards=%08x/%08x fence=%llu completed=%u deferred=%u render_proof=0\n",

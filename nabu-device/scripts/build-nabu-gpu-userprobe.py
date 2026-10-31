@@ -20,6 +20,7 @@ INPUTS = ('userprobe/nabu_gpu_userprobe.cpp', 'gpu/upstream/Adreno6xx/NativeAdre
           'gpu/upstream/AdrenoPM4/AdrenoPM4.h', 'gpu/upstream/AdrenoPM4/AdrenoPM4.c',
           'scripts/build-nabu-gpu-userprobe.py')
 IDENTIFIER = 'org.hackios.nabu-gpu-userprobe'
+TURNIP_IDENTIFIER = 'org.hackios.nabu-turnip'
 ENTITLEMENTS = {'com.apple.private.security.no-container': True,
                 'com.apple.security.iokit-user-client-class': ['AGXDeviceUserClient'],
                 'com.apple.security.ts.opengl-or-metal': True}
@@ -67,7 +68,16 @@ def signature_identity(detail):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True, help='New private build output directory')
+    parser.add_argument('--turnip-library', type=Path,
+                        help='Turnip libvulkan_freedreno.dylib built against this ABI; adds the Vulkan known-image stage')
+    parser.add_argument('--turnip-headers', type=Path,
+                        help='Mesa include directory (vulkan/vulkan_core.h) of the same Turnip build')
+    parser.add_argument('--adrenometal', type=Path,
+                        help='AdrenoMetal checkout at the pinned revision (NativeTurnipSmoke.h, shaders/)')
     args = parser.parse_args()
+    turnip = args.turnip_library is not None
+    if turnip != (args.turnip_headers is not None) or turnip != (args.adrenometal is not None):
+        raise SystemExit('--turnip-library, --turnip-headers and --adrenometal go together')
     if sys.platform != 'darwin' or os.environ.get('GITHUB_ACTIONS') != 'true':
         raise SystemExit('Apple probe builds run only in macOS GitHub Actions')
     inputs = {}
@@ -109,7 +119,31 @@ def main():
         exe = out / 'nabu-gpu-userprobe'
         run(['xcrun', '--sdk', 'iphoneos', 'clang', *base, '-std=c11', '-c',
              DEVICE / 'gpu/upstream/AdrenoPM4/AdrenoPM4.c', '-o', pm4])
-        run(['xcrun', '--sdk', 'iphoneos', 'clang++', *base, '-std=c++17',
+        turnip_options = []
+        if turnip:
+            smoke = args.adrenometal.resolve()
+            generated = out / 'turnip-smoke'
+            generated.mkdir()
+            lines = ['// Generated GLSL compiler output.', '#pragma once', '#include <stdint.h>']
+            shaders = sorted((smoke / 'shaders').glob('smoke_*'))
+            if [s.name for s in shaders] != ['smoke_fill.comp', 'smoke_triangle.frag', 'smoke_triangle.vert']:
+                raise ValueError('Unexpected Turnip smoke shader set')
+            for shader in shaders:
+                spv = generated / (shader.name + '.spv')
+                run(['glslangValidator', '-V', '--target-env', 'vulkan1.1', shader, '-o', spv], 60)
+                words = struct.unpack('<%dI' % (spv.stat().st_size // 4), spv.read_bytes())
+                lines.append('static const uint32_t kSpv_%s[] = {' % shader.name.replace('.', '_'))
+                lines += ['    ' + ', '.join('0x%08x' % w for w in words[i:i + 8]) + ',' for i in range(0, len(words), 8)]
+                lines.append('};')
+            (generated / 'NativeTurnipShaders.h').write_text('\n'.join(lines) + '\n')
+            report['turnip_inputs'] = {'smoke_header_sha256': sha((smoke / 'NativeTurnipSmoke.h').read_bytes()),
+                                       'config_header_sha256': sha((smoke / 'NativeAdrenoMetalConfig.h').read_bytes()),
+                                       'shaders': {s.name: sha(s.read_bytes()) for s in shaders}}
+            # A640: no recorded A740 replay; the smoke keeps its own TU_DEBUG default.
+            turnip_options = ['-DNABU_USERPROBE_TURNIP=1', '-DNATIVE_ADRENO_A740_REPLAY=0', '-Wno-unused-function',
+                              '-Wno-missing-field-initializers', '-I', smoke, '-I', args.turnip_headers.resolve(),
+                              '-I', generated]
+        run(['xcrun', '--sdk', 'iphoneos', 'clang++', *base, '-std=c++17', *turnip_options,
              '-DNABU_USERPROBE_ABI_SHA256="' + abi + '"', DEVICE / INPUTS[0], pm4,
              '-framework', 'CoreFoundation', '-o', exe])
         entitlements = out / 'entitlements.plist'
@@ -129,6 +163,17 @@ def main():
             raise ValueError('Probe source changed during the build')
         report.update(result='signed_not_run', executable=exe.name, bytes=len(binary),
                       sha256=sha(binary), cdhash=signature_identity(detail), signature_page_bytes=4096)
+        if turnip:
+            library = out / 'libvulkan_freedreno.dylib'
+            library.write_bytes(args.turnip_library.resolve().read_bytes())
+            run(['strip', '-x', library], 120)
+            run(['codesign', '--force', '--sign', '-', '--pagesize', '4096', '--identifier', TURNIP_IDENTIFIER,
+                 library], 120)
+            run(['codesign', '--verify', '--strict', library], 120)
+            turnip_detail = run(['codesign', '--display', '--verbose=4', library], 60).stderr
+            report['turnip'] = {'library': library.name, 'source_sha256': sha(args.turnip_library.read_bytes()),
+                                'bytes': library.stat().st_size, 'sha256': sha(library.read_bytes()),
+                                'cdhash': signature_identity(turnip_detail), 'identifier': TURNIP_IDENTIFIER}
     except (ValueError, OSError, subprocess.SubprocessError) as error:
         report.update(result='failed', error=str(error))
         raise

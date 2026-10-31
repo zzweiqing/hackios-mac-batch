@@ -137,7 +137,8 @@ DATA_BRANCH = '''\t/* NABU_GPU_USERPROBE_JOB_V1 */
 \t\textern void (*nabu_log_probe_process_snapshot)(uint32_t *);
 \t\t__atomic_store_n(&nabu_log_probe_process_snapshot, nabu_gpu_userprobe_exec_snapshot, __ATOMIC_RELEASE);
 \t\tnative_gpu_addon_install(p, scratch);
-\t\tif (native_gpu_addon_files != 4 || native_gpu_addon_failed || native_gpu_addon_error) {
+\t\t/* Four files, or five with the owner-signed Turnip library for the Vulkan known-image test. */
+\t\tif ((native_gpu_addon_files != 4 && native_gpu_addon_files != 5) || native_gpu_addon_failed || native_gpu_addon_error) {
 \t\t\tprintf("NabuGPU: userprobe addon refused files=%d failed=%d error=%d render_proof=0\\n",
 \t\t\t    native_gpu_addon_files, native_gpu_addon_failed, native_gpu_addon_error);
 \t\t\treturn;

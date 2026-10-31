@@ -21,6 +21,9 @@ UNIXNU = 'https://github.com/UniXNU/UniXNU.git'
 UNIXNU_COMMIT = 'cd2dd1bd0d79a441424f2bd014144bd719ba56f7'
 MESA_COMMIT = '85fda3b36405bcaea8bffc64aa4f2651dc90770d'
 MESA_TREE = 'b72ff1eb2138026ed6aba524770899faabf7d7c8'
+# The AdrenoMetal revision UniXNU cd2dd1bd pins as drivers/AdrenoMetal: NativeTurnipSmoke.h and shaders/.
+ADRENOMETAL = 'https://github.com/RigoLigoRLC/unixnu-adrenometal.git'
+ADRENOMETAL_COMMIT = 'baad47ca22b181bf0ef0d08412d3ed1f96945e16'
 # nabu patches applied after UniXNU's recorded-series identity check (paths relative to the device tree).
 NABU_PATCHES = ('patches/mesa-turnip-a640-trace-guard.patch',)
 PYTHON_PACKAGES = ('meson==1.6.1', 'mako==1.3.8', 'pyyaml==6.0.2', 'packaging==24.2')
@@ -138,6 +141,19 @@ def main():
         profile = root / 'build/mesa-tu-ios/builtin-build-profile.json'
         if profile.is_file():
             shutil.copyfile(profile, output / profile.name)
+        # The Turnip-enabled owner probe: the same probe plus the Vulkan known-image stage, built against this
+        # exact library, its Mesa headers and the pinned AdrenoMetal smoke test.
+        smoke = root / '.cache/adrenometal'
+        run(['git', 'init', '-q', smoke])
+        run(['git', '-C', smoke, 'remote', 'add', 'origin', ADRENOMETAL])
+        run(['git', '-C', smoke, 'fetch', '-q', '--depth', '1', 'origin', ADRENOMETAL_COMMIT])
+        run(['git', '-C', smoke, 'checkout', '-q', ADRENOMETAL_COMMIT])
+        probe = subprocess.run([sys.executable, device / 'scripts/build-nabu-gpu-userprobe.py',
+                                '--output', output / 'userprobe', '--turnip-library', library,
+                                '--turnip-headers', root / '.cache/mesa-work/include', '--adrenometal', smoke], env=env)
+        report.update(adrenometal_commit=ADRENOMETAL_COMMIT, probe_returncode=probe.returncode)
+        if probe.returncode:
+            result = probe
     (output / 'turnip-report.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps({k: report.get(k) for k in ('build_returncode', 'library_built', 'library_bytes')}))
     return result.returncode

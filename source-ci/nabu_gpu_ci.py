@@ -271,7 +271,8 @@ def qualify_userprobe_boot(read, candidate):
         require(data.count(constants['PARENTS_AFTER']) == 1 and constants['PARENTS_BEFORE'] not in data,
                 'Actual XNU addon installer still skips its missing ngpu root directory')
     if cache_entries is not None:
-        require(cache_entries == 4 and b'native_gpu_addon_files != 4' in constants['DATA_BRANCH'] and
+        require(cache_entries == 4 and (b'native_gpu_addon_files != 4' in constants['DATA_BRANCH'] or
+                b'(native_gpu_addon_files != 4 && native_gpu_addon_files != 5)' in constants['DATA_BRANCH']) and
                 b'cache_point[] = "/System/Library/xpc"' in constants['DATA_BRANCH'],
                 'Owner job-cache source contract changed')
     process_bound = bool(process_constants)
@@ -302,6 +303,8 @@ def qualify_userprobe_boot(read, candidate):
     return {'mode': 'closed_inline_abi1_probe', 'trigger': 'nabu-gpu-userprobe=1',
             **({'parent_root_creation': True} if parents_fixed else {}),
             **({'owner_job_cache': True, 'addon_files': 4} if cache_entries == 4 else {}),
+            **({'turnip_library_transport': True}
+               if b'native_gpu_addon_files != 5' in constants['DATA_BRANCH'] else {}),
             **({'exec_stage_observer': True, 'exec_stage_records_maximum': 32} if exec_trace_constants else {}),
             **({'process_observer': True, 'exit_source_sha256': sha(exit_source),
                 'process_symbols': {name: definitions[name] for name in sorted(extra_required)}} if process_bound else {}),
