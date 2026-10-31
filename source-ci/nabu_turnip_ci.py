@@ -21,6 +21,8 @@ UNIXNU = 'https://github.com/UniXNU/UniXNU.git'
 UNIXNU_COMMIT = 'cd2dd1bd0d79a441424f2bd014144bd719ba56f7'
 MESA_COMMIT = '85fda3b36405bcaea8bffc64aa4f2651dc90770d'
 MESA_TREE = 'b72ff1eb2138026ed6aba524770899faabf7d7c8'
+# nabu patches applied after UniXNU's recorded-series identity check (paths relative to the device tree).
+NABU_PATCHES = ('patches/mesa-turnip-a640-trace-guard.patch',)
 PYTHON_PACKAGES = ('meson==1.6.1', 'mako==1.3.8', 'pyyaml==6.0.2', 'packaging==24.2')
 
 
@@ -58,7 +60,7 @@ def bison(root, pins):
     run(['make', '-j6', 'install'], cwd=work, stdout=subprocess.DEVNULL)
 
 
-def mesa(root, pins):
+def mesa(root, pins, device):
     source = root / '.cache/mesa-work'
     require(pins['mesa']['commit'] == MESA_COMMIT and pins['mesa']['tree'] == MESA_TREE, 'Pinned Mesa identity changed')
     run(['git', 'init', '-q', source])
@@ -79,6 +81,10 @@ def mesa(root, pins):
     sys.path.insert(0, str(root / 'scripts'))
     from mesa_patch_identity import validate_recorded_patches
     validate_recorded_patches(root, source, pins)
+    # The A640 ABI directory has no NativeAdrenoTrace.h; guard the one trace definition that is
+    # otherwise left without its (equally guarded) prototype.
+    for patch in NABU_PATCHES:
+        run(['git', '-C', source, 'apply', device / patch])
 
 
 def main():
@@ -102,7 +108,7 @@ def main():
     run([sys.executable, '-m', 'venv', root / '.cache/mesa-venv'])
     run([root / '.cache/mesa-venv/bin/pip', 'install', '-q', *PYTHON_PACKAGES])
     bison(root, pins)
-    mesa(root, pins)
+    mesa(root, pins, device)
     env = dict(os.environ, PATH=str(root / '.cache/mesa-tools/bin') + ':' + os.environ['PATH'])
     require(shutil.which('glslangValidator', path=env['PATH']) and shutil.which('ninja', path=env['PATH']),
             'glslang and ninja are required')
@@ -115,6 +121,7 @@ def main():
     library = root / 'build/mesa-tu-ios/src/freedreno/vulkan/libvulkan_freedreno.dylib'
     report = dict(unixnu_commit=UNIXNU_COMMIT, mesa_commit=MESA_COMMIT, mesa_tree=MESA_TREE,
                   patches=pins['patches'], patch_sha256={p: sha(root / p) for p in pins['patches']},
+                  nabu_patches={p: sha(device / p) for p in NABU_PATCHES},
                   abi_header_sha256=sha(abi / 'NativeAdrenoABI.h'), build_returncode=result.returncode,
                   library_built=library.is_file(), gpu_exercised=False, runtime_qualified=False)
     if library.is_file():
