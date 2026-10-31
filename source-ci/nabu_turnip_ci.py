@@ -60,7 +60,7 @@ def bison(root, pins):
     run(['make', '-j6', 'install'], cwd=work, stdout=subprocess.DEVNULL)
 
 
-def mesa(root, pins, device):
+def mesa(root, pins):
     source = root / '.cache/mesa-work'
     require(pins['mesa']['commit'] == MESA_COMMIT and pins['mesa']['tree'] == MESA_TREE, 'Pinned Mesa identity changed')
     run(['git', 'init', '-q', source])
@@ -81,10 +81,6 @@ def mesa(root, pins, device):
     sys.path.insert(0, str(root / 'scripts'))
     from mesa_patch_identity import validate_recorded_patches
     validate_recorded_patches(root, source, pins)
-    # The A640 ABI directory has no NativeAdrenoTrace.h; guard the one trace definition that is
-    # otherwise left without its (equally guarded) prototype.
-    for patch in NABU_PATCHES:
-        run(['git', '-C', source, 'apply', device / patch])
 
 
 def main():
@@ -102,13 +98,23 @@ def main():
     run(['git', '-C', root, 'remote', 'add', 'origin', UNIXNU])
     run(['git', '-C', root, 'fetch', '-q', '--depth', '1', 'origin', UNIXNU_COMMIT])
     run(['git', '-C', root, 'checkout', '-q', UNIXNU_COMMIT])
-    pins = json.loads((root / 'scripts/data/adreno-compiler-inputs.json').read_text())
+    pins_path = root / 'scripts/data/adreno-compiler-inputs.json'
+    pins = json.loads(pins_path.read_text())
     require(len(pins['patches']) == 19, 'Unexpected Mesa patch series length')
+    upstream_pins_sha256 = sha(pins_path)
+    # build-turnip-darwin.py re-runs the recorded-series identity check, so the nabu patches join the
+    # recorded series (after the upstream 19) instead of being applied outside it.
+    for patch in NABU_PATCHES:
+        recorded = 'patches/mesa/' + Path(patch).name
+        require(not (root / recorded).exists(), 'nabu patch name collides with an upstream patch')
+        shutil.copyfile(device / patch, root / recorded)
+        pins['patches'].append(recorded)
+    pins_path.write_text(json.dumps(pins, indent=2) + '\n')
     (root / '.cache').mkdir()
     run([sys.executable, '-m', 'venv', root / '.cache/mesa-venv'])
     run([root / '.cache/mesa-venv/bin/pip', 'install', '-q', *PYTHON_PACKAGES])
     bison(root, pins)
-    mesa(root, pins, device)
+    mesa(root, pins)
     env = dict(os.environ, PATH=str(root / '.cache/mesa-tools/bin') + ':' + os.environ['PATH'])
     require(shutil.which('glslangValidator', path=env['PATH']) and shutil.which('ninja', path=env['PATH']),
             'glslang and ninja are required')
@@ -122,6 +128,7 @@ def main():
     report = dict(unixnu_commit=UNIXNU_COMMIT, mesa_commit=MESA_COMMIT, mesa_tree=MESA_TREE,
                   patches=pins['patches'], patch_sha256={p: sha(root / p) for p in pins['patches']},
                   nabu_patches={p: sha(device / p) for p in NABU_PATCHES},
+                  upstream_pins_sha256=upstream_pins_sha256, recorded_pins_sha256=sha(pins_path),
                   abi_header_sha256=sha(abi / 'NativeAdrenoABI.h'), build_returncode=result.returncode,
                   library_built=library.is_file(), gpu_exercised=False, runtime_qualified=False)
     if library.is_file():
