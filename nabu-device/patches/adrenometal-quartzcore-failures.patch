@@ -1,8 +1,7 @@
 diff --git a/NativeBridgeMetalFrontend.mm b/NativeBridgeMetalFrontend.mm
-index 5138ece..0a5375e 100644
 --- a/NativeBridgeMetalFrontend.mm
 +++ b/NativeBridgeMetalFrontend.mm
-@@ -259,7 +259,10 @@ static NBBuffer *surfaceBuffer(IOSurfaceRef surface,void *base,size_t bytes) {
+@@ -259,7 +259,10 @@
  
   // The surface keeps its CPU mapping (the imported pages) until the import is freed.
   NmbBuffer *handle=nmb_buffer_new_no_copy_releasing(gDevice,base,bytes,MTLResourceStorageModeShared,releaseSurface,(void *)CFRetain(surface));
@@ -15,10 +14,9 @@ index 5138ece..0a5375e 100644
   buffer.importedSurface=surface;
   if(key) {
 diff --git a/NativeMetalBridgePhase.h b/NativeMetalBridgePhase.h
-index 7f0d059..715d640 100644
 --- a/NativeMetalBridgePhase.h
 +++ b/NativeMetalBridgePhase.h
-@@ -192,6 +192,22 @@ static void run(Gpu &gpu, const char *turnipPath) {
+@@ -192,6 +192,21 @@
      else if (job->frontend.failed) snprintf(rest, room, " F%u %s", job->frontend.failed, job->frontend.first);
      else snprintf(rest, room, " F0%s%s", job->missing[0] ? " " : "", job->missing[0] ? job->missing + 3 : "");
      streamText7(gpu, text);
@@ -26,8 +24,7 @@ index 7f0d059..715d640 100644
 +    {
 +        unsigned row = 45;
 +        for (const char *line = r.qc_failures; *line && row < 48; ++row) {
-+            const char *end = strchr(line, '
-+');
++            const char *end = strchr(line, '\n');
 +            const size_t length = end ? (size_t)(end - line) : strnlen(line, sizeof r.qc_failures);
 +            gpu.mark(0xC000u | row);
 +            for (size_t i = 0; i < length && i < 90; i += 2) {
@@ -42,10 +39,9 @@ index 7f0d059..715d640 100644
      gpu.mark(ok ? 0x65f0 : 0x65f1);
      if (!job->code) gpu.mark(job->frontendRan && !job->frontend.failed ? 0x66f0 : 0x66f1);
 diff --git a/bridge/NativeMetalBridge.h b/bridge/NativeMetalBridge.h
-index 7d6bbf0..a592cc1 100644
 --- a/bridge/NativeMetalBridge.h
 +++ b/bridge/NativeMetalBridge.h
-@@ -17,6 +17,8 @@ struct NmbSelftest {
+@@ -17,6 +17,8 @@
      uint32_t qc_pairs_ok, qc_pairs_failed;
      uint32_t reserved;
      char message[96];
@@ -55,10 +51,9 @@ index 7d6bbf0..a592cc1 100644
  /* Markers: 0x6501 device, 0x6502 fixture library, 0x6503 compute, 0x6504 render, 0x6505 import, 0x6506 QuartzCore, 0x650f done. */
  uint32_t nmb_selftest(const char *loader, const char *cache_dir, const uint8_t *quartzcore, size_t quartzcore_bytes,
 diff --git a/bridge/NativeMetalBridge.rs b/bridge/NativeMetalBridge.rs
-index cd1d49b..fd9c2ff 100644
 --- a/bridge/NativeMetalBridge.rs
 +++ b/bridge/NativeMetalBridge.rs
-@@ -45,6 +45,8 @@ pub struct NmbSelftest {
+@@ -45,6 +45,8 @@
      pub qc_pairs_failed: u32,
      pub reserved: u32,
      pub message: [u8; 96],
@@ -67,26 +62,24 @@ index cd1d49b..fd9c2ff 100644
  }
  
  type Mark = Option<unsafe extern "C" fn(u32)>;
-@@ -61,6 +63,18 @@ impl Run<'_> {
+@@ -59,6 +61,16 @@
+         if let Some(mark) = self.mark {
+             // SAFETY: the caller's callback, valid for the call.
              unsafe { mark(marker) };
-         }
-     }
++        }
++    }
 +    /// Records one QuartzCore failure while a whole line still fits (nabu diagnostics).
 +    fn note_qc(&mut self, kind: char, name: &str, why: &impl std::fmt::Debug) {
 +        let used = self.out.qc_failures.iter().position(|&b| b == 0).unwrap_or(self.out.qc_failures.len());
-+        let mut line: String = format!("{kind} {name} {why:?}").chars().filter(|c| *c != '
-+').take(120).collect();
-+        line.push('
-+');
++        let mut line: String = format!("{kind} {name} {why:?}").chars().filter(|c| *c != '\n').take(120).collect();
++        line.push('\n');
 +        if used + line.len() < self.out.qc_failures.len() {
 +            self.out.qc_failures[used..used + line.len()].copy_from_slice(line.as_bytes());
 +            self.out.qc_failures[used + line.len()] = 0;
-+        }
-+    }
+         }
+     }
      fn fail(&mut self, marker: u32, why: impl std::fmt::Display) -> u32 {
-         self.out.stage = marker;
-         let text = format!("{why}");
-@@ -270,6 +284,7 @@ fn quartzcore(run: &mut Run, device: &Device, bytes: &[u8]) -> Result<(), String
+@@ -270,6 +282,7 @@
                      Ok(_) => run.out.qc_kernels_ok += 1,
                      Err(e) => {
                          run.out.qc_kernels_failed += 1;
@@ -94,7 +87,7 @@ index cd1d49b..fd9c2ff 100644
                          if list {
                              eprintln!("kernel {name}: {e:?}");
                          }
-@@ -297,6 +312,7 @@ fn quartzcore(run: &mut Run, device: &Device, bytes: &[u8]) -> Result<(), String
+@@ -297,6 +310,7 @@
              Ok(_) => run.out.qc_pairs_ok += 1,
              Err(e) => {
                  run.out.qc_pairs_failed += 1;
