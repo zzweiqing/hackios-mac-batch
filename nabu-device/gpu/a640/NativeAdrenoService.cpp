@@ -55,6 +55,7 @@ struct NativeAdrenoOpenRecord {char name[20]; uint32_t type, macf, res, attach, 
 struct NativeAdrenoClientText {char name[20]; char text[64];};
 extern NativeAdrenoMetalDiag native_adreno_metal_diag;
 extern NativeAdrenoOpenRecord native_adreno_open_log[8];
+extern volatile uint32_t native_adreno_open_log_count;
 extern NativeAdrenoClientText native_adreno_client_text[4];
 extern volatile uint32_t native_adreno_method_stats[20][4];
 extern void (*nabu_log_probe_poll)(void);
@@ -118,6 +119,18 @@ void nabuGpuProbeWriterSample()
         sample,diag.marks_total,diag.marks[(diag.marks_total-1)&15],diag.marks[(diag.marks_total-2)&15],
         diag.marks[(diag.marks_total-3)&15],diag.marks[(diag.marks_total-4)&15],
         diag.chk_macf,diag.chk_res,diag.attach_status,diag.ext_entries,diag.ext_status));
+    /* Which system processes open the accelerator, with which type, and which
+     * sandbox gate refuses them: the open log the disabled IOLog observation
+     * would print, read here without changing any admission decision. */
+    emit(snprintf(line,sizeof(line),"NabuGPU: writer_opens=%u count=%u foreign=%u foreign_type=%08x reads=%u\n",
+        sample,native_adreno_open_log_count,diag.foreign_opens,diag.foreign_type,diag.name_reads));
+    for(unsigned index=0;index<8;++index) {
+        const NativeAdrenoOpenRecord open=native_adreno_open_log[index];
+        if(!open.name[0])continue;
+        emit(snprintf(line,sizeof(line),
+            "NabuGPU: writer_open=%u slot=%u process=%.*s type=%08x macf=%x resolver=%x attach=%u foreign=%u\n",
+            sample,index,20,open.name,open.type,open.macf,open.res,open.attach,open.foreign));
+    }
 }
 #endif
 #if defined(NABU_GPU_METAL) && NABU_GPU_METAL
