@@ -81,6 +81,13 @@ UNION_GETATTRLISTBULK = {'name': 'nabu-union-getattrlistbulk.patch',
                          'target': 'patches/xnu/native-union-getattrlistbulk.patch',
                          'sha256': 'f5d665fd7250717cfacced8408a0b94f282eb2764e514f61a378f7d085c7a03b'}
 UNION_PATCHES = (UNION_LOWER_DIRECTORY, UNION_GETATTRLISTBULK)
+# Metal profile only, inert without boot-arg t733-managed-rt-normal=1: managed-DRAM RT (IOSurface) pages map as
+# Normal NC instead of Device-nGnRnE (this BCM2837 config lacks HAS_UCNORMAL_MEM), as UniXNU SM-T733's
+# native-t733-managed-rt-memory.patch does. The A640 driver reads the same argument to accept RT imports.
+MANAGED_RT_NORMAL = {'name': 'nabu-managed-rt-normal.patch',
+                     'target': 'patches/xnu/nabu-managed-rt-normal.patch',
+                     'argument': 't733-managed-rt-normal',
+                     'sha256': '743064d5e0aebd0265c059758199cd35245f67f9b9c2357276dc6c0f4f2637e4'}
 
 SECOND_STATIC_TRUST_CACHE_PATCH = '''--- a/config/MASTER.arm64
 +++ b/config/MASTER.arm64
@@ -483,6 +490,19 @@ def apply_owner_union_patches(upstream):
     return [_apply_owner_union_patch(upstream, patch) for patch in UNION_PATCHES]
 
 
+def apply_managed_rt_normal(upstream):
+    """Materialize the pinned managed-RT Normal NC pmap patch into the upstream XNU series."""
+    source = (Path(__file__).resolve().parent / MANAGED_RT_NORMAL['name']).read_bytes()
+    if hashlib.sha256(source).hexdigest() != MANAGED_RT_NORMAL['sha256']:
+        raise SystemExit('Unexpected managed-RT Normal NC patch')
+    target = upstream / MANAGED_RT_NORMAL['target']
+    if target.exists():
+        raise SystemExit('Upstream already carries ' + MANAGED_RT_NORMAL['target'])
+    target.write_bytes(source)
+    return {'patch': MANAGED_RT_NORMAL['target'], 'sha256': MANAGED_RT_NORMAL['sha256'],
+            'argument': MANAGED_RT_NORMAL['argument'], 'runtime_qualified': False}
+
+
 def validate_profile(device):
     board = tomllib.loads((device / 'board.toml').read_text(encoding='utf-8'))
     name = board['kernel']['defconfig']
@@ -680,6 +700,7 @@ def main():
     owner_union = owner_root and 'CONFIG_XNU_OWNER_UNION_SYSTEMOS=y' in options
     union_patches = apply_owner_union_patches(args.upstream) if owner_union else None
     result = apply_vc_text_scale(result)
+    managed_rt = apply_managed_rt_normal(args.upstream) if args.profile == UFS_GPU_METAL_PROFILE else None
     path.write_bytes(result)
     data_skeleton = None
     if 'CONFIG_XNU_OWNER_DATA_MOUNT=y' in options:
@@ -732,6 +753,7 @@ def main():
                                  'cache_volume_uuid': CACHE_VOLUME_UUID} if owner_carrier else None),
         'owner_union_systemos': ({**union_patches[0], 'patches': union_patches}
                                  if union_patches else None),
+        'managed_rt_normal': managed_rt,
     }, indent=2) + '\n', encoding='utf-8')
 
 

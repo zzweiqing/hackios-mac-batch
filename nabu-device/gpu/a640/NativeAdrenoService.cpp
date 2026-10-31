@@ -60,6 +60,10 @@ extern NativeAdrenoClientText native_adreno_client_text[4];
 /* The Metal plugin's telemetry rows (NativeAdrenoPublish.cpp marker stream). */
 extern char native_adreno_metal_rows[48][96];
 extern volatile uint32_t native_adreno_metal_rows_seq;
+/* BoImport refusal record (NativeAdrenoUserClient.cpp) and importTask's stage (NativeAdrenoMemory.cpp). */
+extern volatile uint64_t native_adreno_import_diag[10];
+extern volatile uint32_t native_adreno_import_stage;
+extern volatile uint64_t native_adreno_import_fail_pa,native_adreno_import_fail_offset;
 extern volatile uint32_t native_adreno_method_stats[20][4];
 extern void (*nabu_log_probe_poll)(void);
 extern void (*nabu_log_probe_process_snapshot)(uint32_t *);
@@ -131,7 +135,9 @@ void nabuGpuProbeWriterSample()
     emit(snprintf(line,sizeof(line),"NabuGPU: writer_starters=%u a=%s b=%s c=%s\n",
         sample,starters[0],starters[1],starters[2]));
     emit(snprintf(line,sizeof(line),"NabuGPU: writer_rows=%u seq=%u\n",sample,native_adreno_metal_rows_seq));
-    for(unsigned row=0,shown=0;row<48 && shown<3;++row) {
+    /* The first three non-empty rows, then rows 45..47 (the plugin's QuartzCore failures) whenever they are set. */
+    for(unsigned row=0,shown=0;row<48;++row) {
+        if(shown>=3 && row<45)continue;
         char cells[96];
         memcpy(cells,native_adreno_metal_rows[row],sizeof(cells));
         cells[sizeof(cells)-1]=0;
@@ -140,6 +146,17 @@ void nabuGpuProbeWriterSample()
             if(static_cast<unsigned char>(cells[i])<32 || static_cast<unsigned char>(cells[i])>=127)cells[i]='_';
         emit(snprintf(line,sizeof(line),"NabuGPU: writer_row=%u r=%u %s\n",sample,row,cells));
         ++shown;
+    }
+    {
+        uint64_t import[10];
+        for(unsigned i=0;i<10;++i)import[i]=native_adreno_import_diag[i];
+        emit(snprintf(line,sizeof(line),
+            "NabuGPU: writer_import=%u calls=%llu refused=%llu last=%x/%u/%llx/%llx first=%x/%u/%llx/%llx stage=%u fail_pa=%llx\n",
+            sample,static_cast<unsigned long long>(import[0]),static_cast<unsigned long long>(import[1]),
+            static_cast<unsigned>(import[2]),static_cast<unsigned>(import[3]),static_cast<unsigned long long>(import[4]),
+            static_cast<unsigned long long>(import[5]),static_cast<unsigned>(import[6]),static_cast<unsigned>(import[7]),
+            static_cast<unsigned long long>(import[8]),static_cast<unsigned long long>(import[9]),
+            native_adreno_import_stage,static_cast<unsigned long long>(native_adreno_import_fail_pa)));
     }
     emit(snprintf(line,sizeof(line),
         "NabuGPU: writer_marks=%u total=%u last=%x/%x/%x/%x macf=%x resolver=%x attach=%u ext=%u/%08x\n",
