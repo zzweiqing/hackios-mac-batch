@@ -338,6 +338,22 @@ IOReturn NativeAdrenoScheduler::accept(uint32_t owner, uint32_t queue,
     if (failure_) {
         return failure_;
     }
+    /* advance() faults the whole scheduler when submitResources() refuses a buffer, so refuse the
+     * same range checks here first: one bad client IB must stay that client's argument error. */
+    if (bufferCount && !vm_) {
+        return kIOReturnNotReady;
+    }
+    for (size_t at = 0; at < bufferCount; ++at) {
+        uint64_t iova = 0;
+        size_t bytes = 0;
+        unsigned permissions = 0;
+        const NativeAdrenoSubmitBuffer &buffer = buffers[at];
+        if (vm_->describe(buffer.handle, &iova, &bytes, &permissions) || !buffer.bytes || (buffer.bytes & 3) ||
+            buffer.bytes > 0xfffffu * 4u || !(permissions & ArmSmmu4KRead) || buffer.iova < iova ||
+            buffer.iova - iova > bytes || buffer.bytes > bytes - (buffer.iova - iova)) {
+            return kIOReturnBadArgument;
+        }
+    }
     if(nextCompletion_ > INT32_MAX) {
         return kIOReturnNoResources;
     }

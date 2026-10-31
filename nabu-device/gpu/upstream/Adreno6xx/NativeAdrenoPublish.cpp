@@ -1253,7 +1253,13 @@ static IOReturn runCore(AGXDeviceUserClient *connection,uint32_t method,const vo
                 IOLockSleep(g.lock,&g.completionEvent,THREAD_ABORTSAFE):
                 IOLockSleepDeadline(g.lock,&g.completionEvent,deadline,THREAD_ABORTSAFE);
             if(awakened!=THREAD_AWAKENED) {
-                status=awakened==THREAD_TIMED_OUT?kIOReturnTimeout:kIOReturnAborted;
+                status=kIOReturnAborted;
+                /* The deadline passed without a completion wakeup: poll once more so a
+                 * finished fence is not reported as a timeout when the interrupt is missing. */
+                if(awakened==THREAD_TIMED_OUT) {
+                    status=connection->live_ && !connection->closing_ && !connection->viewTeardownStatus_ && !g.failed?
+                        connection->core_->dispatch(method,waitInput,input_size,output,output_size,&g.clock):kIOReturnNotReady;
+                }
                 break;
             }
         }

@@ -10,7 +10,8 @@ PARENTS_AFTER = ('\t/* NABU_GPU_USERPROBE_PARENTS_V1: create ngpu before its chi
 CACHE_ENTRY_COUNT = 4
 EXEC_ANCHOR = 'static int\nexec_activate_image(struct image_params *imgp)\n{\n'
 EXEC_LOCAL = '\tint nabu_probe_target = 0; /* NABU_GPU_USERPROBE_EXEC_V1 */\n'
-EXEC_ENTER = '''\tnabu_probe_target = !strcmp(excpath, "/private/var/ngpu/bin/nabu-gpu-userprobe");
+EXEC_ENTER = '''\tnabu_probe_target = !strcmp(excpath, "/usr/bin/nabu-gpu-userprobe") ||
+\t    !strcmp(excpath, "/private/var/ngpu/bin/nabu-gpu-userprobe");
 \tif (nabu_probe_target) nabu_gpu_userprobe_exec_note(0, proc_getpid(p), 0);
 '''
 EXEC_RETURN = '\tif (nabu_probe_target) nabu_gpu_userprobe_exec_note(1, proc_getpid(p), error);\n'
@@ -151,6 +152,17 @@ DATA_BRANCH = '''\t/* NABU_GPU_USERPROBE_JOB_V1 */
 \t\t    native_gpu_addon_files, native_gpu_addon_written, native_gpu_addon_same,
 \t\t    native_gpu_addon2_stage, native_gpu_addon2_status);
 \t\tif (native_gpu_addon2_stage != 5 || native_gpu_addon2_status) return;
+\t\t/* The platform sandbox lets xpcproxy exec a regular file outside /private/var
+\t\t * only, so the cached job names the probe through this /usr/bin union view
+\t\t * (UniXNU T733 does the same for its owner executable). */
+\t\tstatic const char bin_source[] = "/private/var/ngpu/bin";
+\t\tstatic const char bin_point[] = "/usr/bin";
+\t\tnative_gpu_addon_mount(p, scratch, 0x800, bin_source, sizeof(bin_source), bin_point, sizeof(bin_point),
+\t\t    "/usr/bin/IOMFB_FDR_Loader", "/usr/bin/nabu-gpu-userprobe",
+\t\t    &native_gpu_addon3_stage, &native_gpu_addon3_status);
+\t\tprintf("NabuGPU: userprobe bin_stage=%d bin_status=%d render_proof=0\\n",
+\t\t    native_gpu_addon3_stage, native_gpu_addon3_status);
+\t\tif (native_gpu_addon3_stage != 5 || native_gpu_addon3_status) return;
 \t\t/* The original launchd accepts system jobs from its verified cache.
 \t\t * Keep every original job and let its original loader authenticate this
 \t\t * owner-signed cache through the explicitly supplied trust module. */

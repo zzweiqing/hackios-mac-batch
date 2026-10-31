@@ -403,8 +403,12 @@ IOReturn NativeAdrenoUserClient::freeBo(const NativeAdrenoAbiBoFree *request)
     }
     native_adreno_trace_stage=2;
     if(entry->mapped_state) {
-        /* Completed jobs must not pin the buffer: retire what the CP has passed before the unmap decides. */
-        submit_->retireCompleted(); /* a poisoned execbuf refuses and the unmap below stays refused too */
+        /* Completed jobs must not pin the buffer: retire what the CP has passed before the unmap decides.
+         * The scheduler job holds its own reference until advance() finishes it, which the completion
+         * worker may not have done yet, so advance here as closeOwner() does. */
+        NativeAdrenoScheduler *scheduler=submit_->scheduler();
+        if(scheduler)scheduler->advance(); /* a faulted scheduler refuses and the unmap below stays refused too */
+        else submit_->retireCompleted(); /* a poisoned execbuf refuses and the unmap below stays refused too */
         native_adreno_trace_stage=3;
         const IOReturn unmap=vm_->unmap(entry->mapped);
         native_adreno_trace_stage=4;
