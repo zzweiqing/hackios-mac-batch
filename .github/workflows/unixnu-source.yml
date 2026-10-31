@@ -186,13 +186,17 @@ jobs:
           python-version: "3.13"
       - name: Install host tools
         run: |
-          brew install ninja glslang
+          brew install ninja glslang spirv-tools llvm
+          # The Metal plugin's bridge: cargo +1.98.0 for aarch64-apple-ios; llvm-as for its AIR fixtures.
+          rustup toolchain install 1.98.0 --profile minimal --target aarch64-apple-ios
+          rustc +1.98.0 --version
+          "$(brew --prefix llvm)/bin/llvm-as" --version | head -n 2
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
-      - name: Cross-build Turnip for iOS against the A640 ABI
+      - name: Cross-build Turnip and the Metal plugin for iOS against the A640 ABI
         id: turnip
         run: |
-          python3 source-ci/nabu_turnip_ci.py --device nabu-device \
+          python3 source-ci/nabu_turnip_ci.py --device nabu-device --plugin \
             --work "$RUNNER_TEMP/unixnu-turnip" --output "$RUNNER_TEMP/turnip-output"
       - name: Upload private output (including failed builds)
         if: always()

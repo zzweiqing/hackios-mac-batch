@@ -91,6 +91,8 @@ def main():
     parser.add_argument('--device', type=Path, required=True)
     parser.add_argument('--work', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--plugin', action='store_true',
+                        help='also build NativeAdrenoMetal.bundle (nabu_metal_plugin_ci.py) on the built Turnip')
     args = parser.parse_args()
     require(sys.platform == 'darwin' and os.environ.get('GITHUB_ACTIONS') == 'true', 'Run only in macOS GitHub Actions')
     device, root, output = args.device.resolve(), args.work.resolve(), args.output.resolve()
@@ -154,8 +156,22 @@ def main():
         report.update(adrenometal_commit=ADRENOMETAL_COMMIT, probe_returncode=probe.returncode)
         if probe.returncode:
             result = probe
+        # The Metal plugin (UniXNU step 4) on the same Turnip; its failure keeps the Turnip and probe outputs.
+        if args.plugin:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import nabu_metal_plugin_ci
+            try:
+                plugin = nabu_metal_plugin_ci.build(root, device, output / 'plugin', env)
+            except (subprocess.CalledProcessError, SystemExit, OSError, ValueError, KeyError) as error:
+                plugin = {'plugin_returncode': 1, 'bundle_built': False, 'error': str(error)[-2000:],
+                          'gpu_exercised': False, 'runtime_qualified': False}
+            report['plugin'] = plugin
+            if plugin['plugin_returncode'] or not plugin['bundle_built']:
+                result = subprocess.CompletedProcess(args=[], returncode=plugin['plugin_returncode'] or 1)
     (output / 'turnip-report.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps({k: report.get(k) for k in ('build_returncode', 'library_built', 'library_bytes')}))
+    if 'plugin' in report:
+        print(json.dumps({k: report['plugin'].get(k) for k in ('plugin_returncode', 'bundle_built', 'cdhash')}))
     return result.returncode
 
 
