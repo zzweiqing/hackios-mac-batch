@@ -22,6 +22,10 @@ on:
         description: Build a signed standalone A640 owned-BO probe (Metal profile only; not installed)
         type: boolean
         default: false
+      turnip_only:
+        description: Build only Turnip (Mesa Vulkan, darwin KMD) for iOS against the A640 ABI; skips the kernel job
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -36,6 +40,7 @@ env:
   HOMEBREW_NO_ENV_HINTS: 1
 jobs:
   build:
+    if: ${{ !inputs.turnip_only }}
     runs-on: macos-26
     timeout-minutes: 90
     env:
@@ -167,4 +172,46 @@ jobs:
           name: source-summary-${{ github.run_id }}
           path: ${{ runner.temp }}/source-output/summary.json
           if-no-files-found: error
+          retention-days: 30
+  turnip:
+    if: ${{ inputs.turnip_only }}
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_${{ inputs.xcode }}.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install host tools
+        run: |
+          brew install ninja glslang
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+      - name: Cross-build Turnip for iOS against the A640 ABI
+        id: turnip
+        run: |
+          python3 source-ci/nabu_turnip_ci.py --device nabu-device \
+            --work "$RUNNER_TEMP/unixnu-turnip" --output "$RUNNER_TEMP/turnip-output"
+      - name: Upload private output (including failed builds)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
+          PRIVATE_INPUTS_REPO: ${{ vars.PRIVATE_INPUTS_REPO }}
+        run: |
+          TAG="turnip-$GITHUB_RUN_ID-attempt-$GITHUB_RUN_ATTEMPT"
+          OUT="$RUNNER_TEMP/turnip-output"
+          test -d "$OUT" || exit 0
+          tar -czf "$RUNNER_TEMP/$TAG.tar.gz" -C "$OUT" .
+          test "$(gh api "repos/$PRIVATE_INPUTS_REPO" --jq .private)" = true
+          gh release create "$TAG" "$RUNNER_TEMP/$TAG.tar.gz" --repo "$PRIVATE_INPUTS_REPO" \
+            --title "$TAG" --notes "Private Turnip build output for public run $GITHUB_RUN_ID; compile/link only, not GPU-qualified."
+      - name: Publish only the bounded report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: turnip-report-${{ github.run_id }}
+          path: ${{ runner.temp }}/turnip-output/turnip-report.json
+          if-no-files-found: warn
           retention-days: 30
