@@ -24,6 +24,8 @@ RUST = '1.98.0'
 # A640: no NativeMobileDisplay GOP wire, 21H16 is not the A740 OS image, and the recorded replay is A740-only.
 BOARD_ARGUMENTS = ('--scanout-copy', 'off', '--quartzcore-display-state', 'off', '--turnip-replay', 'off')
 # Built by build-adreno-metal-plugin.py but not deployed on nabu; listed in the report only.
+# nabu patches to the pinned AdrenoMetal checkout (paths relative to the device tree), applied in order.
+ADRENOMETAL_PATCHES = ('patches/adrenometal-shader-cache-optional.patch',)
 UNDEPLOYED = ('adrenoprobed', 'adrenoprobed-entitlements.plist', 'org.blu-sharky.adrenoprobed.plist',
               'com.apple.iomfb_fdr_loader.plist', 'com.apple.bluetoothd.plist')
 
@@ -51,7 +53,7 @@ def fetch(path, url, commit, *, blob_filter=False):
         raise SystemExit('Pinned checkout differs: ' + str(path))
 
 
-def prepare(root):
+def prepare(root, device):
     for path, (url, commit) in SUBMODULES.items():
         entry = read(['git', '-C', root, 'ls-tree', 'HEAD', path]).split()
         if entry[:3] != ['160000', 'commit', commit]:
@@ -60,6 +62,10 @@ def prepare(root):
         if target.exists() and any(target.iterdir()):
             raise SystemExit('Submodule path is not empty: ' + path)
         fetch(target, url, commit)
+    metal = root / 'drivers/AdrenoMetal'
+    for patch in ADRENOMETAL_PATCHES:
+        run(['git', '-C', metal, 'apply', '--check', device / patch])
+        run(['git', '-C', metal, 'apply', device / patch])
     pins = json.loads((root / 'scripts/data/gpu-metal-vulkan-inputs.json').read_text())
     translator = pins['translator']['commit']
     if pins['translator']['repository'].rstrip('/') + '.git' != METAL2VULKAN:
@@ -89,7 +95,8 @@ def build(root, device, output, env):
     report = {'adrenometal_commit': SUBMODULES['drivers/AdrenoMetal'][1],
               'adrenopm4_commit': SUBMODULES['kits/AdrenoPM4'][1], 'rust_toolchain': RUST,
               'abi_header_sha256': sha(abi / 'NativeAdrenoABI.h'), 'gpu_exercised': False, 'runtime_qualified': False}
-    report['metal2vulkan_commit'] = prepare(root)
+    report['metal2vulkan_commit'] = prepare(root, device)
+    report['adrenometal_patches'] = {patch: sha(device / patch) for patch in ADRENOMETAL_PATCHES}
     report['rust_version'] = read(['rustc', '+' + RUST, '--version'])
     compiler = shutil.which('glslangValidator', path=env['PATH'])
     if not compiler:

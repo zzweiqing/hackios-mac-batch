@@ -164,6 +164,16 @@ def patch_exit_trace(text):
                '\t\t\t    nabu_reason->osr_namespace, nabu_reason->osr_code,\n'
                '\t\t\t    nabu_reason->osr_flags, nabu_desc ? nabu_desc : "none");\n'
                '\t\t}\n'
+               '\t\t/* NABU_CAPTURE_V2_8: a signal exit keeps the Mach exception its thread took\n'
+               '\t\t * (ux_exception records it; for EXC_BAD_ACCESS the subcode is the fault address). */\n'
+               '\t\tif (WIFSIGNALED(rv) && (WTERMSIG(rv) == SIGBUS || WTERMSIG(rv) == SIGSEGV ||\n'
+               '\t\t    WTERMSIG(rv) == SIGILL || WTERMSIG(rv) == SIGTRAP || WTERMSIG(rv) == SIGABRT)) {\n'
+               '\t\t\tstruct uthread *nabu_ut = (struct uthread *)get_bsdthread_info(current_thread());\n'
+               '\t\t\tif (nabu_ut)\n'
+               '\t\t\t\tprintf("NABU EXIT signal=%d exception=%d code=0x%llx subcode=0x%llx\\n",\n'
+               '\t\t\t\t    WTERMSIG(rv), nabu_ut->uu_exception, (unsigned long long)nabu_ut->uu_code,\n'
+               '\t\t\t\t    (unsigned long long)nabu_ut->uu_subcode);\n'
+               '\t\t}\n'
                '\t}\n')
     if text.count(anchor) != 1:
         raise ValueError('Expected one exit_with_reason anchor')
@@ -176,7 +186,7 @@ def patch_user_exception(text):
     Use task's cached telemetry fields: no shared-region locks, user memory
     reads, disk I/O or exception handling changes on this path.
     """
-    marker = '/* NABU_CAPTURE_V2_7 bounded UI exception observation */'
+    marker = '/* NABU_CAPTURE_V2_8 bounded UI exception observation */'
     anchor = ('kern_return_t\nexception_triage(\n'
               '\texception_type_t        exception,\n'
               '\tmach_exception_data_t   code,\n'
@@ -187,16 +197,49 @@ def patch_user_exception(text):
             raise ValueError('Exception observer source drift')
         return text
     if any(old in text for old in ('NABU_CAPTURE_V2_5 SpringBoard exception observation',
-                                  'NABU_CAPTURE_V2_6 SpringBoard exception observation')):
+                                  'NABU_CAPTURE_V2_6 SpringBoard exception observation',
+                                  'NABU_CAPTURE_V2_7 bounded UI exception observation')):
         raise ValueError('Use a fresh XNU tree for the panic-state observer upgrade')
     helper = r'''
-/* NABU_CAPTURE_V2_7 bounded UI exception observation */
+/* NABU_CAPTURE_V2_8 bounded UI exception observation */
 #if defined(__arm64__) && defined(MACH_BSD)
 #include <arm/thread.h>
+struct vnode;
+extern int find_region_details(task_t task, vm_map_offset_t offset, uintptr_t *vnodeaddr, uint32_t *vid,
+    uint64_t *start, uint64_t *len);
+extern int vnode_getwithvid(struct vnode *vp, uint32_t vid);
+extern int vnode_put(struct vnode *vp);
+struct vfs_context;
+extern struct vfs_context *vfs_context_kernel(void);
+extern int build_path(struct vnode *first_vp, char *buff, int buflen, int *outlen, int flags, struct vfs_context *ctx);
 static unsigned nabu_exc_calls, nabu_exc_target, nabu_exc_valid;
 static unsigned nabu_exc_pid;
 static uint64_t nabu_exc_pc, nabu_exc_esr;
-static unsigned nabu_ui_exc_emitted[3];
+static unsigned nabu_ui_exc_emitted[6];
+/* The file mapping holding an EL0 address, from the task's own map (no user reads):
+ * a SIGBUS from a failed page-in names its image; an anonymous or device mapping prints none. */
+static void
+nabu_trace_user_region(task_t task, const char *what, uint64_t address)
+{
+    uintptr_t vnode = 0;
+    uint32_t vid = 0;
+    uint64_t start = 0, length = 0;
+    if (!find_region_details(task, (vm_map_offset_t)address, &vnode, &vid, &start, &length) || !vnode ||
+        address < start || address - start >= length) {
+        printf("NABU EXC %s=0x%llx file=none\n", what, (unsigned long long)address);
+        return;
+    }
+    char path[160] = "?";
+    int bytes = 0;
+    if (!vnode_getwithvid((struct vnode *)vnode, vid)) {
+        /* Name cache only (BUILDPATH_NO_FS_ENTER): the faulting page-in may be this vnode's. */
+        if (build_path((struct vnode *)vnode, path, sizeof(path), &bytes, 0x1, vfs_context_kernel()))
+            strlcpy(path, "?", sizeof(path));
+        vnode_put((struct vnode *)vnode);
+    }
+    printf("NABU EXC %s=0x%llx map=0x%llx+0x%llx len=0x%llx file=%s\n", what, (unsigned long long)address,
+        (unsigned long long)start, (unsigned long long)(address - start), (unsigned long long)length, path);
+}
 __attribute__((noinline)) void
 nabu_trace_user_exception(exception_type_t exception, mach_exception_data_t code,
     mach_msg_type_number_t codeCnt)
@@ -213,6 +256,10 @@ nabu_trace_user_exception(exception_type_t exception, mach_exception_data_t code
     if (!strcmp(name, "SpringBoard")) target = 0;
     else if (!strcmp(name, "Preferences")) target = 1;
     else if (!strcmp(name, "iconservicesagent") || !strcmp(name, "iconservicesagen")) target = 2;
+    /* The render server and the other processes that load the GPU plugin (419b: backboardd SIGBUS). */
+    else if (!strcmp(name, "backboardd")) target = 3;
+    else if (!strncmp(name, "WidgetRenderer", 14)) target = 4;
+    else if (!strcmp(name, "mediaserverd")) target = 5;
     else return;
     if (!target) __atomic_fetch_add(&nabu_exc_target, 1, __ATOMIC_RELAXED);
     thread_t thread = current_thread();
@@ -242,6 +289,11 @@ nabu_trace_user_exception(exception_type_t exception, mach_exception_data_t code
     printf("NABU EXC cache_uuid=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",
         uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
         uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]);
+    /* EXC_BAD_ACCESS: code1 is the fault address; name the file mappings of it and of the PC. */
+    if (exception == EXC_BAD_ACCESS && code && codeCnt > 1) {
+        nabu_trace_user_region(task, "far", (uint64_t)code[1]);
+        nabu_trace_user_region(task, "pcmap", get_saved_state_pc(ss));
+    }
 }
 /* Called only at the already-selected SpringBoard error-exit panic. This
  * reports the exiting thread's saved state, which may differ from the
@@ -332,7 +384,9 @@ def apply(root, device):
         'heartbeat_boot_arg_gated': True, 'heartbeat_read_only': True,
         'writer_counter_watch': True,
         'exit_trace': True,
-        'user_exception_trace': 'SpringBoard/Preferences/iconservicesagent EL0; 32 records each; nabu-exit-trace gated',
+        'user_exception_trace': ('SpringBoard/Preferences/iconservicesagent/backboardd/WidgetRenderer*/mediaserverd EL0; '
+                                 '32 records each; EXC_BAD_ACCESS names the file mappings of the fault address and PC; '
+                                 'nabu-exit-trace gated'),
         'user_exception_entry': 'nabu_trace_user_exception',
         'user_exception_delivery_unchanged': True,
         'exit_panic_state': 'existing SpringBoard error-exit panic only; no new panic trigger',

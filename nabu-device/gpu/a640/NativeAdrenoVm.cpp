@@ -134,7 +134,10 @@ IOReturn NativeAdrenoVm::enableCachedCoherentImports(uint32_t chip_id)
     if(!attached_ || poisoned_) {
         return kIOReturnNotReady;
     }
-    if(chip_id!=0x06030500) {
+    /* A642L, and the A640 of nabu: mainline msm gives 0x06040001 ADRENO_QUIRK_HAS_CACHED_COHERENT
+     * (a6xx_catalog.c) and the stock SM8150 KGSL gives A640 ADRENO_IOCOHERENT, whose cached imports
+     * map with IOMMU_CACHE (kgsl_iommu.c). Owned BOs keep their Normal-NC policy (NabuGpuMemoryPolicy.h). */
+    if(chip_id!=0x06030500 && chip_id!=0x06040001) {
         return kIOReturnUnsupported;
     }
 

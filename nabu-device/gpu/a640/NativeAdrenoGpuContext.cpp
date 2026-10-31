@@ -61,6 +61,13 @@ IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
         // Metal clients share the bounded VM pool; diagnostics need only five bootstrap BOs.
         status=vm_.attach(io,smmu_.configHandle(),smmu_.streamsHandle(),&lower,nullptr,
             NabuGpuVmObjectCapacity(NativeAdrenoVmMaxObjects),262144);
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+        /* IOSurface and no-copy Metal buffers are CPU-cached user pages; the service admitted only
+         * chip 0x06040001 before bring-up. The diagnostic profile has no user imports. */
+        if(!status) {
+            status=vm_.enableCachedCoherentImports(0x06040001);
+        }
+#endif
     }
     if(!status) {
         step(Map);
