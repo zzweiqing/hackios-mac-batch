@@ -56,15 +56,39 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     original_armio = args.component == 'ArmDTPlatform' and os.environ.get('XNU_OWNER_ROOT_TRUST') == '1'
     timer_binding = None
+    armcpu_identity = None
     if args.component == 'ArmCpu':
         from nabu_armcpu_source import patch_source
+        from nabu_armcpu_source import (PINNED_ARMCPU_COMMIT,
+                                        PINNED_ARMCPU_SOURCE_SHA256,
+                                        normalized_source_sha256)
+        source_bytes = source.read_bytes()
+        raw_sha = hashlib.sha256(source_bytes).hexdigest()
+        actual_sha = normalized_source_sha256(source_bytes)
+        if actual_sha != PINNED_ARMCPU_SOURCE_SHA256:
+            raise SystemExit(
+                'ArmCpu source does not match pinned %s '
+                '(normalized sha256 %s, got %s)' %
+                (PINNED_ARMCPU_COMMIT, PINNED_ARMCPU_SOURCE_SHA256, actual_sha))
         patched = out / 'ArmCpu.cpp'
-        patched.write_text(patch_source(source.read_text(encoding='utf-8')), encoding='utf-8')
+        patched.write_text(patch_source(source_bytes.decode('utf-8')), encoding='utf-8')
         source = patched
+        armcpu_identity = {
+            'upstream_commit': PINNED_ARMCPU_COMMIT,
+            'hash_scope': 'lf_normalized_source_bytes',
+            'original_source_sha256': actual_sha,
+            'raw_checkout_sha256': raw_sha,
+            'patched_source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+            'template_count': 14,
+            'source_sites': 17,
+        }
         timer_binding = {'property': '/arm-io/intc/virtual-timer-intid',
                          'encoding': 'u32 little endian', 'allowed_range': [16, 31],
                          'missing_property_default': 27,
                          'enable_and_dispatch_share_value': True,
+                         'upstream_commit': PINNED_ARMCPU_COMMIT,
+                         'upstream_source_sha256': actual_sha,
+                         'hash_scope': 'lf_normalized_source_bytes',
                          'transform_sha256': hashlib.sha256(
                              Path(__file__).with_name('nabu_armcpu_source.py').read_bytes()).hexdigest()}
     if original_armio:
@@ -84,9 +108,11 @@ def main():
         raise SystemExit(result.stderr.decode('utf-8', errors='replace')[-4000:])
     check_object(obj.read_bytes())
     ipi_instructions = None
+    armcpu_assembly = None
     if args.component == 'ArmCpu':
-        from nabu_armcpu_source import check_ipi_object
+        from nabu_armcpu_source import check_armcpu_object, check_ipi_object
         ipi_instructions = check_ipi_object(obj)
+        armcpu_assembly = check_armcpu_object(obj)
     objects = [obj]
     stubs = out / 'PmgrPublishStubs.cpp'
     stubs.write_text(
@@ -250,7 +276,8 @@ def main():
         'boot_pmgr': boot_pmgr,
         'watchdog': watchdog,
         'touch': touch,
-        'timer_binding': timer_binding, 'ipi_instructions': ipi_instructions,
+        'timer_binding': timer_binding, 'armcpu_identity': armcpu_identity,
+        'ipi_instructions': ipi_instructions, 'armcpu_assembly': armcpu_assembly,
         'usb_probe': usb_probe,
         'usb_cdc': usb_cdc,
         'heartbeat': heartbeat,

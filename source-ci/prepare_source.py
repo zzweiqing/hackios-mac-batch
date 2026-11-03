@@ -18,6 +18,8 @@ from nabu_display_ci import (PROFILE as QEMU_LEGACY_PROFILE, CPU_PROFILE as QEMU
                              DISPLAY_PROFILES, REFERENCE as DISPLAY_REFERENCE)
 
 UPSTREAM = '245aca1a9ec5b730b1cad80fade295800d2981f1'
+ARMCPU_BASE = '1951cc8444b340d7d8879e9418220cf29eb711d7'
+ARMCPU_COMMIT = '93a5030c5d983d0ef90f0fca93879d6e36ad1ba8'
 PATCH = 'patches/xnu/offline-component-load-probes.patch'
 PATCH_SHA256 = '1f228c5c6d8387b13cd8e0964ddeb56c858a5dae16478f3ed2baae8a2e4da1e9'
 INPUT_SHA256 = 'fce1ea205e571c3850e150404fc04f255f1192ba19c68e12497c19b8f87d8994'
@@ -615,6 +617,26 @@ def validate_profile(device):
     return board
 
 
+def select_armcpu_revision(upstream):
+    """Change only the recorded ArmCpu gitlink before the normal module fetch."""
+    entry = subprocess.check_output(
+        ['git', '-C', str(upstream), 'ls-files', '--stage', '--', 'drivers/ArmCpu'],
+        text=True).strip()
+    expected = f'160000 {ARMCPU_BASE} 0\tdrivers/ArmCpu'
+    if entry != expected:
+        raise ValueError('ArmCpu baseline gitlink differs from the qualified UniXNU input')
+    subprocess.run(['git', '-C', str(upstream), 'update-index', '--cacheinfo',
+                    '160000', ARMCPU_COMMIT, 'drivers/ArmCpu'], check=True)
+    selected = subprocess.check_output(
+        ['git', '-C', str(upstream), 'ls-files', '--stage', '--', 'drivers/ArmCpu'],
+        text=True).strip()
+    if selected != f'160000 {ARMCPU_COMMIT} 0\tdrivers/ArmCpu':
+        raise ValueError('ArmCpu revision selection did not persist in the module index')
+    return {'baseline_commit': ARMCPU_BASE, 'selected_commit': ARMCPU_COMMIT,
+            'selection': 'gitlink_index_before_standard_submodule_update',
+            'runtime_qualified': False}
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--upstream', type=Path, required=True)
@@ -666,6 +688,7 @@ def main():
     head = subprocess.check_output(['git', '-C', str(args.upstream), 'rev-parse', 'HEAD'], text=True).strip()
     if head != UPSTREAM:
         raise SystemExit('Unexpected UniXNU source revision')
+    armcpu = select_armcpu_revision(args.upstream)
     if args.profile == 'nabu_ufs_readonly_defconfig':
         select_ufs_personality(args.upstream)
     path = args.upstream / PATCH
@@ -715,6 +738,7 @@ def main():
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps({
         'upstream_commit': head, 'profile': board['kernel']['defconfig'],
+        'armcpu': armcpu,
         'patch': PATCH, 'before_sha256': PATCH_SHA256,
         'after_sha256': hashlib.sha256(result).hexdigest(),
         'input_release': 'unixnu-source-inputs', 'input_asset': 'ipsw-21h16-small.zip',

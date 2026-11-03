@@ -1,6 +1,26 @@
-"""Bind the board timer and preserve multi-instruction assembly on Darwin ARM64."""
+"""Bind the board timer and preserve multi-instruction assembly on Darwin ARM64.
+
+Pinned against upstream UniXNU/ArmCpu commit 93a5030c5d983d0ef90f0fca93879d6e36ad1ba8.
+The 14 unique multi-instruction asm templates (17 source sites) below match that
+commit exactly. On Darwin AArch64 ';' is a comment, so the naive upstream source
+only emits the instruction before the first ';'. patch_assembly rewrites each
+template to explicit newlines and check_armcpu_object proves the emitted Mach-O
+object really contains every instruction inside the caller function bodies."""
+import hashlib
 import re
 import struct
+
+# Upstream source identity. build-nabu-platform.py refuses to transform an
+# ArmCpu.cpp that does not match, so template drift is caught before compile.
+# The hash is over the normalized LF bytes of the pinned Git blob, so it is
+# stable whether a working tree checks the file out as LF or CRLF.
+PINNED_ARMCPU_COMMIT = '93a5030c5d983d0ef90f0fca93879d6e36ad1ba8'
+PINNED_ARMCPU_SOURCE_SHA256 = '202bc278dfe52c2d0a988ec3672a95fbbd169be7f3b323d088b93c8e814f6f8f'
+
+
+def normalized_source_sha256(source_bytes):
+    """SHA-256 of the ArmCpu.cpp with CRLF normalized to LF."""
+    return hashlib.sha256(source_bytes.replace(b'\r\n', b'\n')).hexdigest()
 
 TIMER_HELPER = r'''static uint32_t gTimerIntid = 27;
 static uint32_t kSgiPpiEnable = 0xffffU | (1U << 27);
@@ -80,28 +100,255 @@ def patch_assembly(text):
 
 
 def patch_source(text):
-    return patch_assembly(patch_timer_source(text))
+    # The pinned file may be checked out with CRLF; normalize so the pinned
+    # source templates match and the transform is deterministic.
+    return patch_assembly(patch_timer_source(text.replace('\r\n', '\n')))
+
+
+# A64 encodings verified against clang for arm64-apple-ios17.0. System-register
+# msr/mrs keep the target/source register in the low 5 bits, so mask with
+# 0xffffffe0. Barriers and the DAIFSet immediate have a fixed full encoding.
+ENC = {
+    'isb': (0xd5033fdf, 0xffffffff),
+    'dsb_sy': (0xd5033f9f, 0xffffffff),
+    'dsb_ishst': (0xd5033a9f, 0xffffffff),
+    'daifset2': (0xd50342df, 0xffffffff),
+    'cntvct': (0xd53be040, 0xffffffe0),
+    'cntfrq': (0xd53be000, 0xffffffe0),
+    'sre': (0xd518cca0, 0xffffffe0),
+    'igrpen1': (0xd518cce0, 0xffffffe0),
+    'eoir1': (0xd518cc20, 0xffffffe0),
+    'eoir0': (0xd518c820, 0xffffffe0),
+    'sgi1r': (0xd518cba0, 0xffffffe0),
+    'sgi0r': (0xd518cbe0, 0xffffffe0),
+    'daif_mrs': (0xd53b4220, 0xffffffe0),
+    'daif_msr': (0xd51b4220, 0xffffffe0),
+    'cntvctl': (0xd51be320, 0xffffffe0),
+    'pmr': (0xd5384600, 0xffffffe0),
+    'ctr': (0xd53b0020, 0xffffffe0),
+    'dc_civac': (0xd50b7e20, 0xffffffe0),
+}
+
+_LTMP = re.compile(r'^_ltmp\d+$')
+
+
+def _function_bounds(image, name):
+    """Return (start, end, section) for a defined text symbol in `image`."""
+    start = image.names.get(name)
+    if start is None:
+        return None
+    section = next((s for s in image.sections if s[0] <= start < s[0] + s[1]), None)
+    if section is None:
+        return None
+    limit = section[0] + section[1]
+    end = min([v for k, v in image.names.items()
+               if not _LTMP.match(k) and start < v < limit] + [limit])
+    return start, end, section
+
+
+def _words(image, name):
+    bounds = _function_bounds(image, name)
+    if bounds is None:
+        return None, None
+    start, end, section = bounds
+    code = image.data[section[2] + start - section[0]:section[2] + end - section[0]]
+    return struct.unpack('<%dI' % (len(code) // 4), code), start
+
+
+def _matches(word, token):
+    enc, mask = ENC[token]
+    return word & mask == enc
+
+
+def _find_sequence(words, seq):
+    """Indexes where the ordered instruction-name sequence appears contiguously."""
+    hits = []
+    for i in range(0, len(words) - len(seq) + 1):
+        if all(_matches(words[i + j], token) for j, token in enumerate(seq)):
+            hits.append(i)
+    return hits
+
+
+def _find_subsequence(words, seq):
+    """Indexes where `seq` appears in order but not necessarily contiguously."""
+    hits = []
+    j = 0
+    for i, word in enumerate(words):
+        if _matches(word, seq[j]):
+            if j == len(seq) - 1:
+                hits.append(i)
+                j = 0
+            else:
+                j += 1
+    return hits
+
+
+def _require_all(image, label, token_seq, callers):
+    """Every listed caller must contain `token_seq` at least once.
+
+    Each caller is an explicit production function boundary; a template that
+    appears in a different function does not satisfy the requirement. This
+    prevents an unrelated copy of the same instruction from passing the gate.
+    """
+    seq = tuple(token_seq)
+    failed = []
+    detail = []
+    for caller in callers:
+        words, base = _words(image, caller)
+        if words is None:
+            failed.append((caller, 'missing symbol'))
+            continue
+        hits = _find_sequence(words, seq)
+        if not hits:
+            failed.append((caller, 'missing ' + '+'.join(seq)))
+            continue
+        detail.append({'function': caller,
+                       'at': [hex((base or 0) + 4 * i) for i in hits]})
+    if failed:
+        raise ValueError('ArmCpu template "%s" failed: %s' %
+                         (label, '; '.join('%s: %s' % f for f in failed)))
+    return {'sequence': list(seq), 'in': detail}
+
+
+# Production caller lists. Every entry is an actual function in the pinned
+# ArmCpu.cpp; counter/waitClear/cleanToMemory are static and inline under -O2, so
+# their instructions are validated inside these caller bodies. Each listed
+# caller must independently contain the sequence - not merely any one caller.
+SGI_SENDERS = ('__ZN6ArmCpu9signalCPUEP5IOCPU', '_armcpu_ipi_selftest')
+EOIR1_CALLERS = ('__ZN6ArmCpu9interruptEv', '_armcpu_sgi_selfprobe')
+IGRPEN1_CALLERS = ('__ZN6ArmCpu9enableGicEv', '__ZN6ArmCpu10quiesceCPUEv')
+# waitClear inlines counter() (isb + cntvct_el0) before the GIC poll loop and
+# again on the timeout path. Its three logical call sites are initDistributor
+# (2 calls), wakeRedistributor (2) and armcpu_spi_attach (1).
+INIT_DISTRIBUTOR = '__ZN6ArmCpu15initDistributorEv'
+PREPARE_GIC = '__ZN6ArmCpu10prepareGicEv'
+WAKE_REDISTRIBUTOR = '__ZN6ArmCpu17wakeRedistributorEb'
+SPI_ATTACH = '_armcpu_spi_attach'
+# startCPU calls cleanToMemory three times; the static body is inlined there.
+CLEAN_CALLERS = ('__ZN6ArmCpu8startCPUEmm',)
+
+
+def check_armcpu_object(path):
+    """Verify every pinned multi-instruction template in the real Mach-O object."""
+    from native_ufs_bindings import MachO
+    image = MachO(path)
+    if image.kind != 1:
+        raise ValueError('ArmCpu object check requires a relocatable Mach-O object')
+    verified = {}
+
+    verified['sre+isb'] = _require_all(
+        image, 'gic sre enable', ('sre', 'isb'), ('__ZN6ArmCpu9enableGicEv',))
+    verified['igrpen1+dsb+isb'] = _require_all(
+        image, 'gic group1 enable', ('igrpen1', 'dsb_sy', 'isb'), IGRPEN1_CALLERS)
+    verified['eoir1+isb'] = _require_all(
+        image, 'eoir1', ('eoir1', 'isb'), EOIR1_CALLERS)
+    verified['eoir0+isb'] = _require_all(
+        image, 'eoir0', ('eoir0', 'isb'), ('_armcpu_sgi_selfprobe',))
+    verified['sgi1r-send'] = _require_all(
+        image, 'sgi1r send', ('dsb_ishst', 'sgi1r', 'isb'), SGI_SENDERS)
+    verified['sgi0r-send'] = _require_all(
+        image, 'sgi0r send', ('dsb_ishst', 'sgi0r', 'isb'), ('_armcpu_sgi_selfprobe',))
+    verified['daif-save-mask'] = _require_all(
+        image, 'daif save+mask', ('daif_mrs', 'daifset2', 'isb'),
+        ('_armcpu_sgi_selfprobe',))
+    verified['daif-restore'] = _require_all(
+        image, 'daif restore', ('daif_msr', 'isb'), ('_armcpu_sgi_selfprobe',))
+    verified['probe-timestamp'] = _require_all(
+        image, 'probe timestamp', ('dsb_ishst', 'isb', 'cntvct', 'isb'),
+        ('_armcpu_sgi_selfprobe',))
+    verified['sgi1r-selfprobe-timestamp'] = _require_all(
+        image, 'sgi1r selfprobe', ('sgi1r', 'isb', 'cntvct'),
+        ('_armcpu_sgi_selfprobe',))
+    verified['pmr-timed-read'] = _require_all(
+        image, 'pmr timed read', ('isb', 'cntvct', 'isb', 'pmr', 'isb', 'cntvct'),
+        ('_armcpu_sgi_selfprobe',))
+    # enableCPUTimeBase is the sole source of the timer-reload template (line
+    # 778). If the symbol survives, check it directly; otherwise it was inlined
+    # into its only caller, quiesceCPU, so that caller must carry it.
+    time_base = '__ZN6ArmCpu17enableCPUTimeBaseEb'
+    if image.names.get(time_base) is not None:
+        verified['timer-reload'] = _require_all(
+            image, 'timer reload', ('cntvctl', 'isb'), (time_base,))
+    else:
+        verified['timer-reload'] = _require_all(
+            image, 'timer reload', ('cntvctl', 'isb'),
+            ('__ZN6ArmCpu10quiesceCPUEv',))
+
+    # counter/waitClear: each logical waitClear site must show two contiguous
+    # ISB->CNTVCT reads (start plus loop/timeout) and the CNTFRQ read. A bare
+    # CNTVCT mrs elsewhere does not pass. initDistributor may be inlined into
+    # prepareGic under -O2, so accept whichever of the two carries the body.
+    waitclear_detail = []
+    for logical, candidates in (
+            ('initDistributor', (INIT_DISTRIBUTOR, PREPARE_GIC)),
+            ('wakeRedistributor', (WAKE_REDISTRIBUTOR,)),
+            ('armcpu_spi_attach', (SPI_ATTACH,))):
+        chosen = None
+        for caller in candidates:
+            words, base = _words(image, caller)
+            if words is None:
+                continue
+            seq_hits = _find_sequence(words, ('isb', 'cntvct'))
+            freq = _find_sequence(words, ('cntfrq',))
+            if len(seq_hits) >= 2 and freq:
+                chosen = {'function': caller,
+                          'isb_cntvct_at': [hex((base or 0) + 4 * i) for i in seq_hits],
+                          'cntfrq_at': [hex((base or 0) + 4 * i) for i in freq]}
+                break
+        if chosen is None:
+            raise ValueError(
+                'ArmCpu waitClear logical site %s lacks two ISB->CNTVCT reads '
+                'and CNTFRQ in %s' % (logical, candidates))
+        chosen['logical_site'] = logical
+        waitclear_detail.append(chosen)
+    verified['waitClear-counter-cntvct-cntfrq'] = {'in': waitclear_detail}
+
+    # cleanToMemory: startCPU must retain the DC CIVAC loop and its trailing
+    # DSB SY + ISB. Check for a DC CIVAC (masked) followed by the dsb+isb tail.
+    words, base = _words(image, CLEAN_CALLERS[0])
+    if words is None:
+        raise ValueError('ArmCpu startCPU is missing for cleanToMemory check')
+    dc_hits = _find_subsequence(words, ('dc_civac',))
+    tail = _find_sequence(words, ('dsb_sy', 'isb'))
+    if not dc_hits or not any(i > dc_hits[0] for i in tail):
+        raise ValueError('ArmCpu startCPU lacks cleanToMemory DC CIVAC + DSB+ISB tail')
+    verified['cleanToMemory-dc-civac-dsb-isb'] = {
+        'function': CLEAN_CALLERS[0],
+        'dc_civac_at': [hex((base or 0) + 4 * i) for i in dc_hits],
+        'dsb_isb_at': [hex((base or 0) + 4 * i) for i in tail],
+    }
+
+    # The 14th unique template (dsb sy + isb) belongs only to cleanToMemory,
+    # which is inlined into startCPU; record it as the same verified entry so
+    # the template is named without demanding it in unrelated callers.
+    verified['dsb-sy-isb'] = {
+        'sequence': ['dsb_sy', 'isb'],
+        'in': [{'function': CLEAN_CALLERS[0],
+                'at': verified['cleanToMemory-dc-civac-dsb-isb']['dsb_isb_at']}],
+    }
+
+    # The gate names 14 unique templates (17 source sites). It adds derived
+    # checks that are not separate templates: waitClear start/loop CNTVCT plus
+    # CNTFRQ, and cleanToMemory's DC CIVAC loop. Reported separately so a
+    # template count is never conflated with the number of verified sequences.
+    return {'templates_verified': sorted(verified), 'template_count': 14,
+            'source_sites': 17, 'sequence_count': len(verified),
+            'runtime_qualified': False, 'detail': verified}
 
 
 def check_ipi_object(path):
-    """Require the real SGI write, with its barriers, in both emitted senders."""
+    """Legacy interface: require the real SGI write in both emitters only."""
     from native_ufs_bindings import MachO
     image = MachO(path)
     if image.kind != 1:
         raise ValueError('IPI instruction check requires a relocatable ArmCpu object')
     checked = {}
-    for name in ('__ZN6ArmCpu9signalCPUEP5IOCPU', '_armcpu_ipi_selftest'):
-        start = image.names.get(name)
-        if start is None:
+    for name in SGI_SENDERS:
+        words, base = _words(image, name)
+        if words is None:
             raise ValueError('ArmCpu IPI sender is missing: ' + name)
-        section = next(s for s in image.sections if s[0] <= start < s[0] + s[1])
-        end = min([value for value in image.names.values() if start < value < section[0] + section[1]]
-                  + [section[0] + section[1]])
-        code = image.data[section[2] + start - section[0]:section[2] + end - section[0]]
-        words = struct.unpack('<%dI' % (len(code) // 4), code)
-        positions = [i for i, word in enumerate(words) if word & 0xffffffe0 == 0xd518cba0]
-        if not any(i > 0 and i + 1 < len(words) and words[i - 1] == 0xd5033a9f and
-                   words[i + 1] == 0xd5033fdf for i in positions):
+        hits = _find_sequence(words, ('dsb_ishst', 'sgi1r', 'isb'))
+        if not hits:
             raise ValueError('ArmCpu sender lacks DSB / ICC_SGI1R_EL1 / ISB: ' + name)
-        checked[name] = [hex(start + 4 * i) for i in positions]
+        checked[name] = [hex((base or 0) + 4 * i) for i in hits]
     return {'senders': checked, 'sgi1r_barriers_verified': True, 'runtime_qualified': False}
