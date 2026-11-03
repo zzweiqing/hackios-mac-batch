@@ -742,7 +742,7 @@ nabu_ui_watch_task_snapshot(thread_t anchor, unsigned rotation,
     const uint32_t start = limit ? rotation % limit : 0;
     unsigned scanned = 0, returned = 0;
     thread_t thread;
-    queue_iterate(&task->threads, thread_t, thread, task_threads) {
+    queue_iterate(&task->threads, thread, thread_t, task_threads) {
         if (scanned >= limit) break;
         const unsigned index = scanned++;
         if ((index + limit - start) % limit >= 32) continue;
@@ -824,7 +824,7 @@ nabu_ui_watch_task_snapshot(thread_t anchor, unsigned rotation,
     const uint32_t start = limit ? rotation % limit : 0;
     unsigned scanned = 0, returned = 0;
     thread_t thread;
-    queue_iterate(&task->threads, thread_t, thread, task_threads) {
+    queue_iterate(&task->threads, thread, thread_t, task_threads) {
         if (scanned >= limit) break;
         const unsigned index = scanned++;
         if ((index + limit - start) % limit >= 32) continue;
