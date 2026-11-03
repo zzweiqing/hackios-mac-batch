@@ -1,29 +1,48 @@
 """Reversible, explicitly enabled UI exec and first-main-thread observations."""
 
-CONTRACT = {
-    'version': 3, 'trigger': 'nabu-ui-watch=1',
-    'targets': ['SpringBoard', 'backboardd', 'runningboardd'],
-    'paths': ['/System/Library/CoreServices/SpringBoard.app/SpringBoard',
-              '/usr/libexec/backboardd', '/usr/libexec/runningboardd'],
-    'symbols': ['_nabu_ui_watch_snapshot', '_nabu_ui_watch_exit_note',
-                '_nabu_ui_watch_activation', '_nabu_ui_watch_signature',
-                '_nabu_ui_watch_release_ready', '_nabu_ui_watch_released',
-                '_nabu_ui_watch_activate_image_v2', '_nabu_ui_watch_thread_state'],
-    'symbols_by_object': {
-        'kern_exec.c': ['_nabu_ui_watch_snapshot', '_nabu_ui_watch_exit_note',
-                        '_nabu_ui_watch_activation', '_nabu_ui_watch_signature',
-                        '_nabu_ui_watch_release_ready', '_nabu_ui_watch_released',
-                        '_nabu_ui_watch_activate_image_v2'],
-        'thread.c': ['_nabu_ui_watch_thread_state'],
-    },
-    'symbol_references_by_object': {'kern_exit.c': ['_nabu_ui_watch_exit_note']},
-    'max_samples': 64, 'interval_us': 10000000, 'max_threads': 3,
-    'max_events': 96, 'max_exec_contexts': 0, 'max_line_bytes': 256, 'first_incarnation_only': True,
-    'target_association': 'activation-call-output',
-    'spawn_branch_observation': True,
-    'user_memory_read': False, 'scheduler_changed': False, 'new_worker': False,
-    'runtime_qualified': False,
-}
+CONTRACT = {'version': 4,
+ 'trigger': 'nabu-ui-watch=1',
+ 'targets': ['SpringBoard', 'backboardd', 'runningboardd'],
+ 'paths': ['/System/Library/CoreServices/SpringBoard.app/SpringBoard',
+           '/usr/libexec/backboardd',
+           '/usr/libexec/runningboardd'],
+ 'symbols': ['_nabu_ui_watch_snapshot',
+             '_nabu_ui_watch_exit_note',
+             '_nabu_ui_watch_activation',
+             '_nabu_ui_watch_signature',
+             '_nabu_ui_watch_release_ready',
+             '_nabu_ui_watch_released',
+             '_nabu_ui_watch_activate_image_v2',
+             '_nabu_ui_watch_thread_state',
+             '_nabu_ui_watch_task_snapshot'],
+ 'symbols_by_object': {'kern_exec.c': ['_nabu_ui_watch_snapshot',
+                                       '_nabu_ui_watch_exit_note',
+                                       '_nabu_ui_watch_activation',
+                                       '_nabu_ui_watch_signature',
+                                       '_nabu_ui_watch_release_ready',
+                                       '_nabu_ui_watch_released',
+                                       '_nabu_ui_watch_activate_image_v2'],
+                       'thread.c': ['_nabu_ui_watch_thread_state', '_nabu_ui_watch_task_snapshot']},
+ 'symbol_references_by_object': {'kern_exit.c': ['_nabu_ui_watch_exit_note']},
+ 'max_samples': 64,
+ 'interval_us': 10000000,
+ 'max_threads': 3,
+ 'max_events': 96,
+ 'max_exec_contexts': 0,
+ 'max_line_bytes': 256,
+ 'first_incarnation_only': True,
+ 'target_association': 'activation-call-output',
+ 'spawn_branch_observation': True,
+ 'user_memory_read': False,
+ 'scheduler_changed': False,
+ 'new_worker': False,
+ 'runtime_qualified': False,
+ 'task_trigger': 'nabu-ui-task-watch=1',
+ 'task_scan_limit': 128,
+ 'task_row_limit': 32,
+ 'task_new_references': 0,
+ 'task_wait_tag_scope': 'thread-specific',
+ 'task_snapshot_atomic': False}
 PREFIX = '#define nabu_gpu_userprobe_exec_snapshot nabu_ui_watch_snapshot\n'
 SUFFIX = '#undef nabu_gpu_userprobe_exec_snapshot\n'
 
@@ -31,6 +50,7 @@ EXEC_HELPER = r'''/* NABU_UI_WATCH_V2: bounded observation, no exec/scheduler po
  * This is a BSD unit: struct thread and sched locks are not visible here. The
  * scheduler fields are read by nabu_ui_watch_thread_state in osfmk/kern/thread.c. */
 extern int nabu_ui_watch_thread_state(thread_t, uint32_t *, uint32_t *, uint64_t *);
+extern int nabu_ui_watch_task_snapshot(thread_t, unsigned, uint64_t [32][5], uint32_t [4]);
 /* XNU thread state bits; thread.h's definitions are private to osfmk. */
 enum { NABU_UI_TH_TERMINATE = 0x10, NABU_UI_TH_TERMINATE2 = 0x20 };
 
@@ -63,6 +83,11 @@ static int nabu_ui_enabled_cache = -1;
 static unsigned nabu_ui_closed, nabu_ui_event_count, nabu_ui_event_dropped, nabu_ui_seen_mask;
 static unsigned nabu_ui_sample_busy, nabu_ui_sample_contended, nabu_ui_samples, nabu_ui_text_dropped;
 static uint64_t nabu_ui_next_us;
+/* Only the existing single-writer snapshot gate accesses these buffers.
+ * Keep the 1,280-byte rows off the writer's kernel stack. */
+static uint64_t nabu_ui_task_rows[32][5];
+static uint32_t nabu_ui_task_meta[4];
+static int nabu_ui_task_enabled_cache = -1;
 extern void nabu_capture_append(const char *, unsigned);
 extern void nabu_gpu_userprobe_exec_snapshot(uint32_t out[6]);
 
@@ -274,6 +299,13 @@ nabu_ui_watch_snapshot(uint32_t out[6])
     }
     nabu_ui_next_us = now > UINT64_MAX - 10000000 ? UINT64_MAX : now + 10000000;
     const unsigned sample = ++nabu_ui_samples;
+    /* The build flag and nabu-ui-watch must already be enabled. Task sampling
+     * is a second, default-off runtime choice independent of display wrapping. */
+    if (nabu_ui_task_enabled_cache < 0) {
+        unsigned requested = 0;
+        nabu_ui_task_enabled_cache = PE_parse_boot_argn("nabu-ui-task-watch", &requested,
+            sizeof(requested)) && requested == 1;
+    }
     char line[256];
     unsigned event_count = __atomic_load_n(&nabu_ui_event_count, __ATOMIC_ACQUIRE);
     if (event_count > NABU_UI_MAX_EVENTS) event_count = NABU_UI_MAX_EVENTS;
@@ -317,6 +349,35 @@ nabu_ui_watch_snapshot(uint32_t out[6])
             (unsigned long long)slot->tid, status, state, hint, (unsigned long long)wait,
             exited, exited || latest_tid != slot->tid ||
             (state & (NABU_UI_TH_TERMINATE | NABU_UI_TH_TERMINATE2)), instances));
+    }
+    if (nabu_ui_task_enabled_cache == 1) {
+        for (unsigned i = 0; i < NABU_UI_TARGETS; ++i) {
+            struct nabu_ui_slot *slot = &nabu_ui_slots[i];
+            if (__atomic_load_n(&slot->phase, __ATOMIC_ACQUIRE) != NABU_UI_READY) continue;
+            thread_t anchor = __atomic_load_n(&slot->thread, __ATOMIC_ACQUIRE);
+            const unsigned rotation = (sample - 1) * 32;
+            const int sampled = nabu_ui_watch_task_snapshot(anchor, rotation,
+                nabu_ui_task_rows, nabu_ui_task_meta);
+            unsigned exited = __atomic_load_n(&slot->exit_observed, __ATOMIC_ACQUIRE);
+            unsigned stale = exited ||
+                __atomic_load_n(&slot->latest_tid, __ATOMIC_ACQUIRE) != slot->tid;
+            nabu_ui_emit(line, snprintf(line, sizeof(line),
+                "NabuUITask: sample=%u target=%s pid=%d uid=%llu status=%s total=%u scanned=%u rows=%u omitted=%u rotation=%u stale=%u snapshot=non-atomic\n",
+                sample, nabu_ui_names[i], slot->pid, (unsigned long long)slot->uniqueid,
+                sampled == 0 ? "sample_ok" : sampled == 1 ? "lock_busy" : "sample_unavailable",
+                nabu_ui_task_meta[0], nabu_ui_task_meta[1], nabu_ui_task_meta[2],
+                nabu_ui_task_meta[3], rotation, stale));
+            if (sampled != 0) continue;
+            for (unsigned j = 0; j < nabu_ui_task_meta[2] && j < 32; ++j) {
+                const uint64_t *row = nabu_ui_task_rows[j];
+                nabu_ui_emit(line, snprintf(line, sizeof(line),
+                    "NabuUITask: sample=%u target=%s pid=%d uid=%llu tid=%llu status=%s state=%x hint=%u wait_tag=%llx\n",
+                    sample, nabu_ui_names[i], slot->pid, (unsigned long long)slot->uniqueid,
+                    (unsigned long long)row[0], row[4] == 0 ? "sample_ok" :
+                    row[4] == 1 ? "lock_busy" : "sample_unavailable", (unsigned)row[1],
+                    (unsigned)row[2], (unsigned long long)row[3]));
+            }
+        }
     }
     nabu_ui_emit(line, snprintf(line, sizeof(line),
         "NabuUI: budget sample=%u us=%llu events=%u pending=%u dropped=%u texts_dropped=%u target_link=direct sample_contended=%u closing=%u snapshot=non-atomic\n",
@@ -656,15 +717,64 @@ nabu_ui_watch_thread_state(thread_t thread, uint32_t *state, uint32_t *hint, uin
 	*wait_tag = tag;
 	return 0;
 }
+/* NABU_UI_WATCH_TASK_V1: anchor reference owns the task lifetime.
+ * Task list and scheduler locks are try-only. Copy scalars, release the task
+ * lock, then format in the BSD caller; never call the recorder under this lock.
+ * Rows: TID, state, hint, thread-specific wait tag, scheduler sample result.
+ * Meta: task count, scanned entries, returned rows, omitted rows.
+ */
+int
+nabu_ui_watch_task_snapshot(thread_t anchor, unsigned rotation,
+    uint64_t rows[32][5], uint32_t meta[4])
+{
+    if (rows == NULL || meta == NULL) return 2;
+    for (unsigned i = 0; i < 4; ++i) meta[i] = 0;
+    for (unsigned i = 0; i < 32; ++i)
+        for (unsigned j = 0; j < 5; ++j) rows[i][j] = 0;
+    /* thread_deallocate's last-reference path drops this task reference.
+     * The retained anchor therefore keeps its task alive during this call. */
+    if (anchor == THREAD_NULL) return 2;
+    task_t task = get_threadtask(anchor);
+    if (task == TASK_NULL) return 2;
+    if (!task_lock_try(task)) return 1;
+    const uint32_t count = task->thread_count > 0 ? (uint32_t)task->thread_count : 0;
+    const uint32_t limit = count < 128 ? count : 128;
+    const uint32_t start = limit ? rotation % limit : 0;
+    unsigned scanned = 0, returned = 0;
+    thread_t thread;
+    queue_iterate(&task->threads, thread_t, thread, task_threads) {
+        if (scanned >= limit) break;
+        const unsigned index = scanned++;
+        if ((index + limit - start) % limit >= 32) continue;
+        if (returned >= 32) break;
+        uint32_t state = 0, hint = 0;
+        uint64_t wait = 0;
+        const uint64_t tid = thread_tid(thread);
+        /* This helper uses one scheduler try-lock, never waits for it, and
+         * restores splsched before returning. Task list ownership keeps this
+         * thread valid until its scalar fields have been copied. */
+        const int sampled = nabu_ui_watch_thread_state(thread, &state, &hint, &wait);
+        rows[returned][0] = tid;
+        rows[returned][1] = state;
+        rows[returned][2] = hint;
+        rows[returned][3] = wait;
+        rows[returned][4] = (uint64_t)sampled;
+        ++returned;
+    }
+    meta[0] = count;
+    meta[1] = scanned;
+    meta[2] = returned;
+    meta[3] = count > returned ? count - returned : 0;
+    task_unlock(task);
+    return 0;
+}
 '''
 
-THREAD_PAIRS = (
-    (r'''/* Drop a thread refcount safely without triggering a zfree */
+THREAD_PAIRS = ((r'''/* Drop a thread refcount safely without triggering a zfree */
 void
 thread_deallocate_safe(thread_t thread)
 {
-''',
-     r'''/* NABU_UI_WATCH_THREAD_V1: scheduler fields stay in this private osfmk unit. */
+''', r'''/* NABU_UI_WATCH_THREAD_V1: scheduler fields stay in this private osfmk unit. */
 int
 nabu_ui_watch_thread_state(thread_t thread, uint32_t *state, uint32_t *hint, uint64_t *wait_tag)
 {
@@ -689,12 +799,62 @@ nabu_ui_watch_thread_state(thread_t thread, uint32_t *state, uint32_t *hint, uin
 	*wait_tag = tag;
 	return 0;
 }
+/* NABU_UI_WATCH_TASK_V1: anchor reference owns the task lifetime.
+ * Task list and scheduler locks are try-only. Copy scalars, release the task
+ * lock, then format in the BSD caller; never call the recorder under this lock.
+ * Rows: TID, state, hint, thread-specific wait tag, scheduler sample result.
+ * Meta: task count, scanned entries, returned rows, omitted rows.
+ */
+int
+nabu_ui_watch_task_snapshot(thread_t anchor, unsigned rotation,
+    uint64_t rows[32][5], uint32_t meta[4])
+{
+    if (rows == NULL || meta == NULL) return 2;
+    for (unsigned i = 0; i < 4; ++i) meta[i] = 0;
+    for (unsigned i = 0; i < 32; ++i)
+        for (unsigned j = 0; j < 5; ++j) rows[i][j] = 0;
+    /* thread_deallocate's last-reference path drops this task reference.
+     * The retained anchor therefore keeps its task alive during this call. */
+    if (anchor == THREAD_NULL) return 2;
+    task_t task = get_threadtask(anchor);
+    if (task == TASK_NULL) return 2;
+    if (!task_lock_try(task)) return 1;
+    const uint32_t count = task->thread_count > 0 ? (uint32_t)task->thread_count : 0;
+    const uint32_t limit = count < 128 ? count : 128;
+    const uint32_t start = limit ? rotation % limit : 0;
+    unsigned scanned = 0, returned = 0;
+    thread_t thread;
+    queue_iterate(&task->threads, thread_t, thread, task_threads) {
+        if (scanned >= limit) break;
+        const unsigned index = scanned++;
+        if ((index + limit - start) % limit >= 32) continue;
+        if (returned >= 32) break;
+        uint32_t state = 0, hint = 0;
+        uint64_t wait = 0;
+        const uint64_t tid = thread_tid(thread);
+        /* This helper uses one scheduler try-lock, never waits for it, and
+         * restores splsched before returning. Task list ownership keeps this
+         * thread valid until its scalar fields have been copied. */
+        const int sampled = nabu_ui_watch_thread_state(thread, &state, &hint, &wait);
+        rows[returned][0] = tid;
+        rows[returned][1] = state;
+        rows[returned][2] = hint;
+        rows[returned][3] = wait;
+        rows[returned][4] = (uint64_t)sampled;
+        ++returned;
+    }
+    meta[0] = count;
+    meta[1] = scanned;
+    meta[2] = returned;
+    meta[3] = count > returned ? count - returned : 0;
+    task_unlock(task);
+    return 0;
+}
 /* Drop a thread refcount safely without triggering a zfree */
 void
 thread_deallocate_safe(thread_t thread)
 {
-'''),
-)
+'''),)
 
 
 def thread_source(text, restore=False):
