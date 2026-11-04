@@ -17,6 +17,8 @@
 #define NABU_LOG_EARLY_SMP_H
 extern "C" {
 extern volatile uint32_t armcpu_registered,armcpu_gic_ready;
+extern volatile uint32_t armcpu_nabu_boot_phase,armcpu_nabu_register_phase[8];
+extern volatile int32_t armcpu_nabu_register_rc[8];
 extern volatile uint32_t armcpu_smp_requested,armcpu_smp_running,armcpu_smp_conduit,armcpu_boot_mpidr;
 extern volatile uint32_t armcpu_smp_step[8],armcpu_smp_mpidr[8],armcpu_smp_seen_mpidr[8],armcpu_smp_fail[8];
 extern volatile uint32_t armcpu_smp_sys[8][5],armcpu_core_timer[8],armcpu_core_sgi[8];
@@ -62,19 +64,20 @@ static void nabuLogEarlySmpPoll(void)
     NABU_SMP_EMIT("NabuSMP: cfg sample=%u cpus=%u have_cpus=%u sheng=%u have_sheng=%u self_ipi=%u diag=%u ui_watch=%u ui_task=%u\n",
         sample,cpus,have_cpus,sheng,have_sheng,ipi,diag,ui_watch,ui_task);
   }
-  NABU_SMP_EMIT("NabuSMP: smp=%u now=%llu snapshot=non-atomic render_proof=0 reg=%u gic=%u smp_wanted=%u secondary_run=%u conduit=%u boot_mpidr=%x ncpus=%u avail=%u\n",
+  NABU_SMP_EMIT("NabuSMP: smp=%u now=%llu snapshot=non-atomic render_proof=0 reg=%u gic=%u smp_wanted=%u secondary_run=%u conduit=%u boot_mpidr=%x ncpus=%u avail=%u boot_phase=%u\n",
       sample,(unsigned long long)now,armcpu_registered,armcpu_gic_ready,
       armcpu_smp_requested,armcpu_smp_running,armcpu_smp_conduit,armcpu_boot_mpidr,
-      real_ncpus,processor_avail_count);
+      real_ncpus,processor_avail_count,armcpu_nabu_boot_phase);
   NABU_SMP_EMIT("NabuSMP: smp=%u timer=%llu ipi=%llu sent=%llu irq_phase=%u irq_id=%u long_drains=%llu drain_most=%u\n",
       sample,(unsigned long long)armcpu_timer_interrupts,
       (unsigned long long)armcpu_ipi_interrupts,(unsigned long long)armcpu_ipi_sent,
       armcpu_irq_phase,armcpu_irq_id,(unsigned long long)armcpu_irq_long_drains,armcpu_irq_drain_most);
   for(unsigned slot=0;slot<8;++slot)
-    NABU_SMP_EMIT("NabuSMP: smp=%u slot=%u step=%u mpidr=%x seen=%x fail=%x psci=%d el=%x sctlr=%x timer=%u sgi=%u\n",
+    NABU_SMP_EMIT("NabuSMP: smp=%u slot=%u step=%u mpidr=%x seen=%x fail=%x psci=%d el=%x sctlr=%x timer=%u sgi=%u reg_phase=%u reg_rc=%d\n",
         sample,slot,armcpu_smp_step[slot],armcpu_smp_mpidr[slot],armcpu_smp_seen_mpidr[slot],
         armcpu_smp_fail[slot],armcpu_smp_psci_rc[slot],armcpu_smp_sys[slot][0],
-        armcpu_smp_sys[slot][1],armcpu_core_timer[slot],armcpu_core_sgi[slot]);
+        armcpu_smp_sys[slot][1],armcpu_core_timer[slot],armcpu_core_sgi[slot],
+        armcpu_nabu_register_phase[slot],armcpu_nabu_register_rc[slot]);
 #undef NABU_SMP_EMIT
 }
 #endif

@@ -99,10 +99,92 @@ def patch_assembly(text):
     return text
 
 
+BOOT_INIT_OLD = '''  enableGic ();
+  if (gSpiIpi) { spiIpiConfigure (gDist, logicalId, affinity); }
+  enableCPUTimeBase (true);
+  setCPUState (kIOCPUStateRunning);
+  bootInitialized = true;
+  if (gSelfIpi) { signalCPU (this); }
+}'''
+
+BOOT_INIT_NEW = '''  // The boot driver runs on a schedulable IOKit thread. Enabling Group 1
+  // can deliver a pending timer before the GIC readback and timer/state setup
+  // finish. Keep just this non-blocking hardware handoff IRQ-masked; restore
+  // the caller's state, not unconditionally enabled. No allocation, service
+  // publication, registration, or pending-CPU drain belongs in this interval.
+  const boolean_t nabuSavedIrq = ml_set_interrupts_enabled (FALSE);
+  armcpu_nabu_boot_phase = 20;
+  enableGic ();
+  armcpu_nabu_boot_phase = 21;
+  if (gSpiIpi) { spiIpiConfigure (gDist, logicalId, affinity); }
+  enableCPUTimeBase (true);
+  armcpu_nabu_boot_phase = 22;
+  setCPUState (kIOCPUStateRunning);
+  bootInitialized = true;
+  armcpu_nabu_boot_phase = 23;
+  ml_set_interrupts_enabled (nabuSavedIrq);
+  armcpu_nabu_boot_phase = 24;
+  if (gSelfIpi) { signalCPU (this); }
+  armcpu_nabu_boot_phase = 25;
+}'''
+
+
+def patch_boot_handoff(text):
+    """Mask only boot initCPU's hardware handoff, with passive progress fields.
+
+    These fields are last-reached milestones, not an atomic stack sample. The
+    existing early ESP sampler emits them only under nabu-smp-watch=1. Secondary
+    initCPU/PSCI/GIC register values and the scheduler algorithm are unchanged.
+    """
+    pairs = (
+        ('volatile uint32_t armcpu_registered = 0;\n',
+         'volatile uint32_t armcpu_registered = 0;\n'
+         'volatile uint32_t armcpu_nabu_boot_phase = 0;\n'
+         'volatile uint32_t armcpu_nabu_register_phase[8];\n'
+         'volatile int32_t armcpu_nabu_register_rc[8];\n'),
+        (BOOT_INIT_OLD, BOOT_INIT_NEW),
+        ('  armcpu_registered = 1;\n',
+         '  armcpu_registered = 1;\n  armcpu_nabu_boot_phase = 10;\n'),
+        ('  if (!bootInitialized) { initCPU (true); }\n  registerService ();\n',
+         '  if (!bootInitialized) { initCPU (true); }\n'
+         '  armcpu_nabu_boot_phase = 30;\n  registerService ();\n'
+         '  armcpu_nabu_boot_phase = 31;\n'),
+        ('  __atomic_store_n (&gBootRegistered, 1U, __ATOMIC_RELEASE);\n  drainPending ();\n',
+         '  __atomic_store_n (&gBootRegistered, 1U, __ATOMIC_RELEASE);\n'
+         '  armcpu_nabu_boot_phase = 32;\n  drainPending ();\n'
+         '  armcpu_nabu_boot_phase = 33;\n'),
+        ('    __atomic_store_n (&gPending[logicalId], this, __ATOMIC_RELEASE);\n',
+         '    armcpu_nabu_register_phase[logicalId] = 1;\n'
+         '    __atomic_store_n (&gPending[logicalId], this, __ATOMIC_RELEASE);\n'),
+        ('bool ArmCpu::finishSecondary (void)\n{\n',
+         'bool ArmCpu::finishSecondary (void)\n{\n'
+         '  armcpu_nabu_register_phase[logicalId] = 2;\n'),
+        ('  if (status != KERN_SUCCESS) { armcpu_smp_fail[logicalId] = 4; return false; }\n',
+         '  armcpu_nabu_register_rc[logicalId] = status;\n'
+         '  armcpu_nabu_register_phase[logicalId] = 4;\n'
+         '  if (status != KERN_SUCCESS) { armcpu_smp_fail[logicalId] = 4; return false; }\n'),
+        ('  registerService ();\n  startSecondary ();\n',
+         '  registerService ();\n  armcpu_nabu_register_phase[logicalId] = 5;\n'
+         '  startSecondary ();\n  armcpu_nabu_register_phase[logicalId] = 6;\n'),
+    )
+    for old, new in pairs:
+        if text.count(old) != 1:
+            raise ValueError('ArmCpu boot handoff source drift: ' + old[:90])
+        text = text.replace(old, new, 1)
+    # Scope the enter marker to finishSecondary, never to boot registration.
+    start = text.index('bool ArmCpu::finishSecondary (void)')
+    tail = text[start:]
+    call = '  kern_return_t status = ml_processor_register (&info, &machProcessor, &ipi_handler, &pmi);\n'
+    if tail.count(call) != 1:
+        raise ValueError('ArmCpu secondary registration source drift')
+    return text[:start] + tail.replace(
+        call, '  armcpu_nabu_register_phase[logicalId] = 3;\n' + call, 1)
+
+
 def patch_source(text):
     # The pinned file may be checked out with CRLF; normalize so the pinned
     # source templates match and the transform is deterministic.
-    return patch_assembly(patch_timer_source(text.replace('\r\n', '\n')))
+    return patch_boot_handoff(patch_assembly(patch_timer_source(text.replace('\r\n', '\n'))))
 
 
 # A64 encodings verified against clang for arm64-apple-ios17.0. System-register
