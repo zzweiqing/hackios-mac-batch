@@ -15,6 +15,7 @@
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSIterator.h>
 #include <mach/kmod.h>
+#include <libkern/OSKextLib.h>
 #include <kern/thread.h>
 #include <kern/clock.h>
 #include <pexpert/pexpert.h>
@@ -24,6 +25,7 @@ vm_offset_t ml_io_map(vm_offset_t pa, vm_size_t size);
 extern kmod_info_t g_kernel_kmod_info;
 kern_return_t OSKextLoadKextWithIdentifier(const char *);
 void nabu_touch_static_init(void) __asm__("__GLOBAL__sub_I_NabuTouch.cpp");
+extern "C" OSReturn OSKextRegisterBoardClasses(const char *kextIdentifier, void (*constructors)(void));
 bool nabu_touch_publish(IOService *platform);
 // [0] stage reached, [1] frames read, [2] frames with fingers, [3] checksum drops,
 // [4] HID reports sent, [5] last handleReport status, [6] latch hits, [7] firmware downloads
@@ -596,10 +598,11 @@ NabuTouchHid *publishHid()
   TLOG("IOHIDFamily load=%d", result);
   if (result != KERN_SUCCESS) { return nullptr; }
   // The original IOHIDDevice metaclass must exist before the subclass initializer runs.
-  void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-  if (!handle) { return nullptr; }
-  nabu_touch_static_init();
-  if (OSMetaClass::postModLoad(handle) != KERN_SUCCESS) {
+  // Register under sKextLock in OSKext::load's lock order (source-ci
+  // nabu-board-class-registration.patch); a bare preModLoad/postModLoad pair can deadlock.
+  const OSReturn registration = OSKextRegisterBoardClasses(g_kernel_kmod_info.name, nabu_touch_static_init);
+  if (registration == kOSKextReturnNoMemory) { return nullptr; }
+  if (registration != KERN_SUCCESS) {
     TLOG("subclass registration failed");
     return nullptr;
   }

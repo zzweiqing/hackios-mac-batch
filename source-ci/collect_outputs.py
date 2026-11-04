@@ -9,7 +9,7 @@ import subprocess
 import tarfile
 import sys
 
-from prepare_source import INPUT_SHA256, UPSTREAM
+from prepare_source import INPUT_SHA256, UPSTREAM, XNU_SMP_PATCHES
 from nabu_logging_build import qualify_logging_candidate
 from nabu_data_skeleton import qualify_data_skeleton
 from nabu_display_ci import DISPLAY_PROFILES, qualify_display_candidate
@@ -168,6 +168,10 @@ def selected_files(upstream):
     # walking the build tree.
     add(upstream / 'patches/xnu/native-4k-signature-hash-cache.patch',
         Path('tree/patches/xnu/native-4k-signature-hash-cache.patch'))
+    # The pinned XNU SMP backports prepare_source.py materialized into the
+    # upstream series, collected the same way from the upstream checkout.
+    for patch in XNU_SMP_PATCHES:
+        add(upstream / patch['target'], Path('tree') / patch['target'])
     return files
 
 

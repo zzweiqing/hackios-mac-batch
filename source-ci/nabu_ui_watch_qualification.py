@@ -1,12 +1,46 @@
 """Qualify the separately enabled UI observer from real private build inputs."""
 import ast
 import hashlib
+import re
 import struct
 
 
 def require(value, reason):
     if not value:
         raise ValueError(reason)
+
+
+# v5 wait-owner record: exact code-level limits and gates the generator must carry.
+WAIT_EXEC_REQUIRED = (
+    'NABU_UI_WAIT_TARGET_LINES = 16, NABU_UI_WAIT_SAMPLE_LINES = 48',
+    'NABU_UI_WAIT_TOTAL_LINES = 1536',
+    'if (nabu_ui_task_enabled_cache == 1 && nabu_ui_wait_enabled_cache < 0) {',
+)
+WAIT_THREAD_REQUIRED = (
+    'waitq_lock_try(', 'thread_get_waiting_turnstile(', 'NABU_UI_WAIT_MAX_HOPS = 3',
+    'simple_lock_try(&holder->sched_lock',
+    'return hint == 2 || hint == 4 || hint == 5 || hint == 10 || hint == 16 || hint == 18;',
+)
+WAIT_THREAD_FORBIDDEN = (
+    'waitq_lock(', 'thread_lock(', 'kdp_', 'ull_owner', 'turnstile_reference',
+    'thread_reference', 'copyin', 'kalloc', 'zalloc', 'lck_mtx_lock')
+# Blocking lock entry points matched as whole call tokens: an identifier boundary on the
+# left, and for bare names no '_try' continuation, so the helper's simple_lock_try(,
+# task_lock_try( and waitq_lock_try( remain allowed.
+WAIT_THREAD_FORBIDDEN_CALLS = (
+    'simple_lock(', 'task_lock(', 'hw_lck_ticket_lock(', 'lck_spin_lock',
+    'waitq_lock_allow_invalid', 'waitq_lock_reserve', 'waitq_lock_wait')
+_FORBIDDEN_CALL = re.compile('|'.join(
+    r'(?<![A-Za-z0-9_])' + re.escape(name) + ('' if name.endswith('(') else r'(?!_try)')
+    for name in WAIT_THREAD_FORBIDDEN_CALLS))
+
+
+def wait_helpers_ok(exec_helper, thread_helper):
+    """Static v5 gate over the generator's helper text (try-only, bounded, default-off)."""
+    return (all(name in exec_helper for name in WAIT_EXEC_REQUIRED) and
+            all(name in thread_helper for name in WAIT_THREAD_REQUIRED) and
+            not any(name in thread_helper for name in WAIT_THREAD_FORBIDDEN) and
+            _FORBIDDEN_CALL.search(thread_helper) is None)
 
 
 def sha(data):
@@ -81,7 +115,8 @@ def qualify(read, candidate):
             thread_source = b''
         require(b'NABU_UI_WATCH' not in exec_source and b'NABU_UI_WATCH' not in exit_source and
                 b'NABU_UI_WATCH' not in thread_source and
-                b'nabu-ui-watch' not in candidate and b'_nabu_ui_watch_' not in candidate,
+                b'nabu-ui-watch' not in candidate and b'_nabu_ui_watch_' not in candidate and
+                b'nabu-ui-wait-owner' not in candidate and b'NabuUIWait' not in candidate,
                 'Disabled kernel retains UI observer definitions or dependencies')
         return {'compiled': False, 'runtime_qualified': False}
     thread_source = read(thread_path)
@@ -102,7 +137,7 @@ def qualify(read, candidate):
             contract.get('max_threads') == 3 and contract.get('targets') ==
             ['SpringBoard', 'backboardd', 'runningboardd'], 'UI scope or budget changed')
     version = contract.get('version', 1)
-    require(type(version) is int and version in (1, 2, 3, 4), 'Unknown UI observer contract version')
+    require(type(version) is int and version in (1, 2, 3, 4, 5), 'Unknown UI observer contract version')
     if version >= 2:
         require(contract.get('target_association') == 'activation-call-output' and
                 contract.get('max_exec_contexts') == 0 and
@@ -125,6 +160,25 @@ def qualify(read, candidate):
                 '_nabu_ui_watch_task_snapshot' in contract.get('symbols', []) and
                 b'nabu-ui-task-watch' in exec_source and b'NabuUITask:' in exec_source,
                 'UI v4 requires separately enabled bounded task-thread snapshots')
+    if version >= 5:
+        thread_helper = constants['THREAD_HELPER']
+        require(contract.get('wait_trigger') == 'nabu-ui-wait-owner=1' and
+                contract.get('wait_requires') == ['nabu-ui-watch=1', 'nabu-ui-task-watch=1'] and
+                contract.get('wait_hints') == [2, 4, 5, 10, 16, 18] and
+                contract.get('wait_max_hops') == 3 and contract.get('wait_target_line_limit') == 16 and
+                contract.get('wait_sample_line_limit') == 48 and
+                contract.get('wait_total_line_limit') == 1536 and contract.get('wait_name_bytes') == 15 and
+                contract.get('wait_lock_mode') == 'try-only' and contract.get('wait_new_references') == 0 and
+                contract.get('wait_owner_field_read') is False and
+                contract.get('wait_debugger_helpers') is False and
+                {'_nabu_ui_watch_thread_wait_owner', '_nabu_ui_watch_task_wait_snapshot'} <=
+                set(contract.get('symbols_by_object', {}).get('thread.c', [])) and
+                b'"nabu-ui-wait-owner"' in exec_source and b'NabuUIWait: sample=' in exec_source and
+                b'NabuUIWait: budget sample=' in exec_source and
+                b'nabu_ui_watch_task_wait_snapshot(' in exec_source and
+                b'NABU_UI_WATCH_WAIT_V1' in thread_source and
+                wait_helpers_ok(constants['EXEC_HELPER'], thread_helper),
+                'UI v5 requires a separately enabled, try-only, bounded wait-owner record')
     require(exec_source.count(constants['EXEC_HELPER'].encode()) == 1 and
             all(exec_source.count(after.encode()) == 1 for _, after in constants['EXEC_PAIRS']) and
             all(exit_source.count(after.encode()) == 1 for _, after in constants['EXIT_PAIRS']) and

@@ -25,6 +25,7 @@
 #include <kern/clock.h>
 #include <kern/thread_call.h>
 #include <mach/kmod.h>
+#include <libkern/OSKextLib.h>
 #include <pexpert/pexpert.h>
 #include "NativeAdrenoUserClient.h"
 #include "NativeAdrenoIntegration.h"
@@ -35,6 +36,7 @@
 
 static NativeAdrenoIntegration integration = {};
 extern "C" kmod_info_t g_kernel_kmod_info;
+extern "C" OSReturn OSKextRegisterBoardClasses(const char *kextIdentifier, void (*constructors)(void));
 extern "C" void native_adreno_publish_static_init(void)
     __asm__("__GLOBAL__sub_I_NativeAdrenoPublish.cpp");
 extern "C" IOReturn native_adreno_accelerator_publish(IOService *,uint32_t);
@@ -635,12 +637,12 @@ extern "C" IOReturn native_adreno_initialize_classes(void)
     if(initialized) {
         return kIOReturnBusy;
     }
-    void *handle=OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-    if(!handle) {
+    // Register under sKextLock in OSKext::load's lock order (source-ci
+    // nabu-board-class-registration.patch); a bare preModLoad/postModLoad pair can deadlock.
+    const OSReturn status=OSKextRegisterBoardClasses(g_kernel_kmod_info.name,native_adreno_publish_static_init);
+    if(status==kOSKextReturnNoMemory) {
         return kIOReturnNoResources;
     }
-    native_adreno_publish_static_init();
-    const OSReturn status=OSMetaClass::postModLoad(handle);
     if(status!=kOSReturnSuccess) {
         return status;
     }

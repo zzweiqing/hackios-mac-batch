@@ -15,6 +15,7 @@
 #include <sys/proc.h>
 #include <pexpert/pexpert.h>
 #include <mach/kmod.h>
+#include <libkern/OSKextLib.h>
 #include <machine/machine_routines.h>
 #include "NabuDisplayClientRegistry.h"
 #if defined(NABU_LEGACY_CPU_PRESENT)
@@ -41,6 +42,7 @@ extern "C" bool native_legacy_set_refresh_properties(void *) { return false; }
 extern "C" void native_legacy_vsync_observed(unsigned, unsigned) {}
 extern "C" kmod_info_t g_kernel_kmod_info;
 extern "C" void native_legacy_display_static_init(void) __asm__("__GLOBAL__sub_I_NativeLegacyDisplay.cpp");
+extern "C" OSReturn OSKextRegisterBoardClasses(const char *kextIdentifier, void (*constructors)(void));
 extern "C" IOService *native_legacy_display_allocate(void);
 #if defined(NABU_LEGACY_CPU_PRESENT)
 extern "C" void nabu_keybag_notifications_start(void);
@@ -589,6 +591,10 @@ __attribute__((noreturn,noinline)) void native_legacy_backend_guard(unsigned slo
       (unsigned)native_legacy_transfer_status,native_legacy_transfer_bytes,native_legacy_retirement_calls,
       native_legacy_prepare_reason,native_legacy_prepare_attempts);
 }
+static void native_legacy_display_register_classes(void) {
+    native_legacy_display_static_init();
+    IOLog("NABU LEGACY: static init done\n");
+}
 void native_legacy_display_probe(void);
 void native_legacy_display_probe(void) {
     // The registration path and optional original-userclient inspection both
@@ -597,11 +603,12 @@ void native_legacy_display_probe(void) {
     if(native_legacy_stage)return;
     native_legacy_stage=1;
     IOLog("NABU LEGACY: preModLoad begin\n");
-    void *handle=OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-    if(!handle){native_legacy_display_checkpoint();return;}
-    native_legacy_display_static_init();
-    IOLog("NABU LEGACY: static init done\n");
-    native_legacy_meta_status=OSMetaClass::postModLoad(handle);
+    // Register under sKextLock in OSKext::load's lock order (source-ci
+    // nabu-board-class-registration.patch); a bare preModLoad/postModLoad pair can deadlock.
+    const OSReturn registration=OSKextRegisterBoardClasses(g_kernel_kmod_info.name,
+        native_legacy_display_register_classes);
+    if(registration==kOSKextReturnNoMemory){native_legacy_display_checkpoint();return;}
+    native_legacy_meta_status=registration;
     IOLog("NABU LEGACY: postModLoad=%d\n",native_legacy_meta_status);
     if(native_legacy_meta_status){native_legacy_display_checkpoint();return;}
     PE_Video video={};native_legacy_stage=2;

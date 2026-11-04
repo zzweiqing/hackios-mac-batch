@@ -12,3 +12,10 @@ freeBo advances the scheduler (as closeOwner does) so a completed job's own
 reference is dropped before the unmap; NativeAdrenoScheduler.cpp accept
 refuses the buffer range checks of submitResources before reserving a job, so
 one bad client IB no longer faults the whole scheduler from advance().
+Local deviation (2026-11-05, class registration lock order): NativeAdrenoPublish.cpp
+native_adreno_initialize_classes and NativeAdrenoAccelerator.cpp register their
+classes through OSKextRegisterBoardClasses (source-ci
+nabu-board-class-registration.patch, from rootstockos/UniXNU-asteroids 0396322)
+instead of a bare OSMetaClass::preModLoad/postModLoad pair, so sKextLock is taken
+before the class lock as OSKext::load does. A missing preModLoad handle still
+returns kIOReturnNoResources.

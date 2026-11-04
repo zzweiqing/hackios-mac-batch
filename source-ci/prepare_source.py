@@ -90,6 +90,32 @@ MANAGED_RT_NORMAL = {'name': 'nabu-managed-rt-normal.patch',
                      'target': 'patches/xnu/nabu-managed-rt-normal.patch',
                      'argument': 't733-managed-rt-normal',
                      'sha256': '743064d5e0aebd0265c059758199cd35245f67f9b9c2357276dc6c0f4f2637e4'}
+# Pure XNU SMP correctness backports, materialized for every profile. The pinned
+# 245aca1a series touches neither osfmk/arm/cpu_common.c nor libkern/c++/OSKext.cpp;
+# both files are byte-identical to the upstream patches and were checked to apply
+# to xnu-10063.141.1 (d8b80295) together with the full pinned series.
+# - cpu_machine_init kept the boot-vs-resume flag in a function static shared by
+#   every core, so concurrently starting cores could pass PE_cpu_machine_init the
+#   other core's value (RigoLigoRLC/unixnu-sm7325-common 14d3ee4d).
+# - OSKextRegisterBoardClasses runs preModLoad, the board's static constructors and
+#   postModLoad under sKextLock, in OSKext::load's lock order. A bare caller holds
+#   the class lock while postModLoad waits for sKextLock, the inverse of a kext load
+#   on an IOKit config thread (rootstockos/UniXNU-asteroids 0396322 + dd1fabd).
+#   Every nabu class registration site goes through it.
+SMP_CPU_STARTED = {'name': 'nabu-smp-cpu-started.patch',
+                   'target': 'patches/xnu/native-smp-cpu-started.patch',
+                   'upstream': 'RigoLigoRLC/unixnu-sm7325-common@14d3ee4d62783e036b7bc9d6c3bfe88278384d40:'
+                               'patches/xnu/native-smp-cpu-started.patch',
+                   'sha256': '15237f3e1d14a9d7ac0de99ce88e62365702e2012f496b52ba2ac50bd4228174'}
+BOARD_CLASS_REGISTRATION = {'name': 'nabu-board-class-registration.patch',
+                            'target': 'patches/xnu/zzyg-board-class-registration.patch',
+                            'upstream': 'rootstockos/UniXNU-asteroids@6370e66cc460202756058ae53f73afdb69abd364:'
+                                        'patches/xnu/zzyg-board-class-registration.patch',
+                            'sha256': 'f1ac2e6460f3e4cdbbb8ba4d178442aee6568046b6016fe13ecb0b858e86365c'}
+# The upstream helper reads sKextLock twice (lock and unlock) rather than once;
+# it is kept byte-identical because OSKext::initialize sets sKextLock before any
+# board code can call it, so both reads see the same value.
+XNU_SMP_PATCHES = (SMP_CPU_STARTED, BOARD_CLASS_REGISTRATION)
 
 SECOND_STATIC_TRUST_CACHE_PATCH = '''--- a/config/MASTER.arm64
 +++ b/config/MASTER.arm64
@@ -505,6 +531,28 @@ def apply_managed_rt_normal(upstream):
             'argument': MANAGED_RT_NORMAL['argument'], 'runtime_qualified': False}
 
 
+def _apply_xnu_smp_patch(upstream, patch):
+    source = (Path(__file__).resolve().parent / patch['name']).read_bytes()
+    if hashlib.sha256(source).hexdigest() != patch['sha256']:
+        raise SystemExit('Unexpected XNU SMP patch: ' + patch['name'])
+    target = upstream / patch['target']
+    if target.exists():
+        if target.read_bytes() != source:
+            raise SystemExit('Upstream XNU SMP patch differs from the pinned backport: ' + patch['target'])
+        return {'patch': patch['target'], 'sha256': patch['sha256'], 'upstream': patch['upstream'],
+                'materialized': False}
+    if not target.parent.is_dir():
+        raise SystemExit('Upstream has no XNU patch series directory')
+    target.write_bytes(source)
+    return {'patch': patch['target'], 'sha256': patch['sha256'], 'upstream': patch['upstream'],
+            'materialized': True}
+
+
+def apply_xnu_smp_patches(upstream):
+    """Materialize the pinned XNU SMP correctness backports into the upstream XNU series."""
+    return [_apply_xnu_smp_patch(upstream, patch) for patch in XNU_SMP_PATCHES]
+
+
 def validate_profile(device):
     board = tomllib.loads((device / 'board.toml').read_text(encoding='utf-8'))
     name = board['kernel']['defconfig']
@@ -728,6 +776,7 @@ def main():
     union_patches = apply_owner_union_patches(args.upstream) if owner_union else None
     result = apply_vc_text_scale(result)
     managed_rt = apply_managed_rt_normal(args.upstream) if args.profile == UFS_GPU_METAL_PROFILE else None
+    xnu_smp = apply_xnu_smp_patches(args.upstream)
     path.write_bytes(result)
     data_skeleton = None
     if 'CONFIG_XNU_OWNER_DATA_MOUNT=y' in options:
@@ -782,6 +831,8 @@ def main():
         'owner_union_systemos': ({**union_patches[0], 'patches': union_patches}
                                  if union_patches else None),
         'managed_rt_normal': managed_rt,
+        'xnu_smp_patches': {'pure_correctness': True, 'all_profiles': True,
+                            'patches': xnu_smp, 'runtime_qualified': False},
     }, indent=2) + '\n', encoding='utf-8')
 
 

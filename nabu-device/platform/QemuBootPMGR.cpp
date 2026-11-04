@@ -4,11 +4,13 @@
 #include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOLib.h>
 #include <mach/kmod.h>
+#include <libkern/OSKextLib.h>
 
 extern "C" {
 extern kmod_info_t g_kernel_kmod_info;
 kern_return_t OSKextLoadKextWithIdentifier(const char *);
 void qemu_boot_pmgr_static_init(void) __asm__("__GLOBAL__sub_I_QemuBootPMGR.cpp");
+extern "C" OSReturn OSKextRegisterBoardClasses(const char *kextIdentifier, void (*constructors)(void));
 IOService *qemu_original_pmgr_nub_create(IORegistryEntry *, ApplePMGR *);
 uint32_t qemu_boot_pmgr_aon_value = 0;
 volatile uint32_t qemu_boot_pmgr_aon_reads = 0;
@@ -63,10 +65,10 @@ extern "C" bool qemu_boot_pmgr_publish(IOService *platform, IORegistryEntry *des
     return false;
   }
   // The real parent metaclass must exist before the subclass initializer runs.
-  void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-  if (handle == nullptr) { return false; }
-  qemu_boot_pmgr_static_init();
-  result = OSMetaClass::postModLoad(handle);
+  // Register under sKextLock in OSKext::load's lock order (source-ci
+  // nabu-board-class-registration.patch); a bare preModLoad/postModLoad pair can deadlock.
+  result = OSKextRegisterBoardClasses(g_kernel_kmod_info.name, qemu_boot_pmgr_static_init);
+  if (result == kOSKextReturnNoMemory) { return false; }
   if (result != KERN_SUCCESS) {
     IOLog("QemuBootPMGR: subclass registration failed %d\n", result);
     return false;

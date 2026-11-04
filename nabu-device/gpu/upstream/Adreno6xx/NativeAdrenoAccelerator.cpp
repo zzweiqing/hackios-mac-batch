@@ -7,12 +7,14 @@
 #include <IOKit/IOUserClient.h>
 #include <libkern/c++/OSSymbol.h>
 #include <mach/kmod.h>
+#include <libkern/OSKextLib.h>
 
 extern "C" IOReturn native_adreno_new_user_client(IOService *,task_t,void *,UInt32,OSDictionary *,IOUserClient **,unsigned);
 extern "C" boolean_t PE_parse_boot_argn(const char *,void *,int);
 extern "C" void native_adreno_note_property_read(const char *);
 extern "C" kern_return_t OSKextLoadKextWithIdentifier(const char *);
 extern "C" kmod_info_t g_kernel_kmod_info;
+extern "C" OSReturn OSKextRegisterBoardClasses(const char *kextIdentifier, void (*constructors)(void));
 extern "C" void native_adreno_accelerator_static_init(void)
     __asm__("__GLOBAL__sub_I_NativeAdrenoAccelerator.cpp");
 
@@ -77,12 +79,13 @@ extern "C" IOReturn native_adreno_accelerator_publish(IOService *provider,uint32
             return kIOReturnUnsupported;
         }
 
-        void *handle=OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-        if(!handle) {
+        // Register under sKextLock in OSKext::load's lock order (source-ci
+        // nabu-board-class-registration.patch); a bare preModLoad/postModLoad pair can deadlock.
+        const OSReturn status=OSKextRegisterBoardClasses(g_kernel_kmod_info.name,
+            native_adreno_accelerator_static_init);
+        if(status==kOSKextReturnNoMemory) {
             return kIOReturnNoResources;
         }
-        native_adreno_accelerator_static_init();
-        const OSReturn status=OSMetaClass::postModLoad(handle);
         if(status!=kOSReturnSuccess) {
             return status;
         }

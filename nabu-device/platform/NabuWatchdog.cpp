@@ -6,12 +6,14 @@
 #include "OriginalIOWatchdogABI.h"
 #include <IOKit/IOLib.h>
 #include <mach/kmod.h>
+#include <libkern/OSKextLib.h>
 #include <pexpert/pexpert.h>
 
 extern "C" {
 extern kmod_info_t g_kernel_kmod_info;
 kern_return_t OSKextLoadKextWithIdentifier(const char *);
 void nabu_watchdog_static_init(void) __asm__("__GLOBAL__sub_I_NabuWatchdog.cpp");
+extern "C" OSReturn OSKextRegisterBoardClasses(const char *kextIdentifier, void (*constructors)(void));
 volatile uint32_t nabu_watchdog_soc_enable_calls = 0;
 volatile uint32_t nabu_watchdog_soc_disable_calls = 0;
 volatile uint32_t nabu_watchdog_soc_pet_calls = 0;
@@ -47,10 +49,10 @@ extern "C" bool nabu_watchdog_publish(IOService *platform)
     return false;
   }
   // The original IOWatchdog metaclass must exist before the subclass initializer runs.
-  void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-  if (handle == nullptr) { return false; }
-  nabu_watchdog_static_init();
-  result = OSMetaClass::postModLoad(handle);
+  // Register under sKextLock in OSKext::load's lock order (source-ci
+  // nabu-board-class-registration.patch); a bare preModLoad/postModLoad pair can deadlock.
+  result = OSKextRegisterBoardClasses(g_kernel_kmod_info.name, nabu_watchdog_static_init);
+  if (result == kOSKextReturnNoMemory) { return false; }
   if (result != KERN_SUCCESS) {
     IOLog("NabuWatchdog: subclass registration failed %d\n", result);
     return false;

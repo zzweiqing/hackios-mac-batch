@@ -5,7 +5,10 @@ The 14 unique multi-instruction asm templates (17 source sites) below match that
 commit exactly. On Darwin AArch64 ';' is a comment, so the naive upstream source
 only emits the instruction before the first ';'. patch_assembly rewrites each
 template to explicit newlines and check_armcpu_object proves the emitted Mach-O
-object really contains every instruction inside the caller function bodies."""
+object really contains every instruction inside the caller function bodies.
+patch_boot_order restores the Darwin 23 boot-CPU registration order and
+patch_smp_hold adds a default-off pre-CPU_ON hold (see their comments).
+The boot-order transform is a consistency fix, not a demonstrated stall fix."""
 import hashlib
 import re
 import struct
@@ -181,10 +184,110 @@ def patch_boot_handoff(text):
         call, '  armcpu_nabu_register_phase[logicalId] = 3;\n' + call, 1)
 
 
+# Boot CPU registration order. Upstream 93a5030c registers the boot CPU with
+# ml_processor_register only after its IOCPUInterruptController is installed,
+# because Darwin 25 (xnu-12377) boots the processor from ml_processor_register
+# and calls initCPU there. Darwin 23 (xnu-10063, this build) does not: its
+# arm64 ml_processor_register only fills BootCpuData/pset fields and returns.
+# Droid-VM/ArmCpu fe98808b (merged over 93a5030c at c85e0841) selects the order
+# with `registerLate = version_major >= 25` for xnu-10063; the frame-rate
+# figures it cites (412-1046 against 3262 frames/100 s) come from a DroidVM
+# guest, not from nabu. This build is fixed to Darwin 23, so the transform
+# emits that fork's !registerLate path statically:
+#   ml_processor_register -> panic on failure -> setCPUNumber -> armcpu_registered
+#   ... IOCPUInterruptController setup ... -> if (!bootInitialized) initCPU (true)
+# which is also the statement order of the ArmCpu 1951cc84 build that this
+# board ran with ncpus=8 avail=8. This is a consistency fix that restores that
+# order; it is NOT a demonstrated fix for the dd02/eb46 stall at boot_phase=23
+# (that failure is not shown to depend on this order, and the SMP hold below is
+# unreachable there because helper threads start only after phase 33).
+# A Darwin 25 build must not use this transform.
+# Marker note: armcpu_registered=1 (NabuSMP reg=1) and armcpu_nabu_boot_phase=10
+# (set right after it) now precede the controller setup, so neither implies the
+# IOCPUInterruptController is installed. A last phase of 10 means the boot path
+# stopped between registration and initCPU, i.e. during controller setup.
+BOOT_ORDER_OLD = '''  info.cluster_type = clusterType (physical);
+  setCPUNumber (info.log_id);
+'''
+BOOT_ORDER_NEW = '''  info.cluster_type = clusterType (physical);
+  // Darwin 23 (xnu-10063) leaves initCPU to the driver, so the boot CPU
+  // registers before its interrupt controller (order of ArmCpu 1951cc84 and
+  // of Droid-VM ArmCpu fe98808b's version_major < 25 path).
+  perfmon_interrupt_handler_func pmi = nullptr;
+  kern_return_t status = ml_processor_register (&info, &machProcessor, &ipi_handler, &pmi);
+  if (status != KERN_SUCCESS) { panic ("ArmCpu: CPU %u registration failed: %d", logicalId, status); }
+  setCPUNumber (info.log_id);
+  armcpu_registered = 1;
+'''
+BOOT_REGISTER_LATE = '''  gController = controller;
+  // Newer kernels boot the processor from ml_processor_register, which calls initCPU and enables the GIC and
+  // timer; the handler above must already be installed. Older kernels leave initCPU to the driver.
+  perfmon_interrupt_handler_func pmi = nullptr;
+  kern_return_t status = ml_processor_register (&info, &machProcessor, &ipi_handler, &pmi);
+  if (status != KERN_SUCCESS) { panic ("ArmCpu: CPU %u registration failed: %d", logicalId, status); }
+  armcpu_registered = 1;
+  if (!bootInitialized) { initCPU (true); }
+'''
+BOOT_REGISTER_EARLY = '''  gController = controller;
+  // The boot CPU registered above, before this controller (Darwin 23 order).
+  if (!bootInitialized) { initCPU (true); }
+'''
+
+
+def patch_boot_order(text):
+    """Register the boot CPU before its interrupt controller (Darwin 23 order).
+
+    Only the boot branch of ArmCpu::start changes; finishSecondary, initCPU,
+    interrupt, startThread and startCPU are untouched by this transform.
+    """
+    for old, new in ((BOOT_ORDER_OLD, BOOT_ORDER_NEW),
+                     (BOOT_REGISTER_LATE, BOOT_REGISTER_EARLY)):
+        if text.count(old) != 1:
+            raise ValueError('ArmCpu boot order source drift: ' + old[:90])
+        text = text.replace(old, new, 1)
+    return text
+
+
+# Opt-in observation gate, default off: armcpu-smp-hold-ms=N with 1 <= N <= 10000
+# sleeps N ms in each secondary's helper thread just before processor_start
+# (PSCI CPU_ON). An absent argument, or a numeric value of 0 or > 10000, does
+# nothing. PE_parse_boot_argn byte-copies a non-numeric value into holdMs, so
+# such a value may produce a short hold, and a bare flag reads as 1 (1 ms).
+# The boot IOKit thread, initCPU and the scheduler are unchanged. The helper
+# runs only after the boot CPU's initCPU, which enables the timer unless
+# armcpu-skip-gic=1 left it off; IOSleep would then never return, so the hold
+# is skipped whenever skipGic is set. With the ESP writer's ~1 s cadence a
+# hold of >= 3000 ms commits the pre-CPU_ON state before any secondary core
+# executes.
+SMP_HOLD_BOOTARG = 'armcpu-smp-hold-ms'
+SMP_HOLD_MAX_MS = 10000
+SMP_HOLD_OLD = '''  armcpu_smp_step[self->logicalId] = 3;
+  // Blocks until the new core reaches the scheduler; a core that never arrives only stalls this helper thread.
+  processor_start (self->machProcessor);
+'''
+SMP_HOLD_NEW = '''  armcpu_smp_step[self->logicalId] = 3;
+  unsigned holdMs = 0;
+  if (!self->skipGic && PE_parse_boot_argn ("armcpu-smp-hold-ms", &holdMs, sizeof (holdMs)) &&
+      holdMs != 0 && holdMs <= 10000) {
+    IOSleep (holdMs);
+  }
+  // Blocks until the new core reaches the scheduler; a core that never arrives only stalls this helper thread.
+  processor_start (self->machProcessor);
+'''
+
+
+def patch_smp_hold(text):
+    """Add the default-off, bounded pre-CPU_ON hold to ArmCpu::startThread."""
+    if text.count(SMP_HOLD_OLD) != 1:
+        raise ValueError('ArmCpu SMP hold source drift: ' + SMP_HOLD_OLD[:90])
+    return text.replace(SMP_HOLD_OLD, SMP_HOLD_NEW, 1)
+
+
 def patch_source(text):
     # The pinned file may be checked out with CRLF; normalize so the pinned
     # source templates match and the transform is deterministic.
-    return patch_boot_handoff(patch_assembly(patch_timer_source(text.replace('\r\n', '\n'))))
+    text = patch_assembly(patch_timer_source(text.replace('\r\n', '\n')))
+    return patch_boot_handoff(patch_smp_hold(patch_boot_order(text)))
 
 
 # A64 encodings verified against clang for arm64-apple-ios17.0. System-register

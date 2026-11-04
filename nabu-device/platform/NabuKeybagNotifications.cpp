@@ -11,6 +11,7 @@
 #include <libkern/c++/OSSymbol.h>
 #include <pexpert/pexpert.h>
 #include <mach/kmod.h>
+#include <libkern/OSKextLib.h>
 
 #if !defined(NABU_LEGACY_CPU_PRESENT) || !defined(NABU_KEYBAG_RAM_DATA_VERIFIED)
 #error Keybag notifications require an explicit CPU profile with verified RAM-Data build dependencies
@@ -28,6 +29,7 @@ volatile uint32_t nabu_keybag_notification_refused_opens;
 volatile uint64_t nabu_keybag_notification_service;
 volatile uint32_t nabu_aks_state_opens, nabu_aks_state_calls;
 void nabu_keybag_notifications_static_init(void) __asm__("__GLOBAL__sub_I_NabuKeybagNotifications.cpp");
+extern "C" OSReturn OSKextRegisterBoardClasses(const char *kextIdentifier, void (*constructors)(void));
 }
 
 namespace {
@@ -203,10 +205,12 @@ extern "C" void nabu_keybag_notifications_start(void) {
     }
     IOService *provider = IOService::getResourceService();
     if (!provider) return;
-    void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-    if (!handle) return;
-    nabu_keybag_notifications_static_init();
-    nabu_keybag_notification_status = OSMetaClass::postModLoad(handle);
+    // Register under sKextLock in OSKext::load's lock order (source-ci
+    // nabu-board-class-registration.patch); a bare preModLoad/postModLoad pair can deadlock.
+    const OSReturn registration = OSKextRegisterBoardClasses(g_kernel_kmod_info.name,
+        nabu_keybag_notifications_static_init);
+    if (registration == kOSKextReturnNoMemory) return;
+    nabu_keybag_notification_status = registration;
     if (nabu_keybag_notification_status) return;
     nabu_keybag_notification_stage = 2;
     IOService *service = new AppleKeyStore;
