@@ -8,6 +8,7 @@
  * a boot recording) but are not themselves persisted by this writer.
  */
 #include "NabuLogCore.h"
+#include "NabuLogEarlySmp.h"
 #include "NabuLogVolume.h"
 #include "NabuLogBuild.h"
 #include "NabuLogWatch.h"
@@ -227,6 +228,9 @@ static void nabuLogThread(void *,wait_result_t)
     uint64_t last_end=~0ULL,last_lost=~0ULL;
     unsigned snapshot_stalls=0,copy_stalls=0;
     for(;;) {
+      /* Opt-in early SMP counters first: they must land before the first
+       * snapshot even while the optional GPU probe callback is unset. */
+      nabuLogEarlySmpPoll();
       /* No console, GPU lock or MMIO: the opt-in owner probe can leave its
        * software state even when the GPU worker's sleep/console path stalls. */
       void (*probe_poll)(void)=__atomic_load_n(&nabu_log_probe_poll,__ATOMIC_ACQUIRE);
