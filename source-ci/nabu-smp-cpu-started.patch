@@ -1,0 +1,11 @@
+--- a/osfmk/arm/cpu_common.c
++++ b/osfmk/arm/cpu_common.c
+@@ -691,7 +691,7 @@
+ void
+ cpu_machine_init(void)
+ {
+-	static boolean_t started = FALSE;
++	boolean_t started;
+ 	cpu_data_t      *cpu_data_ptr;
+ 
+ 	cpu_data_ptr = getCpuDatap();
