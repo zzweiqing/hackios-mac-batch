@@ -40,6 +40,15 @@ def ls_mmap_source(text, device, restore=False):
     return module.source(text, restore=restore)
 
 
+def service_wait_source(text, device, restore=False):
+    import importlib.util
+    path = device / 'scripts/nabu_service_wait_source.py'
+    spec = importlib.util.spec_from_file_location('nabu_service_wait_source', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.source(text, restore=restore)
+
+
 def replace_once(text, old, new):
     if text.count(old) != 1:
         raise ValueError('Logging source drift: ' + old[:100])
@@ -401,6 +410,8 @@ def apply(root, device):
         if ui_watch and ui_file:
             result = ui_watch_source(result, exit_observer=relative.endswith('kern_exit.c'),
                                      thread_observer=relative.endswith('kern/thread.c'))
+        if relative == 'osfmk/kern/thread.c' and (ui_watch or 'NABU_SERVICE_WAIT_VERSION' in result):
+            result = service_wait_source(result, device, restore=not ui_watch)
         path.write_text(result, encoding='utf-8')
         changed[relative] = hashlib.sha256(result.encode()).hexdigest()
     mmap_path = xnu / 'bsd/kern/kern_mman.c'
@@ -432,6 +443,9 @@ def apply(root, device):
         'gpu_userprobe_boot': os.environ.get('NABU_GPU_USERPROBE') == '1',
         'ui_watch': ui_watch,
         'ls_mmap_watch': ui_watch,
+        'service_wait_watch': ui_watch,
+        'service_wait_generator_sha256': (hashlib.sha256((device / 'scripts/nabu_service_wait_source.py').read_bytes()).hexdigest()
+                                          if ui_watch else None),
         'ls_mmap_generator_sha256': (hashlib.sha256((device / 'scripts/nabu_ls_mmap_source.py').read_bytes()).hexdigest()
                                      if ui_watch else None),
         'ui_watch_generator_sha256': (hashlib.sha256(Path(__file__).with_name(
@@ -468,6 +482,11 @@ if __name__ == '__main__':
         thread_path = a.root / '.cache/xnu-work/osfmk/kern/thread.c'
         if thread_path.exists():
             before = thread_path.read_text(encoding='utf-8')
+            if 'NABU_SERVICE_WAIT_VERSION' in before:
+                if a.device is None:
+                    p.error('--device is required to restore the service observer')
+                before = service_wait_source(before, a.device, restore=True)
+                thread_path.write_text(before, encoding='utf-8')
             if 'NABU_UI_WATCH' in before:
                 after = ui_watch_source(before, restore=True, thread_observer=True)
                 if before != after:

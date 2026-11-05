@@ -24,6 +24,7 @@ import sys
 
 import native_ufs_bindings as bindings
 import prepare_nabu_ufs_source as prepare
+import nabu_storage_media
 
 spec = importlib.util.spec_from_file_location(
     'nabu_ufs_platform', Path(__file__).with_name('build-nabu-platform.py'))
@@ -289,7 +290,7 @@ def main():
     prepare.apply_patch(source, device / 'patches/nabu-ufs-smmu-revalidate.patch', [])
 
     cpp = source / 'NativeUfs.cpp'
-    cpp.write_text(transform(cpp.read_text(encoding='utf-8')), encoding='utf-8')
+    cpp.write_text(nabu_storage_media.source(transform(cpp.read_text(encoding='utf-8')), 'ufs'), encoding='utf-8')
     patch_root_headers(source)
     logging = os.environ.get('NABU_CAPTURE_LOG') == '1'
     logging_identity = None
@@ -371,6 +372,7 @@ def main():
         'readonly_service': False, 'compiled': True, 'linked': False,
         'log_capture': logging, 'log_persistence_default': 'off',
         'logging_source_identity': logging_identity,
+        'solid_state_media': nabu_storage_media.metadata('ufs', cpp.read_text(encoding='utf-8')),
         'hardware_tested': False, 'runtime_qualified': False,
     }, indent=2) + '\n', encoding='utf-8')
 

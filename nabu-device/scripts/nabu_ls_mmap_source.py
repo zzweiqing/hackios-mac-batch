@@ -23,6 +23,7 @@ HELPER = r'''#define NABU_LS_MMAP_OBSERVER_VERSION 1
 #include <kern/thread.h>
 
 extern char *proc_name_address(void *);
+extern void nabu_service_wait_start(void);
 
 const char nabu_ls_mmap_source_identity[] __attribute__((used)) =
     "NABULSMAP_SOURCE_SHA256=__NABU_LS_MMAP_SOURCE_ID__";
@@ -104,6 +105,9 @@ nabu_ui_watch_ls_mmap_exit(unsigned call, proc_t process, int error, int mapped,
         (unsigned long long)thread_tid(current_thread()),
         (unsigned long long)nabu_ls_mmap_time(), error, (unsigned)(!error && mapped),
         (unsigned long long)(error || !mapped ? 0 : address));
+    const char *process_name = proc_name_address(process);
+    if (!error && mapped && process_name && !strcmp(process_name, "lsd"))
+        nabu_service_wait_start();
 }
 
 '''

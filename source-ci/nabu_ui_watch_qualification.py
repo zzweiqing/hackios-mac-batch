@@ -100,7 +100,7 @@ def source_constants(generator):
     return constants
 
 
-def object_symbols(data):
+def object_symbols(data, prefix='_nabu_ui_watch_'):
     require(len(data) >= 32 and struct.unpack_from('<4I', data) == (0xfeedfacf, 0x100000c, 0, 1),
             'UI observer object must be ordinary ARM64 Mach-O')
     count, extent = struct.unpack_from('<II', data, 16)
@@ -136,7 +136,7 @@ def object_symbols(data):
         end = data.find(b'\0', strings + name, strings + length)
         require(end >= 0, 'UI object unterminated symbol')
         name = data[strings + name:end].decode()
-        if not name.startswith('_nabu_ui_watch_'):
+        if not name.startswith(prefix):
             continue
         va, backed, fileoff, flags = sections[section - 1]
         if not flags & 0x80000000:

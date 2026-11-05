@@ -156,6 +156,7 @@ static const char *const nabu_ui_wait_stops[9] = {
 };
 extern void nabu_capture_append(const char *, unsigned);
 extern void nabu_gpu_userprobe_exec_snapshot(uint32_t out[6]);
+extern void nabu_service_wait_snapshot(void);
 
 static int
 nabu_ui_enabled(void)
@@ -450,6 +451,7 @@ void
 nabu_ui_watch_snapshot(uint32_t out[6])
 {
     nabu_gpu_userprobe_exec_snapshot(out);
+    nabu_service_wait_snapshot();
     if (!nabu_ui_enabled() || __atomic_load_n(&nabu_ui_closed, __ATOMIC_ACQUIRE)) return;
     unsigned expected = 0;
     if (!__atomic_compare_exchange_n(&nabu_ui_sample_busy, &expected, 1, 0,

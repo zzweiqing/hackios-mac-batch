@@ -15,6 +15,7 @@ from pathlib import Path
 
 from nabu_storage_bindings import BINDINGS
 from nabu_ram_source import volatile_source
+import nabu_storage_media
 
 spec_path = Path(__file__).with_name('build-nabu-platform.py')
 import importlib.util
@@ -56,7 +57,9 @@ def main():
         support = {'header_sha256': hashlib.sha256(header_data).hexdigest(),
                    'generator_sha256': hashlib.sha256(Path(__file__).with_name(
                        'nabu_gpu_userprobe_source.py').read_bytes()).hexdigest()}
-    source.write_text(text if persistent_store else volatile_source(text), encoding='utf-8')
+    text = text if persistent_store else volatile_source(text)
+    text = nabu_storage_media.source(text, 'ram')
+    source.write_text(text, encoding='utf-8')
     obj = out / 'NativeRamBlock.o'
     command = platform.compile_command(record, source, obj)
     command += ['-I', str(headers), '-I', str(root / '.cache/xnu-work/osfmk'),
@@ -86,6 +89,7 @@ def main():
     (out / 'build-report.json').write_text(json.dumps({
         'source': 'drivers/NativeRamBlock/NativeRamBlock.cpp',
         'actual_source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+        'solid_state_media': nabu_storage_media.metadata('ram', text),
         'optional_ufs_persistence': persistent_store,
         'gpu_userprobe_addon': support,
         'object_sha256': hashlib.sha256(data).hexdigest(),

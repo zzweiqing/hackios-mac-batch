@@ -12,7 +12,7 @@ import sys
 from prepare_source import INPUT_SHA256, UPSTREAM, XNU_SMP_PATCHES
 from nabu_logging_build import qualify_logging_candidate
 from nabu_data_skeleton import qualify_data_skeleton
-from nabu_display_ci import DISPLAY_PROFILES, qualify_display_candidate
+from nabu_display_ci import DISPLAY_PROFILES, HARDWARE_CPU_PROFILE, qualify_display_candidate
 from nabu_gpu_ci import (PROFILE as GPU_PROFILE, CONTRACT as GPU_CONTRACT,
                          GPU_PROFILES, accelerator_mode, gpu_contract,
                          PMAP_SOURCE as GPU_PMAP_SOURCE, public_source, qualify_gpu_candidate)
@@ -204,6 +204,8 @@ def selected_sources(device):
         (device / 'scripts/nabu_gpu_userprobe_source.py', 'device/scripts/nabu_gpu_userprobe_source.py'),
         (device / 'scripts/nabu_ui_watch_source.py', 'device/scripts/nabu_ui_watch_source.py'),
         (device / 'scripts/nabu_ls_mmap_source.py', 'device/scripts/nabu_ls_mmap_source.py'),
+        (device / 'scripts/nabu_service_wait_source.py', 'device/scripts/nabu_service_wait_source.py'),
+        (device / 'scripts/nabu_storage_media.py', 'device/scripts/nabu_storage_media.py'),
         (device / 'platform/NabuGpuUserprobeAddon.h', 'device/platform/NabuGpuUserprobeAddon.h'),
         (device / 'userprobe/nabu_gpu_userprobe.cpp', 'device/userprobe/nabu_gpu_userprobe.cpp'),
         (device / 'LICENSE', 'device/LICENSE'),
@@ -220,6 +222,7 @@ def selected_sources(device):
         (device / 'scripts/nabu_storage_bindings.py', 'device/scripts/nabu_storage_bindings.py'),
         (device / 'scripts/build-nabu-owner-root.py', 'device/scripts/build-nabu-owner-root.py'),
         (device / 'scripts/build-nabu-ufs.py', 'device/scripts/build-nabu-ufs.py'),
+        (device / 'scripts/build-nabu-ufs-root.py', 'device/scripts/build-nabu-ufs-root.py'),
         (device / 'scripts/build-nabu-ufs-readonly.py', 'device/scripts/build-nabu-ufs-readonly.py'),
         (device / 'scripts/nabu_ufs_readonly.py', 'device/scripts/nabu_ufs_readonly.py'),
         (device / 'scripts/prepare_nabu_ufs_source.py', 'device/scripts/prepare_nabu_ufs_source.py'),
@@ -240,6 +243,8 @@ def selected_sources(device):
         (source_dir / 'nabu_gpu_ci.py', 'source-ci/nabu_gpu_ci.py'),
         (source_dir / 'nabu_ui_watch_qualification.py', 'source-ci/nabu_ui_watch_qualification.py'),
         (source_dir / 'nabu_ls_mmap_qualification.py', 'source-ci/nabu_ls_mmap_qualification.py'),
+        (source_dir / 'nabu_service_wait_qualification.py', 'source-ci/nabu_service_wait_qualification.py'),
+        (source_dir / 'nabu_storage_media_qualification.py', 'source-ci/nabu_storage_media_qualification.py'),
         (source_dir / 'nabu_graphics_startup.py', 'source-ci/nabu_graphics_startup.py'),
         (device / 'scripts/build-nabu-legacy-display.py', 'device/scripts/build-nabu-legacy-display.py'),
         (device / 'scripts/nabu_display_bindings.py', 'device/scripts/nabu_display_bindings.py'),
@@ -451,9 +456,17 @@ def main():
                     raise ValueError('Requested mmap diagnostic build differs from its actual qualification')
                 summary['ui_watch_qualified_statically'] = bool(ui.get('compiled'))
                 summary['ls_mmap_qualified_statically'] = bool(ls_mmap.get('compiled'))
+                service_wait = manifest['gpu_qualification'].get('userprobe_boot', {}).get('service_wait_watch', {})
+                if bool(service_wait.get('compiled')) != identity['ui_watch']:
+                    raise ValueError('Requested service diagnostic build differs from its actual qualification')
+                summary['service_wait_qualified_statically'] = bool(service_wait.get('compiled'))
                 summary['gpu_qualified_statically'] = True
             elif identity['ufs_gpu'] or prepared.get('gpu'):
                 raise ValueError('GPU contract is only valid for the explicit GPU profiles')
+            if identity['profile'] in (HARDWARE_CPU_PROFILE, *GPU_PROFILES):
+                from nabu_storage_media_qualification import qualify_candidate as qualify_storage_media
+                manifest['storage_media_qualification'] = qualify_storage_media(args.upstream, args.device, candidate)
+                summary['storage_media_qualified_statically'] = True
             summary['candidate_validated'] = valid
             summary['undefined_symbol_count'] = len(macho['undefined_names'])
             manifest['macho'] = macho

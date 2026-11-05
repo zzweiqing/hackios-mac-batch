@@ -332,6 +332,8 @@ def qualify_userprobe_boot(read, candidate):
     ui_watch = qualify_ui_watch(read, candidate)
     from nabu_ls_mmap_qualification import qualify as qualify_ls_mmap
     ls_mmap = qualify_ls_mmap(read, candidate)
+    from nabu_service_wait_qualification import qualify as qualify_service_wait
+    service_wait = qualify_service_wait(read, candidate)
     return {'mode': 'closed_inline_abi1_probe', 'trigger': 'nabu-gpu-userprobe=1',
             **({'parent_root_creation': True} if parents_fixed else {}),
             **({'owner_job_cache': True, 'addon_files': 4} if cache_entries == 4 else {}),
@@ -347,6 +349,7 @@ def qualify_userprobe_boot(read, candidate):
                 'process_symbols': {name: definitions[name] for name in sorted(extra_required)}} if process_bound else {}),
             'ui_watch': ui_watch,
             **({'ls_mmap_watch': ls_mmap} if ls_mmap['compiled'] else {}),
+            **({'service_wait_watch': service_wait} if service_wait['compiled'] else {}),
             'header_sha256': sha(header), 'generator_sha256': sha(generator),
             'ram_source_sha256': sha(ram), 'ram_object_sha256': sha(obj),
             'ram_archive_sha256': sha(archive), 'data_source_sha256': sha(data),
