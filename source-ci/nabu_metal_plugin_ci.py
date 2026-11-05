@@ -35,6 +35,10 @@ COMPLETION_PATCH = 'patches/adrenometal-nabu-completion-wait.patch'
 COMPLETION_PATCHES = ADRENOMETAL_PATCHES[:4] + (COMPLETION_PATCH,)
 COMPLETION_OBSERVE_PATCH = 'patches/adrenometal-nabu-completion-observe.patch'
 COMPLETION_OBSERVE_PATCHES = ADRENOMETAL_PATCHES[:4] + (COMPLETION_OBSERVE_PATCH,)
+RUNTIME_QOS_PATCH = 'patches/metal2vulkan-nabu-ios-qos.patch'
+RUNTIME_QOS_UPSTREAM = 'a0f0287be80a5d8aef5c6b97a6cab62129e152bd'
+RUNTIME_SERIES_SHA256 = '35009afa0c0a344e6a9d2a31d562bdf43022b52d4f773d4769f9d82666bfbbf3'
+RUNTIME_QOS_SOURCE_SHA256 = '2237c261d794ebd288eb0dce441272bb046314ae016be1a97ff4d1fc759ac572'
 UNDEPLOYED = ('adrenoprobed', 'adrenoprobed-entitlements.plist', 'org.blu-sharky.adrenoprobed.plist',
               'com.apple.iomfb_fdr_loader.plist', 'com.apple.bluetoothd.plist')
 
@@ -76,6 +80,44 @@ def plugin_patches(fps_opt=False, async_fix=False, completion_fix=False, complet
     return FPS_PATCHES if fps_opt else ADRENOMETAL_PATCHES
 
 
+def prepare_runtime_qos(metal, device):
+    directory = metal / 'bridge/patches'
+    series = directory / 'series'
+    patch = directory / Path(RUNTIME_QOS_PATCH).name
+    if sha(series) != RUNTIME_SERIES_SHA256 or patch.exists():
+        raise SystemExit('Runtime patch series differs from the pinned baseline')
+    original = series.read_bytes()
+    shutil.copyfile(device / RUNTIME_QOS_PATCH, patch)
+    series.write_bytes(original + patch.name.encode() + b'\n')
+
+
+def collect_runtime_qos(root, device, output):
+    directory = root / 'drivers/AdrenoMetal/bridge/patches'
+    series = directory / 'series'
+    patch = directory / Path(RUNTIME_QOS_PATCH).name
+    expected = (device / RUNTIME_QOS_PATCH).read_bytes()
+    lines = series.read_bytes().splitlines(keepends=True)
+    if (not lines or lines[-1] != patch.name.encode() + b'\n' or
+            hashlib.sha256(b''.join(lines[:-1])).hexdigest() != RUNTIME_SERIES_SHA256 or
+            patch.read_bytes() != expected):
+        raise SystemExit('Compiled runtime patch series differs from the nabu QoS input')
+    source = root / '.cache/gpu-reference/metal2vulkan/crates/metal2vulkan-runtime/src/exit_guard.rs'
+    if sha(source) != RUNTIME_QOS_SOURCE_SHA256:
+        raise SystemExit('Compiled iOS QoS source differs from the replayed upstream implementation')
+    runtime = root / '.cache/gpu-reference/metal2vulkan'
+    run(['git', '-C', runtime, 'apply', '--reverse', '--check', patch])
+    archive = output / 'runtime-qos-source'
+    archive.mkdir()
+    for path in (series, patch, source):
+        shutil.copyfile(path, archive / path.name)
+    return dict(upstream_repository='https://github.com/UniXNU/AdrenoMetal',
+                upstream_commit=RUNTIME_QOS_UPSTREAM,
+                upstream_patch='bridge/patches/0023-quality-of-service-on-ios.patch',
+                patch_sha256=sha(patch), baseline_series_sha256=RUNTIME_SERIES_SHA256,
+                series_sha256=sha(series), source_sha256=sha(source),
+                target='aarch64-apple-ios', runtime_qualified=False)
+
+
 def prepare(root, device, fps_opt=False, async_fix=False, completion_fix=False, completion_observe=False):
     for path, (url, commit) in SUBMODULES.items():
         entry = read(['git', '-C', root, 'ls-tree', 'HEAD', path]).split()
@@ -95,6 +137,7 @@ def prepare(root, device, fps_opt=False, async_fix=False, completion_fix=False, 
     shutil.copyfile(device / 'platform/NabuGpuProblemStream.h', metal / 'NabuGpuProblemStream.h')
     if fps_opt:
         shutil.copyfile(device / 'platform/NabuScanoutSourceCache.h', metal / 'NabuScanoutSourceCache.h')
+        prepare_runtime_qos(metal, device)
     pins = json.loads((root / 'scripts/data/gpu-metal-vulkan-inputs.json').read_text())
     translator = pins['translator']['commit']
     if pins['translator']['repository'].rstrip('/') + '.git' != METAL2VULKAN:
@@ -186,6 +229,8 @@ def build(root, device, output, env, fps_opt=False, async_fix=False, completion_
     bundle = built / 'NativeAdrenoMetal.bundle'
     report['bundle_built'] = result.returncode == 0 and (bundle / 'NativeAdrenoMetal').is_file()
     if report['bundle_built']:
+        if fps_opt:
+            report['runtime_qos'] = collect_runtime_qos(root, device, output)
         shutil.copytree(bundle, output / bundle.name, symlinks=True)
         shutil.copyfile(built / 'trust.json', output / 'trust.json')
         trust = json.loads((built / 'trust.json').read_text())
