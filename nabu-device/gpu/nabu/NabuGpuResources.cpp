@@ -159,6 +159,13 @@ extern "C" void native_adreno_poll_irqs(void)
      * source on that same worker. No concurrent callback races a translation. */
     for(auto &s:sources)if(s.enabled && s.callback)s.callback(s.context);
 }
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+extern "C" void nabu_adreno_poll_gpu_irq(void)
+{
+    for(auto &source:sources)
+        if(source.number==332 && source.enabled && source.callback)source.callback(source.context);
+}
+#endif
 extern "C" int native_adreno_checkpoint(const char *phase)
 {
     IOLog("NabuGPU: checkpoint=%s\n",phase);

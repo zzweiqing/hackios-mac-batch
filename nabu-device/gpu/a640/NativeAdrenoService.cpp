@@ -23,6 +23,7 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOService.h>
 #include <kern/thread.h>
+#include <kern/clock.h>
 #include <pexpert/pexpert.h>
 #include <string.h>
 
@@ -32,6 +33,8 @@ extern "C" volatile uint32_t native_adreno_pool_mib;
 /* Publication path. The diagnostic archive links none of these objects, so
  * they must not be referenced there. */
 #include "NativeAdrenoIntegration.h"
+#include "NabuGpuPollCadence.h"
+extern "C" void nabu_adreno_poll_gpu_irq(void);
 extern "C" IOReturn nabu_gpu_scanout_display_call(uint32_t,task_t,const void *,const void *,size_t,void *,size_t);
 extern "C" IOMemoryDescriptor *nabu_gpu_scanout_display_memory(task_t,const void *);
 extern "C" void nabu_gpu_scanout_display_close(const void *);
@@ -313,6 +316,9 @@ void nabuGpuState(uint32_t step,uint32_t status,const char *name)
 {
     IOLog("NabuGPU: state=%s step=%u status=%08x\n",name,step,status);
 }
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+uint32_t gpuPollWake=0;
+#endif
 /* A640State owns all mappings,
  * contexts and DMA allocations for this boot. A failed attempt retains them
  * while the GMU and CP are stopped. The CPU framebuffer continues
@@ -341,6 +347,11 @@ class A640State final {
     NabuMetalObservation observation_;
     uint32_t watchedFence_=0;
     uint64_t watchedSince_=0;
+    NabuGpuPollCadence pollCadence_;
+    bool fastPolling_=true;
+    uint64_t lastSubmissionUs_=0;
+    uint32_t activityKick_=0;
+    void noteSubmission();
 #endif
     NativeAdrenoIrq irq_;
     ArmSmmu4KMmio smmuMmio_{};
@@ -381,7 +392,8 @@ class A640State final {
     IOReturn fail(IOReturn);
 public:
     IOReturn start();
-    void poll();
+    unsigned poll();
+    void wait(unsigned milliseconds);
     void dump() const;
 };
 
@@ -485,7 +497,9 @@ int A640State::writeWptr(void *cookie,uint32_t value)
             if(self->cpTrace_) {
                 IOLog("NativeAdrenoCp: WPTR acknowledged attempts=%u fence=%08x\n",attempt+1,fence);
             }
-
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+            self->noteSubmission();
+#endif
             return 0;
         }
 
@@ -1174,6 +1188,11 @@ IOReturn A640State::fail(IOReturn status)
 
 IOReturn A640State::start()
 {
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+    unsigned fastPolling=1;
+    PE_parse_boot_argn("nabu-gpu-poll-fast",&fastPolling,sizeof(fastPolling));
+    fastPolling_=fastPolling==1;
+#endif
     native_adreno_a6xx_stats[0]=1;
     nabuGpuState(1,0,"starting");
     if(native_adreno_checkpoint("map"))return fail(kIOReturnNotReady);
@@ -1257,6 +1276,9 @@ IOReturn A640State::start()
     PE_parse_boot_argn("nabu-gpu-userprobe",&probe,sizeof(probe));
     observation_.enableProbe(probe==1);
     if(probe==1)__atomic_store_n(&nabu_log_probe_poll,nabuGpuProbeWriterSample,__ATOMIC_RELEASE);
+    IOLog("NabuGPU: completion-poll active_ms=%u idle_ms=%u health_us=%llu tail_us=%llu\n",
+        fastPolling_?NabuGpuPollCadence::ActiveMs:NabuGpuPollCadence::IdleMs,NabuGpuPollCadence::IdleMs,
+        NabuGpuPollCadence::HealthUs,NabuGpuPollCadence::ActiveTailUs);
 #endif
     native_adreno_a6xx_stats[0]=7;
     nabuGpuState(7,0,"ready");
@@ -1265,22 +1287,58 @@ IOReturn A640State::start()
     return kIOReturnSuccess;
 }
 
-void A640State::poll()
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+void A640State::noteSubmission()
 {
-    if(!ready_) {
+    if(!fastPolling_)return;
+    const uint64_t current=now(nullptr);
+    const uint64_t previous=__atomic_exchange_n(&lastSubmissionUs_,current,__ATOMIC_RELAXED);
+    if(!previous || current<previous || current-previous>=NabuGpuPollCadence::ActiveTailUs) {
+        __atomic_store_n(&activityKick_,1,__ATOMIC_RELEASE);
+        thread_wakeup(&gpuPollWake);
+    }
+}
+#endif
+
+void A640State::wait(unsigned milliseconds)
+{
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+    if(ready_ && fastPolling_) {
+        uint64_t deadline=0;
+        clock_interval_to_deadline(milliseconds,NSEC_PER_MSEC,&deadline);
+        assert_wait_deadline(&gpuPollWake,THREAD_UNINT,deadline);
+        if(__atomic_exchange_n(&activityKick_,0,__ATOMIC_ACQ_REL))thread_wakeup(&gpuPollWake);
+        thread_block(THREAD_CONTINUE_NULL);
         return;
     }
+#endif
+    IOSleep(milliseconds);
+}
 
+unsigned A640State::poll()
+{
+    if(!ready_) {
+        return 10;
+    }
+
+#if defined(NABU_GPU_METAL) && NABU_GPU_METAL
+    const bool healthDue=!fastPolling_ || pollCadence_.healthDue(now(nullptr));
+    if(healthDue)native_adreno_poll_irqs();
+    else nabu_adreno_poll_gpu_irq();
+#else
+    const bool healthDue=true;
     native_adreno_poll_irqs();
-    IOReturn gmuStatus=smmuProvider_.observe();
-    if(!gmuStatus) {
-        gmuStatus=gmu_.poll();
+#endif
+    IOReturn gmuStatus=kIOReturnSuccess;
+    if(healthDue) {
+        gmuStatus=smmuProvider_.observe();
+        if(!gmuStatus)gmuStatus=gmu_.poll();
     }
     if(gmuStatus) {
         ready_=false;
         native_adreno_a6xx_stats[0]=8;
         fail(gmuStatus);
-        return;
+        return 10;
     }
 
     const IOReturn status=__atomic_load_n(&hardwareIrqFailed_,__ATOMIC_ACQUIRE)?
@@ -1299,14 +1357,16 @@ void A640State::poll()
         ready_=false;
         native_adreno_a6xx_stats[0]=8;
         fail(status?status:(timeout?kIOReturnTimeout:kIOReturnIOError));
-        return;
+        return 10;
     }
+    return fastPolling_?pollCadence_.delayAfterProgress(current,submitted,completed):NabuGpuPollCadence::IdleMs;
 #else
     if(status) {
         ready_=false;
         native_adreno_a6xx_stats[0]=8;
         fail(status);
     }
+    return 10;
 #endif
 }
 
@@ -1379,9 +1439,10 @@ void hardwareWorker(void *,wait_result_t)
     if(state->start()!=kIOReturnSuccess) {
         return;
     }
+    unsigned pollDelay=10;
     for(;;) {
-        IOSleep(10);
-        state->poll();
+        state->wait(pollDelay);
+        pollDelay=state->poll();
     }
 }
 void registrationEntry(void *argument,wait_result_t result)
