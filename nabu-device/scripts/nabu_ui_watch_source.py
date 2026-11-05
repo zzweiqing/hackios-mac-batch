@@ -1,6 +1,6 @@
 """Reversible, explicitly enabled UI exec and first-main-thread observations."""
 
-CONTRACT = {'version': 5,
+CONTRACT = {'version': 6,
  'trigger': 'nabu-ui-watch=1',
  'targets': ['SpringBoard', 'backboardd', 'runningboardd'],
  'paths': ['/System/Library/CoreServices/SpringBoard.app/SpringBoard',
@@ -16,7 +16,9 @@ CONTRACT = {'version': 5,
              '_nabu_ui_watch_thread_state',
              '_nabu_ui_watch_task_snapshot',
              '_nabu_ui_watch_thread_wait_owner',
-             '_nabu_ui_watch_task_wait_snapshot'],
+             '_nabu_ui_watch_task_wait_snapshot',
+             '_nabu_ui_watch_thread_wait_chain',
+             '_nabu_ui_watch_task_wait_chain_snapshot'],
  'symbols_by_object': {'kern_exec.c': ['_nabu_ui_watch_snapshot',
                                        '_nabu_ui_watch_exit_note',
                                        '_nabu_ui_watch_activation',
@@ -26,7 +28,9 @@ CONTRACT = {'version': 5,
                                        '_nabu_ui_watch_activate_image_v2'],
                        'thread.c': ['_nabu_ui_watch_thread_state', '_nabu_ui_watch_task_snapshot',
                                     '_nabu_ui_watch_thread_wait_owner',
-                                    '_nabu_ui_watch_task_wait_snapshot']},
+                                    '_nabu_ui_watch_task_wait_snapshot',
+                                    '_nabu_ui_watch_thread_wait_chain',
+                                    '_nabu_ui_watch_task_wait_chain_snapshot']},
  'symbol_references_by_object': {'kern_exit.c': ['_nabu_ui_watch_exit_note']},
  'max_samples': 64,
  'interval_us': 10000000,
@@ -58,7 +62,15 @@ CONTRACT = {'version': 5,
  'wait_lock_mode': 'try-only',
  'wait_new_references': 0,
  'wait_owner_field_read': False,
- 'wait_debugger_helpers': False}
+ 'wait_debugger_helpers': False,
+ 'wait_chain_trigger': 'nabu-ui-wait-owner=2',
+ 'wait_chain_links': 3,
+ 'wait_chain_fields': 10,
+ 'wait_chain_sample_line_limit': 12,
+ 'wait_chain_total_line_limit': 512,
+ 'wait_chain_dedup_table': 16,
+ 'wait_chain_max_turnstile_locks': 12,
+ 'wait_chain_max_thread_locks': 3}
 PREFIX = '#define nabu_gpu_userprobe_exec_snapshot nabu_ui_watch_snapshot\n'
 SUFFIX = '#undef nabu_gpu_userprobe_exec_snapshot\n'
 
@@ -70,6 +82,11 @@ extern int nabu_ui_watch_task_snapshot(thread_t, unsigned, uint64_t [32][5], uin
 /* NABU_UI_WATCH_WAIT_V1: optional, separately enabled wait-owner rows. */
 extern int nabu_ui_watch_task_wait_snapshot(thread_t, unsigned, uint64_t [32][5], uint32_t [4],
     uint64_t [32][11], char [32][2][16]);
+/* NABU_UI_WATCH_CHAIN_V1: nabu-ui-wait-owner=2 additionally records a bounded
+ * cross-task owner chain per emitted wait row; =1 keeps the v5 record. */
+extern int nabu_ui_watch_task_wait_chain_snapshot(thread_t, unsigned, uint64_t [32][5],
+    uint32_t [4], uint64_t [32][11], char [32][2][16], uint64_t [32][3][10],
+    char [32][3][2][16]);
 /* XNU thread state bits; thread.h's definitions are private to osfmk. */
 enum { NABU_UI_TH_TERMINATE = 0x10, NABU_UI_TH_TERMINATE2 = 0x20 };
 
@@ -115,6 +132,21 @@ static uint64_t nabu_ui_wait_rows[32][11];
 static char nabu_ui_wait_names[32][2][16];
 static int nabu_ui_wait_enabled_cache = -1;
 static unsigned nabu_ui_wait_total, nabu_ui_wait_total_suppressed;
+/* v6 chain storage uses the same single-writer gate: 7,680 + 3,072 bytes stay
+ * off the kernel stack. The next-code table mirrors the private osfmk enum. */
+enum { NABU_UI_CHAIN_SAMPLE_LINES = 12, NABU_UI_CHAIN_TOTAL_LINES = 512,
+       NABU_UI_CHAIN_LINKS = 3, NABU_UI_CHAIN_DEDUP = 16 };
+static uint64_t nabu_ui_chain_rows[32][3][10];
+static char nabu_ui_chain_names[32][3][2][16];
+static uint64_t nabu_ui_chain_dedup[NABU_UI_CHAIN_DEDUP];
+static unsigned nabu_ui_chain_dedup_count, nabu_ui_chain_total, nabu_ui_chain_total_suppressed;
+static unsigned nabu_ui_chain_sample_chains, nabu_ui_chain_sample_emitted,
+                nabu_ui_chain_sample_dedup, nabu_ui_chain_sample_suppressed,
+                nabu_ui_chain_sample_dropped;
+static const char *const nabu_ui_chain_next[12] = {
+    "thread", "none", "workq", "other", "not_waiting", "no_ts", "ts_busy",
+    "hop_busy", "hop_max", "cycle", "lock_busy", "link_max"
+};
 static const char *const nabu_ui_wait_ts[3] = {"none", "busy", "present"};
 static const char *const nabu_ui_wait_kinds[6] = {
     "none", "thread", "turnstile", "workq", "other", "-"
@@ -340,6 +372,80 @@ nabu_ui_wait_format(char *line, unsigned size, unsigned sample, unsigned target,
         names[0], names[1]);
 }
 
+/* Format one owner-chain link row. Fields the walk did not read print '-',
+ * never a placeholder number; out-of-range codes refuse the row like v5. */
+static int
+nabu_ui_owner_format(char *line, unsigned size, unsigned sample, unsigned target,
+    uint64_t waiter, unsigned link, const uint64_t rec[10], const char names[2][16])
+{
+    if (rec[0] != 1 || !link || link > 3 || rec[4] > 2 || rec[5] > 3 || rec[8] > 3 ||
+        rec[9] > 11 || names[0][15] || names[1][15]) return -1;
+    char tid[24] = "-", pid[24] = "-", uniq[24] = "-", same[8] = "-",
+         state[16] = "-", hint[16] = "-";
+    const char *name = "-", *proc = "-";
+    if (rec[1]) {
+        snprintf(tid, sizeof(tid), "%llu", (unsigned long long)rec[1]);
+        name = names[0];
+        if (names[1][0]) proc = names[1];
+    }
+    if (rec[2] != UINT64_MAX)
+        snprintf(pid, sizeof(pid), "%lld", (long long)rec[2]);
+    if (rec[3] != UINT64_MAX)
+        snprintf(uniq, sizeof(uniq), "%llu", (unsigned long long)rec[3]);
+    if (rec[4] < 2) snprintf(same, sizeof(same), "%u", (unsigned)rec[4]);
+    if (rec[5] == 1 || rec[5] == 3) {
+        snprintf(state, sizeof(state), "%x", (unsigned)rec[6]);
+        snprintf(hint, sizeof(hint), "%u", (unsigned)rec[7]);
+    }
+    return snprintf(line, size,
+        "NabuUIOwner: sample=%u target=%s waiter=%llu link=%u tid=%s pid=%s uniq=%s "
+        "proc=%s name=%s same=%s state=%s hint=%s hops=%u next=%s\n",
+        sample, nabu_ui_names[target], (unsigned long long)waiter, link, tid, pid,
+        uniq, proc, name, same, state, hint, (unsigned)rec[8], nabu_ui_chain_next[rec[9]]);
+}
+
+/* Called right after an emitted NabuUIWait row whose inheritor is a thread:
+ * emit one line per recorded link, bounded per sample and per boot. Chains
+ * whose link-1 owner TID was already emitted in this sample are deduplicated;
+ * a chain that does not fit the remaining budget is suppressed whole so an
+ * emitted chain never ends in a missing link. */
+static void
+nabu_ui_owner_emit(char line[256], unsigned sample, unsigned target, unsigned row)
+{
+    unsigned links = 0;
+    while (links < NABU_UI_CHAIN_LINKS && nabu_ui_chain_rows[row][links][0] == 1) ++links;
+    if (!links || !nabu_ui_chain_rows[row][0][1]) return;
+    const uint64_t first = nabu_ui_chain_rows[row][0][1];
+    for (unsigned i = 0; i < nabu_ui_chain_dedup_count; ++i) {
+        if (nabu_ui_chain_dedup[i] == first) {
+            ++nabu_ui_chain_sample_dedup;
+            return;
+        }
+    }
+    if (nabu_ui_chain_dedup_count >= NABU_UI_CHAIN_DEDUP ||
+        nabu_ui_chain_sample_emitted + links > NABU_UI_CHAIN_SAMPLE_LINES ||
+        nabu_ui_chain_total + links > NABU_UI_CHAIN_TOTAL_LINES) {
+        nabu_ui_chain_sample_suppressed += links;
+        nabu_ui_chain_total_suppressed += links;
+        return;
+    }
+    nabu_ui_chain_dedup[nabu_ui_chain_dedup_count++] = first;
+    for (unsigned k = 0; k < links; ++k) {
+        const int bytes = nabu_ui_owner_format(line, 256, sample, target,
+            nabu_ui_task_rows[row][0], k + 1, nabu_ui_chain_rows[row][k],
+            (const char (*)[16])nabu_ui_chain_names[row][k]);
+        if (bytes > 0 && bytes < 256) {
+            nabu_capture_append(line, (unsigned)bytes);
+            ++nabu_ui_chain_sample_emitted;
+            ++nabu_ui_chain_total;
+        } else {
+            ++nabu_ui_chain_sample_dropped;
+            __atomic_fetch_add(&nabu_ui_text_dropped, 1, __ATOMIC_RELAXED);
+        }
+    }
+    ++nabu_ui_chain_sample_chains;
+}
+
 void
 nabu_ui_watch_snapshot(uint32_t out[6])
 {
@@ -366,13 +472,24 @@ nabu_ui_watch_snapshot(uint32_t out[6])
             sizeof(requested)) && requested == 1;
     }
     /* Wait-owner rows are a third, default-off choice. Without task sampling
-     * the argument is not even read, so v4 output stays byte-identical. */
+     * the argument is not even read, so v4 output stays byte-identical. The
+     * value 2 keeps every v5 row and adds bounded owner-chain rows. */
     if (nabu_ui_task_enabled_cache == 1 && nabu_ui_wait_enabled_cache < 0) {
         unsigned requested = 0;
         nabu_ui_wait_enabled_cache = PE_parse_boot_argn("nabu-ui-wait-owner", &requested,
-            sizeof(requested)) && requested == 1;
+            sizeof(requested)) && (requested == 1 || requested == 2) ? (int)requested : 0;
     }
-    const int wait_owner = nabu_ui_task_enabled_cache == 1 && nabu_ui_wait_enabled_cache == 1;
+    const int wait_owner = nabu_ui_task_enabled_cache == 1 &&
+        (nabu_ui_wait_enabled_cache == 1 || nabu_ui_wait_enabled_cache == 2);
+    const int wait_chain = nabu_ui_wait_enabled_cache == 2;
+    if (wait_chain) {
+        nabu_ui_chain_dedup_count = 0;
+        nabu_ui_chain_sample_chains = 0;
+        nabu_ui_chain_sample_emitted = 0;
+        nabu_ui_chain_sample_dedup = 0;
+        nabu_ui_chain_sample_suppressed = 0;
+        nabu_ui_chain_sample_dropped = 0;
+    }
     unsigned wait_eligible = 0, wait_emitted = 0, wait_suppressed = 0, wait_dropped = 0;
     char line[256];
     unsigned event_count = __atomic_load_n(&nabu_ui_event_count, __ATOMIC_ACQUIRE);
@@ -424,7 +541,11 @@ nabu_ui_watch_snapshot(uint32_t out[6])
             if (__atomic_load_n(&slot->phase, __ATOMIC_ACQUIRE) != NABU_UI_READY) continue;
             thread_t anchor = __atomic_load_n(&slot->thread, __ATOMIC_ACQUIRE);
             const unsigned rotation = (sample - 1) * 32;
-            const int sampled = wait_owner ?
+            const int sampled = wait_chain ?
+                nabu_ui_watch_task_wait_chain_snapshot(anchor, rotation, nabu_ui_task_rows,
+                    nabu_ui_task_meta, nabu_ui_wait_rows, nabu_ui_wait_names,
+                    nabu_ui_chain_rows, nabu_ui_chain_names) :
+                wait_owner ?
                 nabu_ui_watch_task_wait_snapshot(anchor, rotation, nabu_ui_task_rows,
                     nabu_ui_task_meta, nabu_ui_wait_rows, nabu_ui_wait_names) :
                 nabu_ui_watch_task_snapshot(anchor, rotation,
@@ -478,6 +599,8 @@ nabu_ui_watch_snapshot(uint32_t out[6])
                         ++target_emitted;
                         ++wait_emitted;
                         ++nabu_ui_wait_total;
+                        if (wait_chain && nabu_ui_wait_rows[j][2] == 1)
+                            nabu_ui_owner_emit(line, sample, i, j);
                     } else {
                         ++wait_dropped;
                         __atomic_fetch_add(&nabu_ui_text_dropped, 1, __ATOMIC_RELAXED);
@@ -493,6 +616,16 @@ nabu_ui_watch_snapshot(uint32_t out[6])
             sample, wait_eligible, wait_emitted, wait_suppressed, wait_dropped, nabu_ui_wait_total,
             nabu_ui_wait_total_suppressed, (unsigned)NABU_UI_WAIT_TARGET_LINES,
             (unsigned)NABU_UI_WAIT_SAMPLE_LINES, (unsigned)NABU_UI_WAIT_TOTAL_LINES));
+    }
+    if (wait_chain) {
+        nabu_ui_emit(line, snprintf(line, sizeof(line),
+            "NabuUIOwner: budget sample=%u chains=%u emitted=%u dedup=%u suppressed=%u "
+            "dropped=%u total_emitted=%u total_suppressed=%u sample_limit=12 "
+            "total_limit=512 link_limit=3\n",
+            sample, nabu_ui_chain_sample_chains, nabu_ui_chain_sample_emitted,
+            nabu_ui_chain_sample_dedup, nabu_ui_chain_sample_suppressed,
+            nabu_ui_chain_sample_dropped, nabu_ui_chain_total,
+            nabu_ui_chain_total_suppressed));
     }
     nabu_ui_emit(line, snprintf(line, sizeof(line),
         "NabuUI: budget sample=%u us=%llu events=%u pending=%u dropped=%u texts_dropped=%u target_link=direct sample_contended=%u closing=%u snapshot=non-atomic\n",
@@ -1089,6 +1222,381 @@ nabu_ui_watch_task_wait_snapshot(thread_t anchor, unsigned rotation,
     }
     return nabu_ui_task_scan(anchor, rotation, rows, meta, owners, names);
 }
+/* NABU_UI_WATCH_CHAIN_V1: nabu-ui-wait-owner=2 records a bounded cross-task
+ * owner chain. Entered exactly where the v5 record is, with the waiter's
+ * scheduler lock held at splsched; the link-1 record fills the v5 owner fields
+ * so the emitted wait-owner row is unchanged. Every lock below is a try-lock;
+ * all turnstile and holder locks taken here are released in reverse
+ * acquisition order before returning. A recorded holder that is itself in an
+ * inheritable wait keeps its scheduler lock and becomes the next link's
+ * waiter. Cycle checks cover every held turnstile and every locked thread.
+ * No references, no allocation, no blocking locks, no user memory. Bounds:
+ * 3 links, 12 turnstile locks, 3 holder locks.
+ * Link fields: valid, TID, pid, uniqueid, same task as the first waiter,
+ * holder scheduler status, holder state, holder hint, turnstile hops, next
+ * code. Names per link: thread, process (15 bytes, sanitized). */
+enum { NABU_UI_CHAIN_FIELDS = 10, NABU_UI_CHAIN_LINKS = 3 };
+enum { NABU_UI_CHAIN_HOLD_TS = 0, NABU_UI_CHAIN_HOLD_THREAD = 1 };
+enum { NABU_UI_CHAIN_NEXT_THREAD = 0, NABU_UI_CHAIN_NEXT_NONE = 1,
+       NABU_UI_CHAIN_NEXT_WORKQ = 2, NABU_UI_CHAIN_NEXT_OTHER = 3,
+       NABU_UI_CHAIN_NEXT_NOT_WAITING = 4, NABU_UI_CHAIN_NEXT_NO_TS = 5,
+       NABU_UI_CHAIN_NEXT_TS_BUSY = 6, NABU_UI_CHAIN_NEXT_HOP_BUSY = 7,
+       NABU_UI_CHAIN_NEXT_HOP_MAX = 8, NABU_UI_CHAIN_NEXT_CYCLE = 9,
+       NABU_UI_CHAIN_NEXT_LOCK_BUSY = 10, NABU_UI_CHAIN_NEXT_LINK_MAX = 11 };
+
+/* task_best_name copies the process name without locks; it is trusted only
+ * after get_bsdtask_info accepted the task's proc pointer, so a task without
+ * a proc leaves an empty (printed '-') name here. */
+static void
+nabu_ui_wait_proc_name(task_t task, char out[NABU_UI_WAIT_NAME])
+{
+	char raw[33];
+	for (unsigned i = 0; i < sizeof(raw); ++i) raw[i] = 0;
+	task_best_name(task, raw, sizeof(raw));
+	unsigned at = 0;
+	for (; at + 1 < NABU_UI_WAIT_NAME && raw[at]; ++at) {
+		const unsigned char c = (unsigned char)raw[at];
+		out[at] = (c > 0x20 && c < 0x7f && c != '=') ? (char)c : '?';
+	}
+	for (; at < NABU_UI_WAIT_NAME; ++at) out[at] = 0;
+}
+
+/* Called with the waiter's scheduler lock held at splsched; returns with that
+ * lock still held and every turnstile/thread lock taken here released. Each
+ * held turnstile lock pins its inheritor reference (turnstile_stash_inheritor)
+ * exactly as in the v5 walk, so a recorded holder's task and scheduler fields
+ * are read while that reference keeps the thread valid. task_pid,
+ * get_task_uniqueid and get_bsdtask_info are lock-free field readers; the
+ * process name is read only when the task still has a proc. */
+static void
+nabu_ui_wait_chain_locked(thread_t waiter, uint64_t owner[NABU_UI_WAIT_FIELDS],
+    char inheritor_name[NABU_UI_WAIT_NAME],
+    uint64_t chain[NABU_UI_CHAIN_LINKS][NABU_UI_CHAIN_FIELDS],
+    char chain_names[NABU_UI_CHAIN_LINKS][2][NABU_UI_WAIT_NAME])
+{
+	struct { void *object; unsigned kind; } held[12 + NABU_UI_CHAIN_LINKS];
+	unsigned locked = 0;
+	owner[0] = 1;
+	owner[1] = NABU_UI_WAIT_TS_NONE;
+	owner[2] = NABU_UI_WAIT_KIND_UNREAD;
+	owner[4] = NABU_UI_WAIT_SAME_UNREAD;
+	owner[5] = NABU_UI_WAIT_INH_UNREAD;
+	owner[9] = NABU_UI_WAIT_STOP_NO_TS;
+	struct turnstile *ts = thread_get_waiting_turnstile(waiter);
+	if (ts == TURNSTILE_NULL) return;
+	chain[0][0] = 1;
+	chain[0][4] = NABU_UI_WAIT_SAME_UNREAD;
+	chain[0][5] = NABU_UI_WAIT_INH_UNREAD;
+	if (!waitq_lock_try(&ts->ts_waitq)) {
+		owner[1] = NABU_UI_WAIT_TS_BUSY;
+		owner[9] = NABU_UI_WAIT_STOP_TS_BUSY;
+		chain[0][9] = NABU_UI_CHAIN_NEXT_TS_BUSY;
+		return;
+	}
+	owner[1] = NABU_UI_WAIT_TS_PRESENT;
+	held[locked].object = ts;
+	held[locked].kind = NABU_UI_CHAIN_HOLD_TS;
+	++locked;
+	unsigned link = 0;
+	for (;;) {
+		uint64_t *rec = chain[link];
+		char (*names)[NABU_UI_WAIT_NAME] = chain_names[link];
+		unsigned hops = 0;
+		thread_t holder = THREAD_NULL;
+		unsigned next = NABU_UI_CHAIN_NEXT_OTHER;
+		rec[0] = 1;
+		rec[2] = UINT64_MAX;
+		rec[3] = UINT64_MAX;
+		rec[4] = NABU_UI_WAIT_SAME_UNREAD;
+		rec[5] = NABU_UI_WAIT_INH_UNREAD;
+		for (;;) {
+			void *inheritor = (void *)ts->ts_inheritor;
+			const unsigned flags = (unsigned)ts->ts_inheritor_flags;
+			if (link == 0) owner[10] = flags & 0xff;
+			if (inheritor == TURNSTILE_INHERITOR_NULL) {
+				next = NABU_UI_CHAIN_NEXT_NONE;
+				if (link == 0) {
+					owner[2] = NABU_UI_WAIT_KIND_NONE;
+					owner[9] = NABU_UI_WAIT_STOP_NONE;
+				}
+				break;
+			}
+			if (flags & TURNSTILE_INHERITOR_THREAD) {
+				holder = (thread_t)inheritor;
+				next = NABU_UI_CHAIN_NEXT_THREAD;
+				break;
+			}
+			if (flags & TURNSTILE_INHERITOR_WORKQ) {
+				next = NABU_UI_CHAIN_NEXT_WORKQ;
+				if (link == 0) {
+					owner[2] = NABU_UI_WAIT_KIND_WORKQ;
+					owner[9] = NABU_UI_WAIT_STOP_WORKQ;
+				}
+				break;
+			}
+			if (!(flags & TURNSTILE_INHERITOR_TURNSTILE)) {
+				next = NABU_UI_CHAIN_NEXT_OTHER;
+				if (link == 0) {
+					owner[2] = NABU_UI_WAIT_KIND_OTHER;
+					owner[9] = NABU_UI_WAIT_STOP_UNKNOWN;
+				}
+				break;
+			}
+			struct turnstile *hop = (struct turnstile *)inheritor;
+			if (link == 0) owner[2] = NABU_UI_WAIT_KIND_TURNSTILE;
+			if (hops >= NABU_UI_WAIT_MAX_HOPS) {
+				next = NABU_UI_CHAIN_NEXT_HOP_MAX;
+				if (link == 0) owner[9] = NABU_UI_WAIT_STOP_HOP_MAX;
+				break;
+			}
+			unsigned cycle = 0;
+			for (unsigned i = 0; i < locked; ++i)
+				cycle |= held[i].kind == NABU_UI_CHAIN_HOLD_TS &&
+				    held[i].object == (void *)hop;
+			if (cycle) {
+				next = NABU_UI_CHAIN_NEXT_CYCLE;
+				if (link == 0) owner[9] = NABU_UI_WAIT_STOP_CYCLE;
+				break;
+			}
+			if (!waitq_lock_try(&hop->ts_waitq)) {
+				next = NABU_UI_CHAIN_NEXT_HOP_BUSY;
+				if (link == 0) owner[9] = NABU_UI_WAIT_STOP_HOP_BUSY;
+				break;
+			}
+			held[locked].object = hop;
+			held[locked].kind = NABU_UI_CHAIN_HOLD_TS;
+			++locked;
+			++hops;
+			ts = hop;
+		}
+		rec[8] = hops;
+		if (link == 0) owner[8] = hops;
+		if (holder == THREAD_NULL) {
+			rec[9] = next;
+			break;
+		}
+		/* Terminal thread H: identity reads while the held turnstile pins it.
+		 * The link-1 record mirrors these fields into the v5 owner record. */
+		rec[1] = thread_tid(holder);
+		task_t htask = get_threadtask(holder);
+		rec[4] = htask == get_threadtask(waiter) ? NABU_UI_WAIT_SAME_YES :
+		    NABU_UI_WAIT_SAME_NO;
+		if (htask != TASK_NULL) {
+			rec[2] = (uint64_t)(long long)task_pid(htask);
+			rec[3] = get_task_uniqueid(htask);
+			if (get_bsdtask_info(htask) != NULL)
+				nabu_ui_wait_proc_name(htask, names[1]);
+		}
+		nabu_ui_wait_name(holder, names[0]);
+		if (link == 0) {
+			owner[2] = NABU_UI_WAIT_KIND_THREAD;
+			owner[3] = rec[1];
+			owner[4] = rec[4];
+			owner[9] = NABU_UI_WAIT_STOP_THREAD;
+			for (unsigned i = 0; i < NABU_UI_WAIT_NAME; ++i)
+				inheritor_name[i] = names[0][i];
+		}
+		unsigned self = holder == waiter;
+		for (unsigned i = 0; i < locked; ++i)
+			self |= held[i].kind == NABU_UI_CHAIN_HOLD_THREAD &&
+			    held[i].object == (void *)holder;
+		if (self) {
+			/* Already locked by this walk: never try a held lock again. */
+			rec[5] = NABU_UI_WAIT_INH_SELF;
+			rec[6] = (uint32_t)holder->state;
+			rec[7] = (uint32_t)holder->block_hint;
+			rec[9] = NABU_UI_CHAIN_NEXT_CYCLE;
+			if (link == 0) {
+				owner[5] = NABU_UI_WAIT_INH_SELF;
+				owner[6] = rec[6];
+				owner[7] = rec[7];
+			}
+			break;
+		}
+		if (!simple_lock_try(&holder->sched_lock, &thread_lck_grp)) {
+			rec[5] = NABU_UI_WAIT_INH_BUSY;
+			rec[9] = NABU_UI_CHAIN_NEXT_LOCK_BUSY;
+			if (link == 0) owner[5] = NABU_UI_WAIT_INH_BUSY;
+			break;
+		}
+		held[locked].object = holder;
+		held[locked].kind = NABU_UI_CHAIN_HOLD_THREAD;
+		++locked;
+		rec[5] = NABU_UI_WAIT_INH_OK;
+		rec[6] = (uint32_t)holder->state;
+		rec[7] = (uint32_t)holder->block_hint;
+		if (link == 0) {
+			owner[5] = NABU_UI_WAIT_INH_OK;
+			owner[6] = rec[6];
+			owner[7] = rec[7];
+		}
+		if (!((holder->state & TH_WAIT) && nabu_ui_wait_hint(holder->block_hint))) {
+			rec[9] = NABU_UI_CHAIN_NEXT_NOT_WAITING;
+			break;
+		}
+		if (link + 1 >= NABU_UI_CHAIN_LINKS) {
+			rec[9] = NABU_UI_CHAIN_NEXT_LINK_MAX;
+			break;
+		}
+		ts = thread_get_waiting_turnstile(holder);
+		if (ts == TURNSTILE_NULL) {
+			rec[9] = NABU_UI_CHAIN_NEXT_NO_TS;
+			break;
+		}
+		rec[9] = NABU_UI_CHAIN_NEXT_THREAD;
+		unsigned held_ts = 0;
+		for (unsigned i = 0; i < locked; ++i)
+			held_ts |= held[i].kind == NABU_UI_CHAIN_HOLD_TS &&
+			    held[i].object == (void *)ts;
+		/* A held turnstile is never tried again: that is a cycle, not busy. */
+		if (held_ts || !waitq_lock_try(&ts->ts_waitq)) {
+			rec = chain[link + 1];
+			rec[0] = 1;
+			rec[2] = UINT64_MAX;
+			rec[3] = UINT64_MAX;
+			rec[4] = NABU_UI_WAIT_SAME_UNREAD;
+			rec[5] = NABU_UI_WAIT_INH_UNREAD;
+			rec[9] = held_ts ? NABU_UI_CHAIN_NEXT_CYCLE : NABU_UI_CHAIN_NEXT_TS_BUSY;
+			break;
+		}
+		held[locked].object = ts;
+		held[locked].kind = NABU_UI_CHAIN_HOLD_TS;
+		++locked;
+		++link;
+	}
+	while (locked) {
+		--locked;
+		if (held[locked].kind == NABU_UI_CHAIN_HOLD_TS)
+			waitq_unlock(&((struct turnstile *)held[locked].object)->ts_waitq);
+		else
+			thread_unlock((thread_t)held[locked].object);
+	}
+}
+
+/* v6 sibling of nabu_ui_watch_thread_wait_owner: identical scalars and v5
+ * owner output plus the bounded chain records, from one hold of the waiter's
+ * scheduler lock. */
+int
+nabu_ui_watch_thread_wait_chain(thread_t thread, uint32_t *state, uint32_t *hint,
+    uint64_t *wait_tag, uint64_t owner[NABU_UI_WAIT_FIELDS],
+    char names[2][NABU_UI_WAIT_NAME],
+    uint64_t chain[NABU_UI_CHAIN_LINKS][NABU_UI_CHAIN_FIELDS],
+    char chain_names[NABU_UI_CHAIN_LINKS][2][NABU_UI_WAIT_NAME])
+{
+	if (thread == THREAD_NULL || state == NULL || hint == NULL || wait_tag == NULL ||
+	    owner == NULL || names == NULL || chain == NULL || chain_names == NULL) return 2;
+	for (unsigned i = 0; i < NABU_UI_WAIT_FIELDS; ++i) owner[i] = 0;
+	for (unsigned i = 0; i < 2; ++i)
+		for (unsigned j = 0; j < NABU_UI_WAIT_NAME; ++j) names[i][j] = 0;
+	for (unsigned i = 0; i < NABU_UI_CHAIN_LINKS; ++i) {
+		for (unsigned j = 0; j < NABU_UI_CHAIN_FIELDS; ++j) chain[i][j] = 0;
+		for (unsigned j = 0; j < 2; ++j)
+			for (unsigned k = 0; k < NABU_UI_WAIT_NAME; ++k) chain_names[i][j][k] = 0;
+	}
+	uint64_t event = 0, tag = 0;
+	spl_t s = splsched();
+	if (!simple_lock_try(&thread->sched_lock, &thread_lck_grp)) {
+		splx(s);
+		return 1;
+	}
+	*state = (uint32_t)thread->state;
+	*hint = (uint32_t)thread->block_hint;
+	event = (uint64_t)thread->wait_event;
+	if ((*state & TH_WAIT) && nabu_ui_wait_hint(*hint))
+		nabu_ui_wait_chain_locked(thread, owner, names[1], chain, chain_names);
+	thread_unlock(thread);
+	splx(s);
+	if (event) {
+		tag = event ^ thread_tid(thread);
+		tag = (tag ^ (tag >> 30)) * 0xbf58476d1ce4e5b9ULL;
+		tag = (tag ^ (tag >> 27)) * 0x94d049bb133111ebULL;
+		tag = (tag ^ (tag >> 31)) & 0xffffffff;
+	}
+	*wait_tag = tag;
+	if (owner[0]) nabu_ui_wait_name(thread, names[0]);
+	return 0;
+}
+
+/* Task scan for the chain record: identical bounds and rotation to
+ * nabu_ui_task_scan, kept separate so the v5 entry points stay unchanged. */
+static int
+nabu_ui_task_scan_chain(thread_t anchor, unsigned rotation, uint64_t rows[32][5],
+    uint32_t meta[4], uint64_t owners[32][NABU_UI_WAIT_FIELDS],
+    char names[32][2][NABU_UI_WAIT_NAME],
+    uint64_t chain[32][NABU_UI_CHAIN_LINKS][NABU_UI_CHAIN_FIELDS],
+    char chain_names[32][NABU_UI_CHAIN_LINKS][2][NABU_UI_WAIT_NAME])
+{
+    if (rows == NULL || meta == NULL) return 2;
+    for (unsigned i = 0; i < 4; ++i) meta[i] = 0;
+    for (unsigned i = 0; i < 32; ++i)
+        for (unsigned j = 0; j < 5; ++j) rows[i][j] = 0;
+    if (owners == NULL || names == NULL || chain == NULL || chain_names == NULL) return 2;
+    for (unsigned i = 0; i < 32; ++i) {
+        for (unsigned j = 0; j < NABU_UI_WAIT_FIELDS; ++j) owners[i][j] = 0;
+        for (unsigned j = 0; j < 2; ++j)
+            for (unsigned k = 0; k < NABU_UI_WAIT_NAME; ++k) names[i][j][k] = 0;
+        for (unsigned j = 0; j < NABU_UI_CHAIN_LINKS; ++j) {
+            for (unsigned k = 0; k < NABU_UI_CHAIN_FIELDS; ++k) chain[i][j][k] = 0;
+            for (unsigned k = 0; k < 2; ++k)
+                for (unsigned n = 0; n < NABU_UI_WAIT_NAME; ++n)
+                    chain_names[i][j][k][n] = 0;
+        }
+    }
+    /* thread_deallocate's last-reference path drops this task reference.
+     * The retained anchor therefore keeps its task alive during this call. */
+    if (anchor == THREAD_NULL) return 2;
+    task_t task = get_threadtask(anchor);
+    if (task == TASK_NULL) return 2;
+    if (!task_lock_try(task)) return 1;
+    const uint32_t count = task->thread_count > 0 ? (uint32_t)task->thread_count : 0;
+    const uint32_t limit = count < 128 ? count : 128;
+    const uint32_t start = limit ? rotation % limit : 0;
+    unsigned scanned = 0, returned = 0;
+    thread_t thread;
+    queue_iterate(&task->threads, thread, thread_t, task_threads) {
+        if (scanned >= limit) break;
+        const unsigned index = scanned++;
+        if ((index + limit - start) % limit >= 32) continue;
+        if (returned >= 32) break;
+        uint32_t state = 0, hint = 0;
+        uint64_t wait = 0;
+        const uint64_t tid = thread_tid(thread);
+        /* Same try-only sampler contract as the v5 scan; each returned row
+         * also fills its chain links under the same single scheduler hold. */
+        const int sampled =
+            nabu_ui_watch_thread_wait_chain(thread, &state, &hint, &wait,
+                owners[returned], names[returned], chain[returned],
+                chain_names[returned]);
+        rows[returned][0] = tid;
+        rows[returned][1] = state;
+        rows[returned][2] = hint;
+        rows[returned][3] = wait;
+        rows[returned][4] = (uint64_t)sampled;
+        ++returned;
+    }
+    meta[0] = count;
+    meta[1] = scanned;
+    meta[2] = returned;
+    meta[3] = count > returned ? count - returned : 0;
+    task_unlock(task);
+    return 0;
+}
+
+int
+nabu_ui_watch_task_wait_chain_snapshot(thread_t anchor, unsigned rotation,
+    uint64_t rows[32][5], uint32_t meta[4],
+    uint64_t owners[32][NABU_UI_WAIT_FIELDS], char names[32][2][NABU_UI_WAIT_NAME],
+    uint64_t chain[32][NABU_UI_CHAIN_LINKS][NABU_UI_CHAIN_FIELDS],
+    char chain_names[32][NABU_UI_CHAIN_LINKS][2][NABU_UI_WAIT_NAME])
+{
+    if (owners == NULL || names == NULL || chain == NULL || chain_names == NULL) {
+        /* Clear the scalar outputs without sampling; never fall back silently. */
+        (void)nabu_ui_task_scan(THREAD_NULL, rotation, rows, meta, NULL, NULL);
+        return 2;
+    }
+    return nabu_ui_task_scan_chain(anchor, rotation, rows, meta, owners, names,
+        chain, chain_names);
+}
 '''
 
 THREAD_PAIRS = ((r'''/* Drop a thread refcount safely without triggering a zfree */
@@ -1376,6 +1884,381 @@ nabu_ui_watch_task_wait_snapshot(thread_t anchor, unsigned rotation,
         return 2;
     }
     return nabu_ui_task_scan(anchor, rotation, rows, meta, owners, names);
+}
+/* NABU_UI_WATCH_CHAIN_V1: nabu-ui-wait-owner=2 records a bounded cross-task
+ * owner chain. Entered exactly where the v5 record is, with the waiter's
+ * scheduler lock held at splsched; the link-1 record fills the v5 owner fields
+ * so the emitted wait-owner row is unchanged. Every lock below is a try-lock;
+ * all turnstile and holder locks taken here are released in reverse
+ * acquisition order before returning. A recorded holder that is itself in an
+ * inheritable wait keeps its scheduler lock and becomes the next link's
+ * waiter. Cycle checks cover every held turnstile and every locked thread.
+ * No references, no allocation, no blocking locks, no user memory. Bounds:
+ * 3 links, 12 turnstile locks, 3 holder locks.
+ * Link fields: valid, TID, pid, uniqueid, same task as the first waiter,
+ * holder scheduler status, holder state, holder hint, turnstile hops, next
+ * code. Names per link: thread, process (15 bytes, sanitized). */
+enum { NABU_UI_CHAIN_FIELDS = 10, NABU_UI_CHAIN_LINKS = 3 };
+enum { NABU_UI_CHAIN_HOLD_TS = 0, NABU_UI_CHAIN_HOLD_THREAD = 1 };
+enum { NABU_UI_CHAIN_NEXT_THREAD = 0, NABU_UI_CHAIN_NEXT_NONE = 1,
+       NABU_UI_CHAIN_NEXT_WORKQ = 2, NABU_UI_CHAIN_NEXT_OTHER = 3,
+       NABU_UI_CHAIN_NEXT_NOT_WAITING = 4, NABU_UI_CHAIN_NEXT_NO_TS = 5,
+       NABU_UI_CHAIN_NEXT_TS_BUSY = 6, NABU_UI_CHAIN_NEXT_HOP_BUSY = 7,
+       NABU_UI_CHAIN_NEXT_HOP_MAX = 8, NABU_UI_CHAIN_NEXT_CYCLE = 9,
+       NABU_UI_CHAIN_NEXT_LOCK_BUSY = 10, NABU_UI_CHAIN_NEXT_LINK_MAX = 11 };
+
+/* task_best_name copies the process name without locks; it is trusted only
+ * after get_bsdtask_info accepted the task's proc pointer, so a task without
+ * a proc leaves an empty (printed '-') name here. */
+static void
+nabu_ui_wait_proc_name(task_t task, char out[NABU_UI_WAIT_NAME])
+{
+	char raw[33];
+	for (unsigned i = 0; i < sizeof(raw); ++i) raw[i] = 0;
+	task_best_name(task, raw, sizeof(raw));
+	unsigned at = 0;
+	for (; at + 1 < NABU_UI_WAIT_NAME && raw[at]; ++at) {
+		const unsigned char c = (unsigned char)raw[at];
+		out[at] = (c > 0x20 && c < 0x7f && c != '=') ? (char)c : '?';
+	}
+	for (; at < NABU_UI_WAIT_NAME; ++at) out[at] = 0;
+}
+
+/* Called with the waiter's scheduler lock held at splsched; returns with that
+ * lock still held and every turnstile/thread lock taken here released. Each
+ * held turnstile lock pins its inheritor reference (turnstile_stash_inheritor)
+ * exactly as in the v5 walk, so a recorded holder's task and scheduler fields
+ * are read while that reference keeps the thread valid. task_pid,
+ * get_task_uniqueid and get_bsdtask_info are lock-free field readers; the
+ * process name is read only when the task still has a proc. */
+static void
+nabu_ui_wait_chain_locked(thread_t waiter, uint64_t owner[NABU_UI_WAIT_FIELDS],
+    char inheritor_name[NABU_UI_WAIT_NAME],
+    uint64_t chain[NABU_UI_CHAIN_LINKS][NABU_UI_CHAIN_FIELDS],
+    char chain_names[NABU_UI_CHAIN_LINKS][2][NABU_UI_WAIT_NAME])
+{
+	struct { void *object; unsigned kind; } held[12 + NABU_UI_CHAIN_LINKS];
+	unsigned locked = 0;
+	owner[0] = 1;
+	owner[1] = NABU_UI_WAIT_TS_NONE;
+	owner[2] = NABU_UI_WAIT_KIND_UNREAD;
+	owner[4] = NABU_UI_WAIT_SAME_UNREAD;
+	owner[5] = NABU_UI_WAIT_INH_UNREAD;
+	owner[9] = NABU_UI_WAIT_STOP_NO_TS;
+	struct turnstile *ts = thread_get_waiting_turnstile(waiter);
+	if (ts == TURNSTILE_NULL) return;
+	chain[0][0] = 1;
+	chain[0][4] = NABU_UI_WAIT_SAME_UNREAD;
+	chain[0][5] = NABU_UI_WAIT_INH_UNREAD;
+	if (!waitq_lock_try(&ts->ts_waitq)) {
+		owner[1] = NABU_UI_WAIT_TS_BUSY;
+		owner[9] = NABU_UI_WAIT_STOP_TS_BUSY;
+		chain[0][9] = NABU_UI_CHAIN_NEXT_TS_BUSY;
+		return;
+	}
+	owner[1] = NABU_UI_WAIT_TS_PRESENT;
+	held[locked].object = ts;
+	held[locked].kind = NABU_UI_CHAIN_HOLD_TS;
+	++locked;
+	unsigned link = 0;
+	for (;;) {
+		uint64_t *rec = chain[link];
+		char (*names)[NABU_UI_WAIT_NAME] = chain_names[link];
+		unsigned hops = 0;
+		thread_t holder = THREAD_NULL;
+		unsigned next = NABU_UI_CHAIN_NEXT_OTHER;
+		rec[0] = 1;
+		rec[2] = UINT64_MAX;
+		rec[3] = UINT64_MAX;
+		rec[4] = NABU_UI_WAIT_SAME_UNREAD;
+		rec[5] = NABU_UI_WAIT_INH_UNREAD;
+		for (;;) {
+			void *inheritor = (void *)ts->ts_inheritor;
+			const unsigned flags = (unsigned)ts->ts_inheritor_flags;
+			if (link == 0) owner[10] = flags & 0xff;
+			if (inheritor == TURNSTILE_INHERITOR_NULL) {
+				next = NABU_UI_CHAIN_NEXT_NONE;
+				if (link == 0) {
+					owner[2] = NABU_UI_WAIT_KIND_NONE;
+					owner[9] = NABU_UI_WAIT_STOP_NONE;
+				}
+				break;
+			}
+			if (flags & TURNSTILE_INHERITOR_THREAD) {
+				holder = (thread_t)inheritor;
+				next = NABU_UI_CHAIN_NEXT_THREAD;
+				break;
+			}
+			if (flags & TURNSTILE_INHERITOR_WORKQ) {
+				next = NABU_UI_CHAIN_NEXT_WORKQ;
+				if (link == 0) {
+					owner[2] = NABU_UI_WAIT_KIND_WORKQ;
+					owner[9] = NABU_UI_WAIT_STOP_WORKQ;
+				}
+				break;
+			}
+			if (!(flags & TURNSTILE_INHERITOR_TURNSTILE)) {
+				next = NABU_UI_CHAIN_NEXT_OTHER;
+				if (link == 0) {
+					owner[2] = NABU_UI_WAIT_KIND_OTHER;
+					owner[9] = NABU_UI_WAIT_STOP_UNKNOWN;
+				}
+				break;
+			}
+			struct turnstile *hop = (struct turnstile *)inheritor;
+			if (link == 0) owner[2] = NABU_UI_WAIT_KIND_TURNSTILE;
+			if (hops >= NABU_UI_WAIT_MAX_HOPS) {
+				next = NABU_UI_CHAIN_NEXT_HOP_MAX;
+				if (link == 0) owner[9] = NABU_UI_WAIT_STOP_HOP_MAX;
+				break;
+			}
+			unsigned cycle = 0;
+			for (unsigned i = 0; i < locked; ++i)
+				cycle |= held[i].kind == NABU_UI_CHAIN_HOLD_TS &&
+				    held[i].object == (void *)hop;
+			if (cycle) {
+				next = NABU_UI_CHAIN_NEXT_CYCLE;
+				if (link == 0) owner[9] = NABU_UI_WAIT_STOP_CYCLE;
+				break;
+			}
+			if (!waitq_lock_try(&hop->ts_waitq)) {
+				next = NABU_UI_CHAIN_NEXT_HOP_BUSY;
+				if (link == 0) owner[9] = NABU_UI_WAIT_STOP_HOP_BUSY;
+				break;
+			}
+			held[locked].object = hop;
+			held[locked].kind = NABU_UI_CHAIN_HOLD_TS;
+			++locked;
+			++hops;
+			ts = hop;
+		}
+		rec[8] = hops;
+		if (link == 0) owner[8] = hops;
+		if (holder == THREAD_NULL) {
+			rec[9] = next;
+			break;
+		}
+		/* Terminal thread H: identity reads while the held turnstile pins it.
+		 * The link-1 record mirrors these fields into the v5 owner record. */
+		rec[1] = thread_tid(holder);
+		task_t htask = get_threadtask(holder);
+		rec[4] = htask == get_threadtask(waiter) ? NABU_UI_WAIT_SAME_YES :
+		    NABU_UI_WAIT_SAME_NO;
+		if (htask != TASK_NULL) {
+			rec[2] = (uint64_t)(long long)task_pid(htask);
+			rec[3] = get_task_uniqueid(htask);
+			if (get_bsdtask_info(htask) != NULL)
+				nabu_ui_wait_proc_name(htask, names[1]);
+		}
+		nabu_ui_wait_name(holder, names[0]);
+		if (link == 0) {
+			owner[2] = NABU_UI_WAIT_KIND_THREAD;
+			owner[3] = rec[1];
+			owner[4] = rec[4];
+			owner[9] = NABU_UI_WAIT_STOP_THREAD;
+			for (unsigned i = 0; i < NABU_UI_WAIT_NAME; ++i)
+				inheritor_name[i] = names[0][i];
+		}
+		unsigned self = holder == waiter;
+		for (unsigned i = 0; i < locked; ++i)
+			self |= held[i].kind == NABU_UI_CHAIN_HOLD_THREAD &&
+			    held[i].object == (void *)holder;
+		if (self) {
+			/* Already locked by this walk: never try a held lock again. */
+			rec[5] = NABU_UI_WAIT_INH_SELF;
+			rec[6] = (uint32_t)holder->state;
+			rec[7] = (uint32_t)holder->block_hint;
+			rec[9] = NABU_UI_CHAIN_NEXT_CYCLE;
+			if (link == 0) {
+				owner[5] = NABU_UI_WAIT_INH_SELF;
+				owner[6] = rec[6];
+				owner[7] = rec[7];
+			}
+			break;
+		}
+		if (!simple_lock_try(&holder->sched_lock, &thread_lck_grp)) {
+			rec[5] = NABU_UI_WAIT_INH_BUSY;
+			rec[9] = NABU_UI_CHAIN_NEXT_LOCK_BUSY;
+			if (link == 0) owner[5] = NABU_UI_WAIT_INH_BUSY;
+			break;
+		}
+		held[locked].object = holder;
+		held[locked].kind = NABU_UI_CHAIN_HOLD_THREAD;
+		++locked;
+		rec[5] = NABU_UI_WAIT_INH_OK;
+		rec[6] = (uint32_t)holder->state;
+		rec[7] = (uint32_t)holder->block_hint;
+		if (link == 0) {
+			owner[5] = NABU_UI_WAIT_INH_OK;
+			owner[6] = rec[6];
+			owner[7] = rec[7];
+		}
+		if (!((holder->state & TH_WAIT) && nabu_ui_wait_hint(holder->block_hint))) {
+			rec[9] = NABU_UI_CHAIN_NEXT_NOT_WAITING;
+			break;
+		}
+		if (link + 1 >= NABU_UI_CHAIN_LINKS) {
+			rec[9] = NABU_UI_CHAIN_NEXT_LINK_MAX;
+			break;
+		}
+		ts = thread_get_waiting_turnstile(holder);
+		if (ts == TURNSTILE_NULL) {
+			rec[9] = NABU_UI_CHAIN_NEXT_NO_TS;
+			break;
+		}
+		rec[9] = NABU_UI_CHAIN_NEXT_THREAD;
+		unsigned held_ts = 0;
+		for (unsigned i = 0; i < locked; ++i)
+			held_ts |= held[i].kind == NABU_UI_CHAIN_HOLD_TS &&
+			    held[i].object == (void *)ts;
+		/* A held turnstile is never tried again: that is a cycle, not busy. */
+		if (held_ts || !waitq_lock_try(&ts->ts_waitq)) {
+			rec = chain[link + 1];
+			rec[0] = 1;
+			rec[2] = UINT64_MAX;
+			rec[3] = UINT64_MAX;
+			rec[4] = NABU_UI_WAIT_SAME_UNREAD;
+			rec[5] = NABU_UI_WAIT_INH_UNREAD;
+			rec[9] = held_ts ? NABU_UI_CHAIN_NEXT_CYCLE : NABU_UI_CHAIN_NEXT_TS_BUSY;
+			break;
+		}
+		held[locked].object = ts;
+		held[locked].kind = NABU_UI_CHAIN_HOLD_TS;
+		++locked;
+		++link;
+	}
+	while (locked) {
+		--locked;
+		if (held[locked].kind == NABU_UI_CHAIN_HOLD_TS)
+			waitq_unlock(&((struct turnstile *)held[locked].object)->ts_waitq);
+		else
+			thread_unlock((thread_t)held[locked].object);
+	}
+}
+
+/* v6 sibling of nabu_ui_watch_thread_wait_owner: identical scalars and v5
+ * owner output plus the bounded chain records, from one hold of the waiter's
+ * scheduler lock. */
+int
+nabu_ui_watch_thread_wait_chain(thread_t thread, uint32_t *state, uint32_t *hint,
+    uint64_t *wait_tag, uint64_t owner[NABU_UI_WAIT_FIELDS],
+    char names[2][NABU_UI_WAIT_NAME],
+    uint64_t chain[NABU_UI_CHAIN_LINKS][NABU_UI_CHAIN_FIELDS],
+    char chain_names[NABU_UI_CHAIN_LINKS][2][NABU_UI_WAIT_NAME])
+{
+	if (thread == THREAD_NULL || state == NULL || hint == NULL || wait_tag == NULL ||
+	    owner == NULL || names == NULL || chain == NULL || chain_names == NULL) return 2;
+	for (unsigned i = 0; i < NABU_UI_WAIT_FIELDS; ++i) owner[i] = 0;
+	for (unsigned i = 0; i < 2; ++i)
+		for (unsigned j = 0; j < NABU_UI_WAIT_NAME; ++j) names[i][j] = 0;
+	for (unsigned i = 0; i < NABU_UI_CHAIN_LINKS; ++i) {
+		for (unsigned j = 0; j < NABU_UI_CHAIN_FIELDS; ++j) chain[i][j] = 0;
+		for (unsigned j = 0; j < 2; ++j)
+			for (unsigned k = 0; k < NABU_UI_WAIT_NAME; ++k) chain_names[i][j][k] = 0;
+	}
+	uint64_t event = 0, tag = 0;
+	spl_t s = splsched();
+	if (!simple_lock_try(&thread->sched_lock, &thread_lck_grp)) {
+		splx(s);
+		return 1;
+	}
+	*state = (uint32_t)thread->state;
+	*hint = (uint32_t)thread->block_hint;
+	event = (uint64_t)thread->wait_event;
+	if ((*state & TH_WAIT) && nabu_ui_wait_hint(*hint))
+		nabu_ui_wait_chain_locked(thread, owner, names[1], chain, chain_names);
+	thread_unlock(thread);
+	splx(s);
+	if (event) {
+		tag = event ^ thread_tid(thread);
+		tag = (tag ^ (tag >> 30)) * 0xbf58476d1ce4e5b9ULL;
+		tag = (tag ^ (tag >> 27)) * 0x94d049bb133111ebULL;
+		tag = (tag ^ (tag >> 31)) & 0xffffffff;
+	}
+	*wait_tag = tag;
+	if (owner[0]) nabu_ui_wait_name(thread, names[0]);
+	return 0;
+}
+
+/* Task scan for the chain record: identical bounds and rotation to
+ * nabu_ui_task_scan, kept separate so the v5 entry points stay unchanged. */
+static int
+nabu_ui_task_scan_chain(thread_t anchor, unsigned rotation, uint64_t rows[32][5],
+    uint32_t meta[4], uint64_t owners[32][NABU_UI_WAIT_FIELDS],
+    char names[32][2][NABU_UI_WAIT_NAME],
+    uint64_t chain[32][NABU_UI_CHAIN_LINKS][NABU_UI_CHAIN_FIELDS],
+    char chain_names[32][NABU_UI_CHAIN_LINKS][2][NABU_UI_WAIT_NAME])
+{
+    if (rows == NULL || meta == NULL) return 2;
+    for (unsigned i = 0; i < 4; ++i) meta[i] = 0;
+    for (unsigned i = 0; i < 32; ++i)
+        for (unsigned j = 0; j < 5; ++j) rows[i][j] = 0;
+    if (owners == NULL || names == NULL || chain == NULL || chain_names == NULL) return 2;
+    for (unsigned i = 0; i < 32; ++i) {
+        for (unsigned j = 0; j < NABU_UI_WAIT_FIELDS; ++j) owners[i][j] = 0;
+        for (unsigned j = 0; j < 2; ++j)
+            for (unsigned k = 0; k < NABU_UI_WAIT_NAME; ++k) names[i][j][k] = 0;
+        for (unsigned j = 0; j < NABU_UI_CHAIN_LINKS; ++j) {
+            for (unsigned k = 0; k < NABU_UI_CHAIN_FIELDS; ++k) chain[i][j][k] = 0;
+            for (unsigned k = 0; k < 2; ++k)
+                for (unsigned n = 0; n < NABU_UI_WAIT_NAME; ++n)
+                    chain_names[i][j][k][n] = 0;
+        }
+    }
+    /* thread_deallocate's last-reference path drops this task reference.
+     * The retained anchor therefore keeps its task alive during this call. */
+    if (anchor == THREAD_NULL) return 2;
+    task_t task = get_threadtask(anchor);
+    if (task == TASK_NULL) return 2;
+    if (!task_lock_try(task)) return 1;
+    const uint32_t count = task->thread_count > 0 ? (uint32_t)task->thread_count : 0;
+    const uint32_t limit = count < 128 ? count : 128;
+    const uint32_t start = limit ? rotation % limit : 0;
+    unsigned scanned = 0, returned = 0;
+    thread_t thread;
+    queue_iterate(&task->threads, thread, thread_t, task_threads) {
+        if (scanned >= limit) break;
+        const unsigned index = scanned++;
+        if ((index + limit - start) % limit >= 32) continue;
+        if (returned >= 32) break;
+        uint32_t state = 0, hint = 0;
+        uint64_t wait = 0;
+        const uint64_t tid = thread_tid(thread);
+        /* Same try-only sampler contract as the v5 scan; each returned row
+         * also fills its chain links under the same single scheduler hold. */
+        const int sampled =
+            nabu_ui_watch_thread_wait_chain(thread, &state, &hint, &wait,
+                owners[returned], names[returned], chain[returned],
+                chain_names[returned]);
+        rows[returned][0] = tid;
+        rows[returned][1] = state;
+        rows[returned][2] = hint;
+        rows[returned][3] = wait;
+        rows[returned][4] = (uint64_t)sampled;
+        ++returned;
+    }
+    meta[0] = count;
+    meta[1] = scanned;
+    meta[2] = returned;
+    meta[3] = count > returned ? count - returned : 0;
+    task_unlock(task);
+    return 0;
+}
+
+int
+nabu_ui_watch_task_wait_chain_snapshot(thread_t anchor, unsigned rotation,
+    uint64_t rows[32][5], uint32_t meta[4],
+    uint64_t owners[32][NABU_UI_WAIT_FIELDS], char names[32][2][NABU_UI_WAIT_NAME],
+    uint64_t chain[32][NABU_UI_CHAIN_LINKS][NABU_UI_CHAIN_FIELDS],
+    char chain_names[32][NABU_UI_CHAIN_LINKS][2][NABU_UI_WAIT_NAME])
+{
+    if (owners == NULL || names == NULL || chain == NULL || chain_names == NULL) {
+        /* Clear the scalar outputs without sampling; never fall back silently. */
+        (void)nabu_ui_task_scan(THREAD_NULL, rotation, rows, meta, NULL, NULL);
+        return 2;
+    }
+    return nabu_ui_task_scan_chain(anchor, rotation, rows, meta, owners, names,
+        chain, chain_names);
 }
 /* Drop a thread refcount safely without triggering a zfree */
 void

@@ -43,6 +43,24 @@ def wait_helpers_ok(exec_helper, thread_helper):
             _FORBIDDEN_CALL.search(thread_helper) is None)
 
 
+# v6 owner chain: exact code-level limits and identity readers the generator must carry.
+CHAIN_EXEC_REQUIRED = (
+    'NABU_UI_CHAIN_SAMPLE_LINES = 12', 'NABU_UI_CHAIN_TOTAL_LINES = 512',
+    'NABU_UI_CHAIN_DEDUP = 16', 'requested == 1 || requested == 2',
+    'NabuUIOwner: sample=', 'NabuUIOwner: budget sample=')
+CHAIN_THREAD_REQUIRED = (
+    'NABU_UI_CHAIN_FIELDS = 10', 'NABU_UI_CHAIN_LINKS = 3',
+    'nabu_ui_wait_chain_locked', 'task_pid(', 'task_best_name(',
+    'get_task_uniqueid(', 'get_bsdtask_info(', 'NABU_UI_CHAIN_NEXT_LINK_MAX = 11')
+
+
+def chain_helpers_ok(exec_helper, thread_helper):
+    """Static v6 gate: the v5 gate plus the bounded cross-task chain tokens."""
+    return (wait_helpers_ok(exec_helper, thread_helper) and
+            all(name in exec_helper for name in CHAIN_EXEC_REQUIRED) and
+            all(name in thread_helper for name in CHAIN_THREAD_REQUIRED))
+
+
 def sha(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -116,7 +134,8 @@ def qualify(read, candidate):
         require(b'NABU_UI_WATCH' not in exec_source and b'NABU_UI_WATCH' not in exit_source and
                 b'NABU_UI_WATCH' not in thread_source and
                 b'nabu-ui-watch' not in candidate and b'_nabu_ui_watch_' not in candidate and
-                b'nabu-ui-wait-owner' not in candidate and b'NabuUIWait' not in candidate,
+                b'nabu-ui-wait-owner' not in candidate and b'NabuUIWait' not in candidate and
+                b'NabuUIOwner' not in candidate,
                 'Disabled kernel retains UI observer definitions or dependencies')
         return {'compiled': False, 'runtime_qualified': False}
     thread_source = read(thread_path)
@@ -137,7 +156,8 @@ def qualify(read, candidate):
             contract.get('max_threads') == 3 and contract.get('targets') ==
             ['SpringBoard', 'backboardd', 'runningboardd'], 'UI scope or budget changed')
     version = contract.get('version', 1)
-    require(type(version) is int and version in (1, 2, 3, 4, 5), 'Unknown UI observer contract version')
+    require(type(version) is int and version in (1, 2, 3, 4, 5, 6),
+            'Unknown UI observer contract version')
     if version >= 2:
         require(contract.get('target_association') == 'activation-call-output' and
                 contract.get('max_exec_contexts') == 0 and
@@ -179,6 +199,23 @@ def qualify(read, candidate):
                 b'NABU_UI_WATCH_WAIT_V1' in thread_source and
                 wait_helpers_ok(constants['EXEC_HELPER'], thread_helper),
                 'UI v5 requires a separately enabled, try-only, bounded wait-owner record')
+    if version >= 6:
+        require(contract.get('wait_chain_trigger') == 'nabu-ui-wait-owner=2' and
+                contract.get('wait_chain_links') == 3 and
+                contract.get('wait_chain_fields') == 10 and
+                contract.get('wait_chain_sample_line_limit') == 12 and
+                contract.get('wait_chain_total_line_limit') == 512 and
+                contract.get('wait_chain_dedup_table') == 16 and
+                contract.get('wait_chain_max_turnstile_locks') == 12 and
+                contract.get('wait_chain_max_thread_locks') == 3 and
+                {'_nabu_ui_watch_thread_wait_chain', '_nabu_ui_watch_task_wait_chain_snapshot'} <=
+                set(contract.get('symbols_by_object', {}).get('thread.c', [])) and
+                b'nabu_ui_watch_task_wait_chain_snapshot(' in exec_source and
+                b'NabuUIOwner: sample=' in exec_source and
+                b'NabuUIOwner: budget sample=' in exec_source and
+                b'NABU_UI_WATCH_CHAIN_V1' in thread_source and
+                chain_helpers_ok(constants['EXEC_HELPER'], thread_helper),
+                'UI v6 requires a separately enabled, try-only, bounded owner chain')
     require(exec_source.count(constants['EXEC_HELPER'].encode()) == 1 and
             all(exec_source.count(after.encode()) == 1 for _, after in constants['EXEC_PAIRS']) and
             all(exit_source.count(after.encode()) == 1 for _, after in constants['EXIT_PAIRS']) and
