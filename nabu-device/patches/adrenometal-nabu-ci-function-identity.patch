@@ -1,0 +1,24 @@
+diff --git a/NativeBridgeMetalFrontend.mm b/NativeBridgeMetalFrontend.mm
+--- a/NativeBridgeMetalFrontend.mm
++++ b/NativeBridgeMetalFrontend.mm
+@@ -461,2 +461,3 @@
+ @property(nonatomic,strong) NBLibrary *library;   // where it came from (stitching reads its bitcode); nil for a runtime function
++@property(nonatomic,strong) NSData *bitCodeHashData;
+ @end
+@@ -464,3 +465,15 @@
+ @implementation NBFunction
+-- (void)dealloc {nmb_function_release(_handle);}
++- (void)dealloc {if(_handle)nmb_function_release(_handle);}
++- (const void *)bitCodeHash {
++ @synchronized(self) {
++  if(!_bitCodeHashData) {
++   static std::atomic<uint64_t> serial;
++   NSData *text=[[NSString stringWithFormat:@"%@#%llu",_name,(unsigned long long)++serial] dataUsingEncoding:NSUTF8StringEncoding];
++   NSMutableData *digest=[NSMutableData dataWithLength:CC_SHA256_DIGEST_LENGTH];
++   CC_SHA256(text.bytes,(CC_LONG)text.length,(unsigned char *)digest.mutableBytes);
++   _bitCodeHashData=digest;
++  }
++  return _bitCodeHashData.bytes;
++ }
++}
+ - (MTLFunctionOptions)options {return MTLFunctionOptionNone;}

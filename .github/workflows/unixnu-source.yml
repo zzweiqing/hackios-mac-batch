@@ -34,6 +34,10 @@ on:
         description: Turnip-only experiment; reuse bounded kernel scanout sources on the desktop-capable plugin baseline
         type: boolean
         default: false
+      wallpaper_fix:
+        description: Turnip-only CoreImage library and stitching support; requires fps_opt; no device installation
+        type: boolean
+        default: false
       async_fix:
         description: Turnip-only async Metal creation fix and bounded callback regression; no device installation
         type: boolean
@@ -79,11 +83,13 @@ jobs:
           GPU_USERPROBE: ${{ inputs.gpu_userprobe }}
           UI_WATCH: ${{ inputs.ui_watch }}
           FPS_OPT: ${{ inputs.fps_opt }}
+          WALLPAPER_FIX: ${{ inputs.wallpaper_fix }}
           ASYNC_FIX: ${{ inputs.async_fix }}
           COMPLETION_FIX: ${{ inputs.completion_fix }}
           COMPLETION_OBSERVE: ${{ inputs.completion_observe }}
         run: |
           test "$FPS_OPT" != true
+          test "$WALLPAPER_FIX" != true
           test "$ASYNC_FIX" != true
           test "$COMPLETION_FIX" != true
           test "$COMPLETION_OBSERVE" != true
@@ -231,12 +237,17 @@ jobs:
         id: turnip
         env:
           FPS_OPT: ${{ inputs.fps_opt }}
+          WALLPAPER_FIX: ${{ inputs.wallpaper_fix }}
           ASYNC_FIX: ${{ inputs.async_fix }}
           COMPLETION_FIX: ${{ inputs.completion_fix }}
           COMPLETION_OBSERVE: ${{ inputs.completion_observe }}
         run: |
           fps_args=()
           if [ "$FPS_OPT" = true ]; then fps_args+=(--fps-opt); fi
+          if [ "$WALLPAPER_FIX" = true ]; then
+            test "$FPS_OPT" = true
+            fps_args+=(--wallpaper-fix)
+          fi
           if [ "$ASYNC_FIX" = true ]; then
             test "$FPS_OPT" != true
             fps_args+=(--async-fix)

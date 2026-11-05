@@ -95,6 +95,8 @@ def main():
                         help='also build NativeAdrenoMetal.bundle (nabu_metal_plugin_ci.py) on the built Turnip')
     parser.add_argument('--fps-opt', action='store_true',
                         help='build the bounded scanout-source cache experiment on the four-patch plugin baseline')
+    parser.add_argument('--wallpaper-fix', action='store_true',
+                        help='add CoreImage library/stitching support to --fps-opt; compile qualification only')
     parser.add_argument('--async-fix', action='store_true',
                         help='qualify and build asynchronous Metal creation on the four-patch plugin baseline')
     parser.add_argument('--completion-fix', action='store_true',
@@ -103,6 +105,7 @@ def main():
                         help='observe completion delivery on the four-patch baseline without changing waits')
     args = parser.parse_args()
     require(not args.fps_opt or args.plugin, '--fps-opt requires --plugin')
+    require(not args.wallpaper_fix or (args.plugin and args.fps_opt), '--wallpaper-fix requires --plugin --fps-opt')
     require(not args.async_fix or args.plugin, '--async-fix requires --plugin')
     require(not args.completion_fix or args.plugin, '--completion-fix requires --plugin')
     require(not args.completion_observe or args.plugin, '--completion-observe requires --plugin')
@@ -178,7 +181,8 @@ def main():
                 plugin = nabu_metal_plugin_ci.build(root, device, output / 'plugin', env,
                                                    fps_opt=args.fps_opt, async_fix=args.async_fix,
                                                    completion_fix=args.completion_fix,
-                                                   completion_observe=args.completion_observe)
+                                                   completion_observe=args.completion_observe,
+                                                   wallpaper_fix=args.wallpaper_fix)
             except (subprocess.CalledProcessError, SystemExit, OSError, ValueError, KeyError) as error:
                 plugin = {'plugin_returncode': 1, 'bundle_built': False, 'error': str(error)[-2000:],
                           'gpu_exercised': False, 'runtime_qualified': False}
