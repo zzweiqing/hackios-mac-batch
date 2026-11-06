@@ -136,6 +136,8 @@ def qualify_candidate(upstream, device, candidate):
             return (Path(device)/name.removeprefix('device/')).read_bytes()
         if name.startswith('outputs/'):
             return (work/name.removeprefix('outputs/')).read_bytes()
+        if name.startswith('source-ci/'):
+            return (Path(__file__).resolve().parent/name.removeprefix('source-ci/')).read_bytes()
         raise ValueError('Unexpected Data qualification path')
 
     return qualify(read, Path(candidate).read_bytes())
