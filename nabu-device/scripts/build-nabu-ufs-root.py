@@ -94,24 +94,37 @@ DIRECT_LINE = ('  int direct = layout ? nabuDirectWindowLayout (layout, &why) : 
 STORE_GEOMETRY_LINE = (
     '  gStoreGeometry = { true, layout->userdataFirst, layout->userdataLast, layout->imageBytes, layout->gptEntriesLba,\n'
     '                     layout->gptHeaderCrc, layout->gptEntriesCrc, layout->gptEntryCount };\n')
-DIRECT_STORE_GEOMETRY = r'''  // Direct root layout remains untouched: it is the OS/SystemOS address base, not GPT userdata geometry.
+DIRECT_STORE_GEOMETRY = r'''  // Root layout remains untouched: persistent Data has its own named GPT partition, never a root/userdata fallback.
   gStoreGeometry = {};
-  if (direct == 0) {
-    gStoreGeometry = { true, layout->userdataFirst, layout->userdataLast, layout->imageBytes, layout->gptEntriesLba,
-                       layout->gptHeaderCrc, layout->gptEntriesCrc, layout->gptEntryCount };
-  } else if (storeMode () != 0) {
+  if (storeMode () != 0) {
     const char *storeWhy = "store layout allocation failed";
     RootLayout *storeLayout = static_cast<RootLayout *> (IOMalloc (sizeof (RootLayout)));
-    if (storeLayout && findRootLayout (storeLayout, &storeWhy)) {
+    if (storeLayout && findRootLayout (storeLayout, &storeWhy, "ipados-data")) {
       gStoreGeometry = { true, storeLayout->userdataFirst, storeLayout->userdataLast,
-                         storeLayout->manifestStatus == 0 ? storeLayout->imageBytes : 0, storeLayout->gptEntriesLba,
+                         0, storeLayout->gptEntriesLba,
                          storeLayout->gptHeaderCrc, storeLayout->gptEntriesCrc, storeLayout->gptEntryCount };
     } else {
-      IOLog ("NativeUfs: persistent store refused: %s; direct root unchanged\n", storeWhy);
+      IOLog ("NativeUfs: ipados-data store refused: %s; root windows unchanged\n", storeWhy);
     }
     if (storeLayout) IOFree (storeLayout, sizeof (RootLayout));
   }
 '''
+
+ROOT_LAYOUT_PARTITION_FUNCTION = 'static bool findRootLayout (RootLayout *layout, const char **why, const char *wanted = "userdata")'
+ROOT_LAYOUT_PARTITION_NAME = '  const unsigned wantedBytes = strlen (wanted) + 1;'
+
+
+def store_partition_parser(text):
+    for old, new in (
+        ('static bool findRootLayout (RootLayout *layout, const char **why)', ROOT_LAYOUT_PARTITION_FUNCTION),
+        ('  static const char wanted[] = "userdata";', ROOT_LAYOUT_PARTITION_NAME),
+        ('c < sizeof (wanted)', 'c < wantedBytes'),
+        ('*why = "no userdata partition";', '*why = "no requested GPT partition";'),
+    ):
+        if text.count(old) != 1:
+            raise ValueError('Expected one GPT partition parser anchor: ' + old)
+        text = text.replace(old, new, 1)
+    return text
 
 BUSY_HELPER_ANCHOR = '#include "RootTransportLayout.h"\n'
 BUSY_HELPER = '''
@@ -323,6 +336,8 @@ def main():
     cpp = source / 'NativeUfs.cpp'
     cpp.write_text(nabu_storage_media.source(transform(cpp.read_text(encoding='utf-8')), 'ufs'), encoding='utf-8')
     patch_root_headers(source)
+    root_layout = source / 'RootLayout.h'
+    root_layout.write_text(store_partition_parser(root_layout.read_text(encoding='utf-8')), encoding='utf-8')
     logging = os.environ.get('NABU_CAPTURE_LOG') == '1'
     logging_identity = None
     if logging:
@@ -401,7 +416,7 @@ def main():
         'bindings': {n: hex(v) for n, v in bindings.BINDINGS.items()},
         'direct_windows': True, 'verified_root_enabled': True,
         'data_persistence_default': 'off', 'data_store_tail_arg': 'nabu-data-tail-lba',
-        'direct_store_geometry': 'independent checked GPT; soft refusal on failure',
+        'direct_store_geometry': 'independent checked ipados-data GPT, no root/userdata fallback',
         'readonly_service': False, 'compiled': True, 'linked': False,
         'log_capture': logging, 'log_persistence_default': 'off',
         'logging_source_identity': logging_identity,

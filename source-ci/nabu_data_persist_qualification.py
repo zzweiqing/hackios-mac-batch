@@ -50,6 +50,7 @@ def qualify(read, candidate):
                 embedded_source_identity=source_id, actual_source_sha256=sha(ram_source),
                 symbol=symbol, runtime_qualified=False), 'RAM Data source/object/report mismatch')
     ufs_source, ufs_obj = read(ufs_prefix+'source/NativeUfs.cpp'), read(ufs_prefix+'NativeUfs.o')
+    layout_source = read(ufs_prefix+'source/RootLayout.h')
     ufs_report = json.loads(read(ufs_prefix+'build-report.json'))
     applied = json.loads(read(ufs_prefix+'source/nabu-ufs-source.json'))
     patch = read('device/patches/nabu-nativeufs-board.patch')
@@ -62,6 +63,13 @@ def qualify(read, candidate):
     for name in ('DIRECT_FUNCTION', 'DIRECT_STORE_GEOMETRY'):
         require(ufs_source.count(literal(builder,name).encode()) == 1,
                 'UFS direct root/store separation mismatch: ' + name)
+    require(ufs_report.get('source_files',{}).get('RootLayout.h') == sha(layout_source),
+            'GPT partition parser source/report mismatch')
+    for name in ('ROOT_LAYOUT_PARTITION_FUNCTION', 'ROOT_LAYOUT_PARTITION_NAME'):
+        require(layout_source.count(literal(builder,name).encode()) == 1,
+                'Missing named GPT partition parser: '+name)
+    require(b'c < wantedBytes' in layout_source and b'"ipados-data"' in ufs_source,
+            'Data store does not select the independent GPT partition')
     required_ufs = ('_native_ufs_store_mode', '_native_ufs_store_open', '_native_ufs_store_read',
                     '_native_ufs_store_write', '_native_ufs_store_sync', '_native_ufs_store_gpt_check')
     final, segments = symbols_and_segments(candidate)
@@ -78,7 +86,8 @@ def qualify(read, candidate):
     stamp = ('NABUDATA_SOURCE_SHA256='+source_id).encode()
     require(stamp in ram_obj and stamp in candidate, 'Missing final Data policy source identity')
     return dict(contract=contract, embedded_source_identity=source_id,
-                sources=dict(ram=sha(ram_source),ufs=sha(ufs_source),patch=sha(patch),builder=sha(builder)),
+                partition='ipados-data',
+                sources=dict(ram=sha(ram_source),ufs=sha(ufs_source),layout=sha(layout_source),patch=sha(patch),builder=sha(builder)),
                 objects=result, candidate_sha256=sha(candidate), runtime_qualified=False)
 
 
