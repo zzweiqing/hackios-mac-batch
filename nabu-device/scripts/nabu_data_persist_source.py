@@ -88,4 +88,8 @@ def overlay_source(text):
     text = once(text, '    uint8_t block[kBlock];\n',
                 '    if (!scratch) return Open::Failed;\n    uint8_t *block = scratch;\n')
     text = once(text, '    uint8_t zero[kBlock] = {};\n', '    memset(block, 0, kBlock);\n')
-    return once(text, 'ops.write (1 + b, 1, zero)', 'ops.write (1 + b, 1, block)')
+    text = once(text, 'ops.write (1 + b, 1, zero)', 'ops.write (1 + b, 1, block)')
+    return once(text, '    memset(block, 0, kBlock);\n',
+                '    // Invalidate and flush the old header before any bitmap block is written.\n'
+                '    memset(block, 0, kBlock);\n'
+                '    if (!ops.write (0, 1, block) || !ops.sync ()) return Open::Failed;\n')

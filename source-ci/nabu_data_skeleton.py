@@ -184,15 +184,35 @@ AFTER_DATA = '''#if (DEVELOPMENT || DEBUG) && defined(XNU_NATIVE_LEGACY_DISPLAY)
 '''
 
 PROOF_HELPER = r'''/* NABU_DATA_PROOF_V1: optional real Data file, never an automatic boot prerequisite. */
+static int
+native_owner_data_proof_nonce(char requested[17])
+{
+	static const char key[] = "nabu-data-proof=";
+	const char *args = PE_boot_args();
+	int found = 0;
+	for (const char *p = args; p && *p;) {
+		while (*p == ' ' || *p == '\t') ++p;
+		if (!*p) break;
+		const char *start = p;
+		while (*p && *p != ' ' && *p != '\t') ++p;
+		size_t bytes = p - start;
+		if (bytes < sizeof(key) - 1 || strncmp(start, key, sizeof(key) - 1)) continue;
+		if (found || bytes != sizeof(key) - 1 + 16) return -1;
+		const char *value = start + sizeof(key) - 1;
+		for (unsigned i = 0; i < 16; ++i)
+			if (!((value[i] >= '0' && value[i] <= '9') || (value[i] >= 'a' && value[i] <= 'f'))) return -1;
+		memcpy(requested, value, 16); requested[16] = 0; found = 1;
+	}
+	return found;
+}
+
 static __attribute__((noinline, used)) void
 native_owner_data_proof(mount_t data_mount)
 {
 	char requested[17] = {0};
-	if (!PE_parse_boot_argn("nabu-data-proof", requested, sizeof(requested))) return;
-	int valid = strlen(requested) == 16;
-	for (unsigned i = 0; valid && i < 16; ++i)
-		valid = (requested[i] >= '0' && requested[i] <= '9') || (requested[i] >= 'a' && requested[i] <= 'f');
-	if (!valid) { printf("NABU DATA PROOF error=%d reason=nonce\n", EINVAL); return; }
+	int nonce = native_owner_data_proof_nonce(requested);
+	if (!nonce) return;
+	if (nonce < 0) { printf("NABU DATA PROOF error=%d reason=nonce\n", EINVAL); return; }
 	extern volatile uint32_t native_data_persist_state, native_data_persist_gpt_after;
 	uint64_t mode = 0;
 	PE_parse_boot_argn("nabu-data-persist", &mode, sizeof(mode));
@@ -228,10 +248,11 @@ native_owner_data_proof(mount_t data_mount)
 			if (!error) error = VNOP_FSYNC(vp, MNT_WAIT, ctx);
 			if (!error) memcpy(stored, requested, 16);
 		} else if (!error) {
-			struct vnode_attr va; VATTR_INIT(&va); VATTR_WANTED(&va, va_data_size); VATTR_WANTED(&va, va_uid);
+			struct vnode_attr va; VATTR_INIT(&va); VATTR_WANTED(&va, va_data_size); VATTR_WANTED(&va, va_uid); VATTR_WANTED(&va, va_mode);
 			error = vnode_getattr(vp, &va, ctx);
 			if (!error && (!VATTR_IS_SUPPORTED(&va, va_data_size) || !VATTR_IS_SUPPORTED(&va, va_uid) ||
-			    va.va_data_size != 23 || va.va_uid != 0)) error = EINVAL;
+			    !VATTR_IS_SUPPORTED(&va, va_mode) || va.va_data_size != 23 || va.va_uid != 0 ||
+			    (va.va_mode & 07777) != 0600)) error = EINVAL;
 			if (!error) error = vn_rdwr(UIO_READ, vp, text, 23, 0, UIO_SYSSPACE, IO_NOAUTH,
 			    vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx));
 			if (!error && (resid || memcmp(text, "NUDP1 ", 6) || text[22] != '\n')) error = EINVAL;

@@ -56,6 +56,7 @@ def qualify(read, candidate):
             b'#include "PersistOverlay.h"' in direct_header, 'Direct Data header must use the local overlay header')
     require(ram_report.get('overlay_header_sha256') == sha(overlay_header) and
             b'uint8_t *scratch)' in overlay_header and b'uint8_t *block = scratch;' in overlay_header and
+            b'Invalidate and flush the old header before any bitmap block is written.' in overlay_header and
             b'uint8_t block[kBlock];' not in overlay_header and b'uint8_t zero[kBlock]' not in overlay_header,
             'Data overlay must use the allocated stage page, not kernel stack pages')
     ufs_source, ufs_obj = read(ufs_prefix+'source/NativeUfs.cpp'), read(ufs_prefix+'NativeUfs.o')
