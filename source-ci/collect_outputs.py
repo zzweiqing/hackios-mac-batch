@@ -206,6 +206,7 @@ def selected_sources(device):
         (device / 'scripts/nabu_ls_mmap_source.py', 'device/scripts/nabu_ls_mmap_source.py'),
         (device / 'scripts/nabu_service_wait_source.py', 'device/scripts/nabu_service_wait_source.py'),
         (device / 'scripts/nabu_storage_media.py', 'device/scripts/nabu_storage_media.py'),
+        (device / 'scripts/nabu_data_persist_source.py', 'device/scripts/nabu_data_persist_source.py'),
         (device / 'platform/NabuGpuUserprobeAddon.h', 'device/platform/NabuGpuUserprobeAddon.h'),
         (device / 'userprobe/nabu_gpu_userprobe.cpp', 'device/userprobe/nabu_gpu_userprobe.cpp'),
         (device / 'LICENSE', 'device/LICENSE'),
@@ -245,6 +246,7 @@ def selected_sources(device):
         (source_dir / 'nabu_ls_mmap_qualification.py', 'source-ci/nabu_ls_mmap_qualification.py'),
         (source_dir / 'nabu_service_wait_qualification.py', 'source-ci/nabu_service_wait_qualification.py'),
         (source_dir / 'nabu_storage_media_qualification.py', 'source-ci/nabu_storage_media_qualification.py'),
+        (source_dir / 'nabu_data_persist_qualification.py', 'source-ci/nabu_data_persist_qualification.py'),
         (source_dir / 'nabu_graphics_startup.py', 'source-ci/nabu_graphics_startup.py'),
         (device / 'scripts/build-nabu-legacy-display.py', 'device/scripts/build-nabu-legacy-display.py'),
         (device / 'scripts/nabu_display_bindings.py', 'device/scripts/nabu_display_bindings.py'),
@@ -467,6 +469,9 @@ def main():
                 from nabu_storage_media_qualification import qualify_candidate as qualify_storage_media
                 manifest['storage_media_qualification'] = qualify_storage_media(args.upstream, args.device, candidate)
                 summary['storage_media_qualified_statically'] = True
+                from nabu_data_persist_qualification import qualify_candidate as qualify_data_persist
+                manifest['data_persistence_qualification'] = qualify_data_persist(args.upstream, args.device, candidate)
+                summary['data_persistence_qualified_statically'] = True
             summary['candidate_validated'] = valid
             summary['undefined_symbol_count'] = len(macho['undefined_names'])
             manifest['macho'] = macho

@@ -11,6 +11,12 @@ The window offsets are supplied at boot:
 LBA is in 4096-byte UFS blocks; sectors are 512-byte window sectors, matching
 the owner policies exactly. Without those arguments the upstream SHNGROOT
 manifest path remains available as a fallback.
+
+Data persistence is separately default-off (nabu-data-persist=0/1/2). Direct root
+addresses never become userdata bounds: only an enabled store performs an extra
+checked GPT/manifest read for its own geometry. Store failure does not fail root
+boot. nabu-data-tail-lba is a configured unused-block floor, not runtime f2fs
+parsing; it must remain valid if Android's filesystem size changes.
 """
 import hashlib
 import importlib.util
@@ -84,6 +90,28 @@ START_ROOT = "// Boot the root image's windows as block devices. Soft-fails (log
 LAYOUT_LINE = '  if (!layout || !findRootLayout (layout, &why)) {\n'
 DIRECT_LINE = ('  int direct = layout ? nabuDirectWindowLayout (layout, &why) : 0;\n'
                '  if (!layout || direct < 0 || (direct == 0 && !findRootLayout (layout, &why))) {\n')
+
+STORE_GEOMETRY_LINE = (
+    '  gStoreGeometry = { true, layout->userdataFirst, layout->userdataLast, layout->imageBytes, layout->gptEntriesLba,\n'
+    '                     layout->gptHeaderCrc, layout->gptEntriesCrc, layout->gptEntryCount };\n')
+DIRECT_STORE_GEOMETRY = r'''  // Direct root layout remains untouched: it is the OS/SystemOS address base, not GPT userdata geometry.
+  gStoreGeometry = {};
+  if (direct == 0) {
+    gStoreGeometry = { true, layout->userdataFirst, layout->userdataLast, layout->imageBytes, layout->gptEntriesLba,
+                       layout->gptHeaderCrc, layout->gptEntriesCrc, layout->gptEntryCount };
+  } else if (storeMode () != 0) {
+    const char *storeWhy = "store layout allocation failed";
+    RootLayout *storeLayout = static_cast<RootLayout *> (IOMalloc (sizeof (RootLayout)));
+    if (storeLayout && findRootLayout (storeLayout, &storeWhy)) {
+      gStoreGeometry = { true, storeLayout->userdataFirst, storeLayout->userdataLast,
+                         storeLayout->manifestStatus == 0 ? storeLayout->imageBytes : 0, storeLayout->gptEntriesLba,
+                         storeLayout->gptHeaderCrc, storeLayout->gptEntriesCrc, storeLayout->gptEntryCount };
+    } else {
+      IOLog ("NativeUfs: persistent store refused: %s; direct root unchanged\n", storeWhy);
+    }
+    if (storeLayout) IOFree (storeLayout, sizeof (RootLayout));
+  }
+'''
 
 BUSY_HELPER_ANCHOR = '#include "RootTransportLayout.h"\n'
 BUSY_HELPER = '''
@@ -259,6 +287,9 @@ def transform(text):
     start = text.index(START_ROOT)
     at = text.index(LAYOUT_LINE, start)
     text = text[:at] + DIRECT_LINE + text[at + len(LAYOUT_LINE):]
+    if text.count(STORE_GEOMETRY_LINE) != 1:
+        raise ValueError('Expected one startRoot store geometry assignment')
+    text = text.replace(STORE_GEOMETRY_LINE, DIRECT_STORE_GEOMETRY, 1)
     text = use_busy_delays(add_device_type(add_iobsd_wait(add_stage_trace(add_busy_helper(text)))))
     return use_cooperative_media_wait(text)
 
@@ -369,6 +400,8 @@ def main():
         'source_flags': ['-DNATIVE_VERIFIED_BLOCK=1', '-DNATIVE_VERIFIED_BLOCK_MULTI_POLICY=1'],
         'bindings': {n: hex(v) for n, v in bindings.BINDINGS.items()},
         'direct_windows': True, 'verified_root_enabled': True,
+        'data_persistence_default': 'off', 'data_store_tail_arg': 'nabu-data-tail-lba',
+        'direct_store_geometry': 'independent checked GPT; soft refusal on failure',
         'readonly_service': False, 'compiled': True, 'linked': False,
         'log_capture': logging, 'log_persistence_default': 'off',
         'logging_source_identity': logging_identity,

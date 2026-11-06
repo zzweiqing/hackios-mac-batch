@@ -1,18 +1,19 @@
-# nabu (Xiaomi Pad 5, SM8150) read-only UFS board port
+# nabu (Xiaomi Pad 5, SM8150) UFS board port with opt-in Data-store writes
 #
 # Base: UniXNU/NativeUfs af785c1777161a62931425c2faaa536ce0bebd5b (unmodified upstream).
 # Apply to a fresh copy of that checkout; never to the reference tree itself.
 #
-# This ports the production read path only: probe/compatible, the controller window
-# (DT 0x1d84000+0x2500, mapped page-rounded), the apps_smmu window (0x15000000+0x100000)
-# and its UFS stream (0x300), and a read-only SM8150 GCC table (gcc-sm8150.c).
-# It does not touch GCC or the PHY at run time, opens no write window, builds no
-# WRITE(10), and keeps the sheng Data-store / diagnostic-log boot arguments inert.
+# Ports probe/compatible, controller/SMMU windows, stream 0x300 and the read-only
+# SM8150 GCC table. GCC/PHY are not written. Ordinary root block I/O stays read-only.
+# Data is off by default: only nabu-data-persist=2 registers a WRITE(10)/FUA window,
+# bounded by checked userdata geometry, an explicit nabu-data-tail-lba floor, the
+# root-image guard and a quarter-partition size limit. The tail is configured proof
+# of unused blocks, not an encrypted-f2fs parser or a promise Android cannot grow.
+# Legacy sheng data/log arguments stay inert; nabu's ESP logger is independent.
 #
-# The base has no ordinary IOBlockStorageDevice export; IOStorageFamily bindings
-# are still needed before linking. Applying this patch alone proves no boot or I/O.
+# IOStorageFamily bindings are needed before linking. Applying this patch alone
+# proves no boot or I/O; full compilation and runtime qualification are separate.
 diff --git a/GccUfs.h b/GccUfs.h
-index 5d11663..8c93ca5 100644
 --- a/GccUfs.h
 +++ b/GccUfs.h
 @@ -1,6 +1,7 @@
@@ -27,12 +28,11 @@ index 5d11663..8c93ca5 100644
  
 diff --git a/NabuBoard.h b/NabuBoard.h
 new file mode 100644
-index 0000000..52a78f1
 --- /dev/null
 +++ b/NabuBoard.h
 @@ -0,0 +1,72 @@
 +// SPDX-License-Identifier: BSD-2-Clause-Patent
-+// nabu (Xiaomi Pad 5, SM8150) UFS facts for the read-only production path.
++// nabu (Xiaomi Pad 5, SM8150) UFS facts; root block media remain read-only.
 +//
 +// Sources, read off this device or from public Linux:
 +//   /soc/ufshc@1d84000       reg 0x1d84000+0x2500 (reg-names "ufs_mem","ufs_ice"),
@@ -54,7 +54,7 @@ index 0000000..52a78f1
 +#include <stdint.h>
 +
 +#if defined(NABU_UFS_ALLOW_WRITES) && NABU_UFS_ALLOW_WRITES
-+#error "nabu UFS: the write / Data-store path is not qualified on this board"
++#error "nabu UFS: general block writes remain disabled; Data uses a separate bounded window"
 +#endif
 +
 +namespace nabu_ufs {
@@ -81,7 +81,7 @@ index 0000000..52a78f1
 +  uint32_t rxSymbol1Enable;
 +  uint32_t aggreAxiEnable;
 +  uint32_t bcr;
-+  bool writesAllowed;
++  bool writesAllowed;             // general block writes, not the opt-in Data-store window
 +};
 +
 +constexpr Board kBoard = {
@@ -110,10 +110,10 @@ diff --git a/NativeUfs.cpp b/NativeUfs.cpp
  // SPDX-License-Identifier: BSD-2-Clause-Patent
 -// Native sheng SM8550 UFS bring-up. Default-off: no MMIO is touched unless
 -// native-ufs-probe=1 is present. This is a register probe, not a storage driver.
-+// Native UFS bring-up for nabu (Xiaomi Pad 5, SM8150), read-only. Default-off: no
-+// MMIO is touched unless native-ufs-probe=<n> or native-ufs-root=1 is present.
-+// Board facts (controller window, SMMU stream, GCC read-only table) are in
-+// NabuBoard.h; this port opens no write window and builds no WRITE(10).
++// Native UFS bring-up for nabu (Xiaomi Pad 5, SM8150). Default-off: no MMIO is
++// touched unless native-ufs-probe=<n> or native-ufs-root=1 is present. Root block
++// media are read-only; only nabu-data-persist=2 can open a bounded Data-store
++// window. Board facts and the read-only GCC table are in NabuBoard.h.
  #include <IOKit/IOService.h>
  #include <IOKit/IOPlatformExpert.h>
  #include <IOKit/storage/IOBlockStorageDevice.h>
@@ -365,7 +365,7 @@ diff --git a/NativeUfs.cpp b/NativeUfs.cpp
        gHost.ready = true;
        return true;
      }
-@@ -994,10 +1015,10 @@
+@@ -994,11 +1015,11 @@
  
  }
  
@@ -373,32 +373,88 @@ diff --git a/NativeUfs.cpp b/NativeUfs.cpp
 -// The only part of this driver that ever writes. The consumer (NativeRamBlock's overlay) asks for a window of the given
 -// size at the END of the userdata partition. Mode 1 (boot argument sheng-data-persist=1) only reads: it proves the window and
 -// lets the consumer inspect its header. Mode 2 additionally opens the write window. A window is refused unless it lies inside
-+// ---- Persistent Data store window (sheng-data-persist; closed on nabu) -------------------------------------------
-+// The only part of this driver that ever writes, and the reason this port has none. The consumer (NativeRamBlock's
-+// overlay) asks for a window of the given size at the END of the userdata partition; mode 1 only reads, mode 2 opens the
-+// write window. storeMode() returns 0 here, so neither mode is reachable on this board and hostWrite4k refuses. A window is refused unless it lies inside
- // the partition, clear of the flashed root image plus a 4 MiB guard, and is at most a quarter of the partition.
+-// the partition, clear of the flashed root image plus a 4 MiB guard, and is at most a quarter of the partition.
++// ---- Persistent Data store window (nabu-data-persist; default off) -----------------------------------------------
++// NativeRamBlock's overlay asks for a window at the END of userdata. Mode 1 only reads its header; mode 2 also registers
++// the write window. Require nabu-data-tail-lba, the absolute 4096-byte LBA of the first block proven unused by Android,
++// as well as GPT bounds, the root-image + 4 MiB guard and a quarter-partition size limit. The tail floor is configured
++// proof, not runtime parsing of encrypted f2fs; Android could grow again, so the proof must still hold at each boot.
  namespace {
  struct StoreGeometry {
-@@ -1030,13 +1051,10 @@
- 
- static unsigned storeMode (void)
+   bool valid;
+@@ -1013,16 +1034,16 @@
+ // part of the log's write window, so the store ends below both.
+ constexpr uint64_t kExportBlocks = 65536;
+ uint64_t gLogRegionFirst, gLogRegionBlocks;
+-// The reserve at the end of userdata that the Data store stays clear of: the log and its export region sit inside it (sheng-log=1), the rest
+-// is unused. sheng-log-reserve=<MiB>, default 1024; 0 gives all the room to Data and is only accepted with the log off. The store's place
+-// depends on it, so an image keeps one value for its whole life (a different value moves the store: the old one is read as blank).
+-constexpr uint32_t kDefaultReserveMiB = 1024;
++// Optional nabu-data-reserve-mib leaves space above Data; default 0. The independent ESP logger uses no userdata tail.
++// Keep the same reserve for a store's lifetime: changing it moves the window. Invalid sizes refuse the store.
++constexpr uint32_t kDefaultReserveMiB = 0;
+ static uint64_t reserveBlocks (void)
  {
--  static int cached = -1;
--  if (cached < 0) {
+   static int64_t cached = -1;
+   if (cached < 0) {
+-    uint32_t mib = kDefaultReserveMiB;
+-    if (!PE_parse_boot_argn ("sheng-log-reserve", &mib, sizeof (mib)) || mib > 16384) mib = kDefaultReserveMiB;
++    uint64_t mib = kDefaultReserveMiB;
++    if (!PE_parse_boot_argn ("nabu-data-reserve-mib", &mib, sizeof (mib))) mib = kDefaultReserveMiB;
++    if (mib > 16384) return UINT64_MAX;
+     cached = static_cast<int64_t> (mib) * 256;   // 4096-byte blocks
+   }
+   return static_cast<uint64_t> (cached);
+@@ -1032,8 +1053,8 @@
+ {
+   static int cached = -1;
+   if (cached < 0) {
 -    uint32_t value = 0;
 -    if (!PE_parse_boot_argn ("sheng-data-persist", &value, sizeof (value)) || value > 2) value = 0;
--    cached = static_cast<int> (value);
--  }
--  return static_cast<unsigned> (cached);
-+  // nabu board port: the persistent Data store is a sheng feature and is not qualified
-+  // here. It stays closed even if sheng-data-persist is present, so no write window can
-+  // be opened on this board.
-+  return 0;
- }
- }
- 
-@@ -1106,18 +1124,13 @@
++    uint64_t value = 0;
++    if (!PE_parse_boot_argn ("nabu-data-persist", &value, sizeof (value)) || value > 2) value = 0;
+     cached = static_cast<int> (value);
+   }
+   return static_cast<unsigned> (cached);
+@@ -1047,20 +1068,28 @@
+ {
+   const char *reason = "";
+   int ok = 0;
+-  if (!storeMode ()) reason = "off";
++  const unsigned mode = storeMode ();
++  if (!mode) reason = "off";
+   else if (!gStoreGeometry.valid || !gHost.ready) reason = "no root layout";
+   else if (gStoreRegionBlocks) reason = "already open";
++  else if (!gStoreGeometry.first || gStoreGeometry.last < gStoreGeometry.first ||
++           gStoreGeometry.last > UINT32_MAX) reason = "userdata geometry";
+   else {
+-    uint64_t partition = gStoreGeometry.last - gStoreGeometry.first + 1;
+-    uint64_t imageBlocks = (gStoreGeometry.imageBytes + 4095) / 4096;
++    uint64_t tail = 0;
++    const uint64_t partition = gStoreGeometry.last - gStoreGeometry.first + 1;
++    // Division before rounding avoids overflow even for an invalid imageBytes value.
++    const uint64_t imageBlocks = gStoreGeometry.imageBytes / 4096 + (gStoreGeometry.imageBytes % 4096 != 0);
+     const uint64_t reserve = reserveBlocks ();
+-    if (!blocks || reserve >= partition || blocks > partition - reserve) reason = "size";
+-    else if (partition - blocks - reserve < imageBlocks + 1024) reason = "overlaps the root image";
++    if (!PE_parse_boot_argn ("nabu-data-tail-lba", &tail, sizeof (tail)) || !tail) reason = "missing tail floor";
++    else if (tail < gStoreGeometry.first || tail > gStoreGeometry.last) reason = "tail floor outside userdata";
++    else if (!blocks || blocks > partition / 4 || reserve >= partition || blocks > partition - reserve) reason = "size";
++    else if (imageBlocks > partition || partition - blocks - reserve < imageBlocks + 1024) reason = "overlaps the root image";
+     else {
+-      // The reserve at the end of the partition belongs to the diagnostic log (its last 32 MiB, with the export region below them);
+-      // the store ends just below it.
+-      uint64_t first = gStoreGeometry.last + 1 - reserve - blocks;
+-      if (storeMode () == 2 && !hostStoreOpen (first, blocks)) reason = "window refused";
++      const uint64_t first = gStoreGeometry.last + 1 - reserve - blocks;
++      if (first < tail) reason = "below tail floor";
++      // Match hostStoreOpen's conservative exclusive-end bound in both modes, before any window is registered.
++      else if (first > UINT32_MAX || blocks > UINT32_MAX - first) reason = "READ(10) geometry";
++      else if (mode == 2 && !hostStoreOpen (first, blocks)) reason = "window refused";
+       else {
+         gStoreRegionFirst = first;
+         gStoreRegionBlocks = blocks;
+@@ -1106,18 +1135,13 @@
    return storeMode () == 2 && gStoreRegionBlocks && hostSyncCache () == kIOReturnSuccess;
  }
  
@@ -420,7 +476,7 @@ diff --git a/NativeUfs.cpp b/NativeUfs.cpp
  }
  
  // Returns 1 with the window's first absolute LBA and size in 4096-byte blocks, 0 on refusal (reason in *why, may be null).
-@@ -1469,9 +1482,13 @@
+@@ -1469,9 +1493,13 @@
      void lock () { IOLockLock (mutex); }
      void unlock () { IOLockUnlock (mutex); }
      IOReturn read (uint64_t lba, uint32_t blocks, void *out) {
@@ -435,32 +491,28 @@ diff --git a/NativeUfs.cpp b/NativeUfs.cpp
      }
      IOReturn verify (uint64_t index, const void *data, size_t length) {
 diff --git a/RootCommands.h b/RootCommands.h
-index 996304d..b56c01b 100644
 --- a/RootCommands.h
 +++ b/RootCommands.h
-@@ -273,7 +273,9 @@ static bool hostLogOpen (uint64_t first, uint64_t blocks)
+@@ -273,6 +273,7 @@
    return true;
  }
  
--static bool hostInWindow (uint64_t lba, uint32_t blocks)
-+// The window check keeps its meaning for a board that may write; the nabu port never
-+// opens a window, so it is unused there.
-+static bool __attribute__ ((unused)) hostInWindow (uint64_t lba, uint32_t blocks)
++// Every Data-store write still needs an explicitly registered window.
+ static bool hostInWindow (uint64_t lba, uint32_t blocks)
  {
    if (gStoreOpen && lba >= gStoreFirst && lba - gStoreFirst < gStoreBlocks && blocks <= gStoreBlocks - (lba - gStoreFirst)) return true;
-   return gLogOpen && lba >= gLogFirst && lba - gLogFirst < gLogBlocks && blocks <= gLogBlocks - (lba - gLogFirst);
-@@ -289,21 +291,12 @@ static bool hostStoreOpen (uint64_t first, uint64_t blocks)
+@@ -289,21 +290,24 @@
    return true;
  }
  
 -// WRITE(10) of `blocks` 4096-byte blocks from src to lba on LUN 0; the range must lie inside one open window.
-+// nabu board port: read-only. No write window is ever opened on this board, so this
-+// driver builds no WRITE(10) at all: the controller sees READ-class traffic only.
++// WRITE(10) + optional FUA for the bounded Data store, never ordinary root block I/O.
  static IOReturn hostWrite4k (uint8_t lun, uint64_t lba, uint32_t blocks, const void *src, bool fua = false)
  {
 -  if (!gHost.ready || !src || !blocks || blocks > kDataMax / 4096 || lun != 0 || !hostInWindow (lba, blocks)) {
--    return kIOReturnBadArgument;
--  }
++  if (!gHost.ready || !src || !blocks || blocks > kDataMax / 4096 || lun != 0) {
+     return kIOReturnBadArgument;
+   }
 -  IOLockLock (gHost.lock);
 -  gRootDiagnostic.lba = lba;
 -  memcpy (gHost.virt + kDataOffset, src, blocks * 4096U);
@@ -470,16 +522,25 @@ index 996304d..b56c01b 100644
 -  IOReturn status = hostScsiDir (0, cdb, 10, 1, blocks * 4096U, 2000000, &scsi);
 -  IOLockUnlock (gHost.lock);
 -  return status;
-+  (void) lun; (void) lba; (void) blocks; (void) src; (void) fua;
++  if (hostInWindow (lba, blocks)) {
++    IOLockLock (gHost.lock);
++    gRootDiagnostic.lba = lba;
++    memcpy (gHost.virt + kDataOffset, src, blocks * 4096U);
++    uint8_t cdb[10] = { 0x2a, uint8_t (fua ? 0x08 : 0), uint8_t (lba >> 24), uint8_t (lba >> 16), uint8_t (lba >> 8), uint8_t (lba),
++                        0, uint8_t (blocks >> 8), uint8_t (blocks), 0 };
++    uint32_t scsi = 0;
++    IOReturn status = hostScsiDir (0, cdb, 10, 1, blocks * 4096U, 2000000, &scsi);
++    IOLockUnlock (gHost.lock);
++    return status;
++  }
 +  return kIOReturnNotPermitted;
  }
  
  // SYNCHRONIZE CACHE(10) for the whole LUN: everything written so far is on the medium when this returns.
 diff --git a/SmmuTakeover.h b/SmmuTakeover.h
-index c30f5a9..0e23a45 100644
 --- a/SmmuTakeover.h
 +++ b/SmmuTakeover.h
-@@ -18,8 +18,11 @@ static unsigned ufsSmmuAddressBits(unsigned code)
+@@ -18,8 +18,11 @@
    }
  }
  // One attempt with a given context bank (counted from the top). The caller falls back to lower banks when this one is held by another stream.
@@ -492,7 +553,7 @@ index c30f5a9..0e23a45 100644
  {
    UfsSmmuPlan p;
    uint32_t idr0 = read(0x20), idr2 = read(0x28);
-@@ -37,7 +40,7 @@ static UfsSmmuPlan planUfsSmmuBank(uint16_t stream, uint64_t dma, uint64_t bytes
+@@ -37,7 +40,7 @@
    unsigned banks = idr1 & 255;
    p.pages = 1U << (((idr1 >> 28) & 7) + 1);
    if ((idr1 >> 31) || !count || p.pages > 128 || banks < 2 || banks > 128 ||
@@ -501,7 +562,7 @@ index c30f5a9..0e23a45 100644
      p.error = "unsupported SMMU geometry"; return p;
    }
    if (count > 128) count = 128; // Firmware's reliably accessible groups only.
-@@ -80,10 +83,11 @@ static UfsSmmuPlan planUfsSmmuBank(uint16_t stream, uint64_t dma, uint64_t bytes
+@@ -80,10 +83,11 @@
  // (no other valid stream maps it, translation off). Any other refusal (a conflicting mapping of our own stream, no free group, unsupported geometry)
  // is final and is reported as the first attempt saw it.
  template <class Read>
@@ -515,7 +576,7 @@ index c30f5a9..0e23a45 100644
    if (!first.error) return first;
    // "conflicting" is retried too: our own stream may already sit on a lower bank from an earlier run that had to fall back.
    auto retryable = [](const char *e) {
-@@ -92,7 +96,7 @@ static UfsSmmuPlan planUfsSmmu(uint16_t stream, uint64_t dma, uint64_t bytes, Re
+@@ -92,7 +96,7 @@
    };
    if (!retryable(first.error)) return first;
    for (unsigned attempt = 1; attempt < kBankAttempts; ++attempt) {

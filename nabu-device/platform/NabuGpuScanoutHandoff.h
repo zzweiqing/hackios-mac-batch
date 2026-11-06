@@ -3,6 +3,7 @@
 #pragma once
 #include "NabuGpuScanoutWire.h"
 #include "NabuLegacyCpuPixels.h"
+#include "NabuDisplaySwapState.h"
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOWorkLoop.h>
 #include <kern/task.h>
@@ -23,7 +24,8 @@ class NabuGpuScanoutHandoff {
     NGPMode mode_={};
     task_t clientTask_=TASK_NULL;
     const void *client_=nullptr;
-    bool online_=false,offered_=false,delivered_=false,blocked_=false,closed_=false;
+    bool online_=false,blocked_=false,closed_=false;
+    NabuGpuFrameState frameState_;
     uint64_t sequence_=0;
     IOMemoryDescriptor *frame_=nullptr;
     uint64_t frameStride_=0;
@@ -60,17 +62,17 @@ public:
     void stop() {
         if(!gate_)return;
         IOLockLock(gate_);online_=false;nabu_scanout_ready=0;
-        IOLockWakeup(gate_,&offered_,false);IOLockUnlock(gate_);
+        IOLockWakeup(gate_,&frameState_,false);IOLockUnlock(gate_);
     }
     uint64_t offer(IOMemoryDescriptor *memory,uint64_t stride,uint32_t width,uint32_t height) {
         if(!gate_ || !memory || (stride&3) || !nabu_cpu_rows(width,height,stride,memory->getLength()) ||
             memory->getLength()>MaxBytes || (memory->getLength()&4095) || width!=mode_.width || height!=mode_.height)return 0;
         IOLockLock(gate_);
         uint64_t offered=0;
-        if(online_ && client_ && !blocked_ && !offered_ && sequence_!=UINT64_MAX) {
+        if(online_ && client_ && !blocked_ && frameState_.empty() && sequence_!=UINT64_MAX) {
             frame_=memory;frame_->retain();frameStride_=stride;
-            offered_=true;delivered_=false;offered=++sequence_;
-            ++nabu_scanout_offers;nabu_scanout_pending=1;IOLockWakeup(gate_,&offered_,false);
+            frameState_.offer();offered=++sequence_;
+            ++nabu_scanout_offers;nabu_scanout_pending=1;IOLockWakeup(gate_,&frameState_,false);
         }
         IOLockUnlock(gate_);return offered;
     }
@@ -90,11 +92,13 @@ public:
         // A delivered frame may still be undergoing DMA on another connection.
         // Do not copy over it on the CPU or release its backing on client death.
         IOMemoryDescriptor *frame=nullptr;uint64_t sequence=0;
-        if(offered_ && !delivered_) {
+        if(frameState_.offered()) {
             frame=frame_;frame_=nullptr;sequence=sequence_;
-            offered_=false;nabu_scanout_pending=0;++nabu_scanout_fallbacks;
+            frameState_.complete();nabu_scanout_pending=0;++nabu_scanout_fallbacks;
+        } else if(frameState_.inFlight()) {
+            frameState_.quarantine();
         }
-        IOLockWakeup(gate_,&offered_,false);IOLockUnlock(gate_);
+        IOLockWakeup(gate_,&frameState_,false);IOLockUnlock(gate_);
         if(frame)frame->release();
         if(sequence)completion_(display_,sequence,kIOReturnAborted);
     }
@@ -118,8 +122,8 @@ public:
             if(!client_){client_=client;clientTask_=task;task_reference(task);}
             if(client_!=client || clientTask_!=task){IOLockUnlock(gate_);return kIOReturnExclusiveAccess;}
             ++nabu_scanout_waits;
-            while(online_ && !blocked_ && (!offered_ || delivered_)) {
-                if(IOLockSleepDeadline(gate_,&offered_,deadline,THREAD_ABORTSAFE)!=THREAD_AWAKENED) {
+            while(online_ && !blocked_ && !frameState_.offered()) {
+                if(IOLockSleepDeadline(gate_,&frameState_,deadline,THREAD_ABORTSAFE)!=THREAD_AWAKENED) {
                     ++nabu_scanout_timeouts;IOLockUnlock(gate_);return kIOReturnTimeout;
                 }
             }
@@ -137,14 +141,14 @@ public:
             }
             if(!map) {
                 IOMemoryDescriptor *frame=frame_;frame_=nullptr;const uint64_t sequence=sequence_;
-                offered_=false;blocked_=true;nabu_scanout_pending=0;nabu_scanout_ready=0;
+                frameState_.complete();blocked_=true;nabu_scanout_pending=0;nabu_scanout_ready=0;
                 nabu_scanout_last_status=uint32_t(kIOReturnNoMemory);++nabu_scanout_fallbacks;
                 IOLockUnlock(gate_);frame->release();completion_(display_,sequence,kIOReturnNoMemory);
                 return kIOReturnNoMemory;
             }
             // No CPU cache-attribute changes. The descriptor and cached task map
             // outlive every Vulkan host-memory import made by the GPU process.
-            delivered_=true;
+            frameState_.deliver();
             NGPSwap swap={sequence_,map->getVirtualAddress(),map->getLength(),frameStride_,
                 uint32_t(mode_.width),uint32_t(mode_.height),NGP_BGRX8888,id};
             memcpy(out,&swap,sizeof(swap));IOLockUnlock(gate_);return kIOReturnSuccess;
@@ -154,17 +158,17 @@ public:
             NGPComplete done={};memcpy(&done,in,sizeof(done));
             IOLockLock(gate_);
             if(!online_ || blocked_){IOLockUnlock(gate_);return kIOReturnNotReady;}
-            if(client_!=client || clientTask_!=task || !offered_ || !delivered_ || done.sequence!=sequence_ || done.reserved) {
+            if(client_!=client || clientTask_!=task || !frameState_.delivered() || done.sequence!=sequence_ || done.reserved) {
                 IOLockUnlock(gate_);return kIOReturnBadArgument;
             }
             nabu_scanout_last_status=done.status;
             // The nabu client reports Error only before GPU submission. Any
             // other failure (including NotResponding) leaves completion unknown.
             if(done.status && done.status!=uint32_t(kIOReturnError)) {
-                blocked_=true;nabu_scanout_ready=0;IOLockUnlock(gate_);return kIOReturnSuccess;
+                frameState_.quarantine();blocked_=true;nabu_scanout_ready=0;IOLockUnlock(gate_);return kIOReturnSuccess;
             }
             IOMemoryDescriptor *frame=frame_;frame_=nullptr;
-            offered_=false;delivered_=false;nabu_scanout_pending=0;
+            frameState_.complete();nabu_scanout_pending=0;
             if(done.status){blocked_=true;nabu_scanout_ready=0;++nabu_scanout_fallbacks;}
             else ++nabu_scanout_completed;
             IOLockUnlock(gate_);frame->release();

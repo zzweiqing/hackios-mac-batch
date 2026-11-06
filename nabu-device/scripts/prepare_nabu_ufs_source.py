@@ -5,10 +5,11 @@ The fixed upstream checkout is never modified: the patch is applied to a fresh c
 Only the source tree and the small patch file are read, and only the patch file is
 hashed. Nothing here compiles, links or runs the driver.
 
-What the result is NOT: the current native base has no ordinary IOBlockStorageDevice
-export, so the patched source cannot be linked into it yet. IOStorageFamily bindings
-(upstream scripts/prepare-storage-headers.py and build-native-virtio-bindings.py) are
-the next step; this script records compiled=false, linked=false, booted=false.
+Root block I/O remains read-only. The separate Data store is default-off and permits
+WRITE(10)/FUA only inside an explicitly proved userdata-tail window. A configured tail
+floor is not runtime parsing of encrypted f2fs or a guarantee Android cannot grow.
+This source-only step supplies no IOStorageFamily bindings and records
+compiled=false, linked=false, booted=false; it is not runtime qualification.
 """
 from __future__ import annotations
 
@@ -106,11 +107,30 @@ def verify_applied(output: Path) -> None:
             bringup.index(capacity_check) > bringup.index("gHost.ready = true;")):
         raise PrepareError("hostBringUp must verify the LUN logical block size before enabling reads")
     commands = (output / "RootCommands.h").read_text(encoding="utf-8")
-    if "kIOReturnNotPermitted" not in commands or "0x2a" in commands:
-        raise PrepareError("RootCommands.h still builds a WRITE(10)")
-    for name in ('PE_parse_boot_argn ("sheng-data-persist"', 'PE_parse_boot_argn ("sheng-log"'):
-        if name in source:
+    write = commands.split("static IOReturn hostWrite4k ", 1)[-1].split("\n}", 1)[0]
+    for needle in ("if (hostInWindow (lba, blocks))", "0x2a", "fua ? 0x08 : 0",
+                   "lun != 0", "blocks > kDataMax / 4096",
+                   "hostScsiDir (0, cdb, 10, 1, blocks * 4096U"):
+        if needle not in write:
+            raise PrepareError("RootCommands.h lacks windowed WRITE(10)/FUA: %s" % needle)
+    if write.index("hostInWindow (lba, blocks)") > write.index("memcpy ("):
+        raise PrepareError("WRITE(10) must check its window before copying/submitting data")
+    if "if (!gHost.ready || (!gStoreOpen && !gLogOpen)) return kIOReturnNotReady;" not in commands:
+        raise PrepareError("SYNCHRONIZE CACHE must require an open window")
+    mode = source.split("static unsigned storeMode (void)", 1)[-1].split("\n}", 1)[0]
+    for needle in ('uint64_t value = 0;',
+                   'if (!PE_parse_boot_argn ("nabu-data-persist", &value, sizeof (value)) || value > 2) value = 0;',
+                   'return static_cast<unsigned> (cached);'):
+        if needle not in mode:
+            raise PrepareError("NativeUfs.cpp lacks default-off nabu Data-store mode: %s" % needle)
+    if 'PE_parse_boot_argn ("nabu-data-tail-lba"' not in source:
+        raise PrepareError("NativeUfs.cpp lacks the required nabu Data-store tail floor")
+    for name in ("sheng-data-persist", "sheng-log", "sheng-log-reserve"):
+        if re.search(r'PE_parse_boot_argn\s*\(\s*"' + re.escape(name) + '"', source):
             raise PrepareError("NativeUfs.cpp still enables the sheng write boot argument %r" % name)
+    log = source.split("static unsigned logMode (void)", 1)[-1].split("\n}", 1)[0]
+    if "return 0;" not in log or "PE_parse_boot_argn" in log:
+        raise PrepareError("NativeUfs.cpp must keep the sheng diagnostic log closed")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -139,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
     console_patch = patch.with_name('nabu-ufs-inspect-console.patch')
     apply_patch(output, console_patch, ['NativeUfs.cpp'])
     report = {
-        "purpose": "nabu SM8150 read-only UFS board port, applied to a copy of the pinned source",
+        "purpose": "nabu SM8150 read-only root and gated Data-store board port, applied to a pinned source copy",
         "source": str(source),
         "source_commit": identity["head"],
         "source_clean": identity["clean"],
@@ -154,8 +174,10 @@ def main(argv: list[str] | None = None) -> int:
         "booted": False,
         "hardware_tested": False,
         "iostorage_bindings_connected": False,
-        "note": "The current native base has no ordinary IOBlockStorageDevice export; "
-                "IOStorageFamily bindings are the next CI step. Nothing here ran the driver.",
+        "data_persistence_default": "off",
+        "data_store_tail_arg": "nabu-data-tail-lba",
+        "note": "No IOStorageFamily bindings are supplied and nothing here ran the driver. "
+                "The explicit tail floor is configured unused-space proof, not runtime f2fs verification.",
     }
     (output / "nabu-ufs-source.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))

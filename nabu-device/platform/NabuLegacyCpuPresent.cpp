@@ -2,6 +2,7 @@
 // Legacy presentation with an opt-in GPU blit hand-off and the verified CPU fallback.
 #include "OriginalLegacyFramebufferABI.h"
 #include "NabuLegacyCpuPixels.h"
+#include "NabuDisplaySwapState.h"
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/pwr_mgt/IOPM.h>
@@ -42,6 +43,10 @@ volatile uint64_t nabu_legacy_cpu_copied_frames, nabu_legacy_cpu_blank_frames;
 volatile uint64_t nabu_legacy_cpu_stored_bytes, nabu_legacy_cpu_copy_ticks;
 volatile uint64_t nabu_legacy_cpu_max_copy_ticks, nabu_legacy_cpu_diff_frames;
 volatile uint64_t nabu_legacy_cpu_shadow_bytes;
+volatile uint64_t nabu_legacy_display_gpu_callbacks,nabu_legacy_display_gpu_callback_returns;
+volatile uint64_t nabu_legacy_display_retired,nabu_legacy_display_retire_rejected;
+volatile uint64_t nabu_legacy_display_gpu_stale,nabu_legacy_display_gpu_disabled;
+volatile uint64_t nabu_legacy_display_gpu_request_changed,nabu_legacy_display_gpu_gate_failed;
 }
 #if defined(NABU_LEGACY_GPU_SCANOUT)
 #include "NabuGpuScanoutHandoff.h"
@@ -52,7 +57,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     IOMemoryMap *bootMapping = nullptr;
     uint64_t bootStride = 0;
     bool primary = false, enabled = false, consoleOwned = false, logicalPM = false;
-    bool kicking = false, rekick = false;
+    NabuDisplayQueuePump queuePump;
     void *shadow = nullptr;
     size_t shadowBytes = 0;
     bool shadowValid = false, diffEnabled = true;
@@ -64,42 +69,62 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     bool gpuBypass = false;
 
     static void gpuCompletion(IOService *display, uint64_t sequence, IOReturn status) {
+        __atomic_fetch_add(&nabu_legacy_display_gpu_callbacks, 1, __ATOMIC_RELAXED);
         NativeLegacyDisplay *self = static_cast<NativeLegacyDisplay *>(display);
         IOWorkLoop *workloop = self->getWorkLoop();
-        if (!workloop) return;
+        if (!workloop) {
+            __atomic_fetch_add(&nabu_legacy_display_gpu_gate_failed, 1, __ATOMIC_RELAXED);
+            return;
+        }
         struct Completion { uint64_t sequence; IOReturn status; } done = {sequence, status};
-        workloop->runAction([](OSObject *target, void *argument, void *, void *, void *) -> IOReturn {
+        IOReturn result = workloop->runAction([](OSObject *target, void *argument, void *, void *, void *) -> IOReturn {
             NativeLegacyDisplay *self = static_cast<NativeLegacyDisplay *>(target);
             const Completion &done = *static_cast<Completion *>(argument);
             self->gpuComplete(done.sequence, done.status);
             return kIOReturnSuccess;
         }, self, &done);
+        __atomic_fetch_add(&nabu_legacy_display_gpu_callback_returns, 1, __ATOMIC_RELAXED);
+        if (result != kIOReturnSuccess)
+            __atomic_fetch_add(&nabu_legacy_display_gpu_gate_failed, 1, __ATOMIC_RELAXED);
     }
 #endif
-    void finishSwap(const OriginalLegacySwapRequest *request, uint64_t bytes) {
+    bool finishSwap(const OriginalLegacySwapRequest *request, uint64_t bytes) {
         native_legacy_transfer_observed(kIOReturnSuccess, request, bytes);
-        if (!activateOnlyPendingSwap(request)) return;
+        if (!activateOnlyPendingSwap(request)) {
+            __atomic_fetch_add(&nabu_legacy_display_retire_rejected, 1, __ATOMIC_RELAXED);
+            return false;
+        }
         nabu_legacy_request_active(this, request, 3);
         const int slot = slotFor(request);
         if (slot >= 0) validated[slot] = nullptr;
         IOMobileFramebufferLegacy::completeCurrentSwap();
         native_legacy_retirement_observed(this);
-        rekick = true;
+        __atomic_fetch_add(&nabu_legacy_display_retired, 1, __ATOMIC_RELAXED);
+        queuePump.request();
+        return true;
     }
 #if defined(NABU_LEGACY_GPU_SCANOUT)
     void gpuComplete(uint64_t sequence, IOReturn status) {
-        if (!gpuRequest || sequence != gpuSequence) return;
+        if (!gpuRequest || sequence != gpuSequence) {
+            __atomic_fetch_add(&nabu_legacy_display_gpu_stale, 1, __ATOMIC_RELAXED);
+            return;
+        }
         const OriginalLegacySwapRequest *request = gpuRequest;
         gpuRequest = nullptr; gpuSequence = 0;
-        if (!enabled || request != pendingSwapRequest()) return;
+        if (!enabled) {
+            __atomic_fetch_add(&nabu_legacy_display_gpu_disabled, 1, __ATOMIC_RELAXED);
+            return;
+        }
+        if (request != pendingSwapRequest()) {
+            __atomic_fetch_add(&nabu_legacy_display_gpu_request_changed, 1, __ATOMIC_RELAXED);
+            return;
+        }
         if (status == kIOReturnSuccess) {
             uint32_t width = 0, height = 0;
             getDisplayDimensions(&width, &height);
-            const bool wasKicking = kicking;
-            kicking = true; // The original completion can re-enter kickSwapQueue.
+            NabuDisplayQueuePump::Pause pause(queuePump);
             __asm__ volatile("dsb sy" ::: "memory");
             finishSwap(request, uint64_t(width) * height * 4);
-            kicking = wasKicking;
         } else gpuBypass = true;
         kickSwapQueue();
     }
@@ -338,10 +363,7 @@ public:
     }
     bool isMainDisplay() override { return primary; }
     void kickLocked() {
-        if (kicking) { rekick = true; return; }
-        kicking = true;
-        do { rekick = false; kickOnce(); } while (rekick);
-        kicking = false;
+        queuePump.drain([this] { kickOnce(); });
     }
     void kickSwapQueue() override {
 #if defined(NABU_LEGACY_GPU_SCANOUT)

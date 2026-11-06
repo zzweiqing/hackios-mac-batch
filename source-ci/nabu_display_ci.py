@@ -129,6 +129,8 @@ def qualify_display_candidate(upstream, device, candidate, expected_profile=None
         raise ValueError('Display archive did not compile the selected implementation')
     if cpu and sha(out / 'source/NabuLegacyCpuPixels.h') != sha(device / 'platform/NabuLegacyCpuPixels.h'):
         raise ValueError('CPU pixel implementation changed')
+    if cpu and sha(out / 'source/NabuDisplaySwapState.h') != sha(device / 'platform/NabuDisplaySwapState.h'):
+        raise ValueError('Display queue state implementation changed')
     scanout = report.get('gpu_scanout_handoff_compiled') is True
     if 'gpu_scanout_handoff_compiled' in report and scanout != (cpu and profile == HARDWARE_GPU_METAL_PROFILE):
         raise ValueError('GPU scanout hand-off compiled in the wrong profile')
@@ -195,6 +197,7 @@ def qualify_display_candidate(upstream, device, candidate, expected_profile=None
             'archive_sha256': report['archive_sha256'], 'aliases_verified': len(aliases),
             'vtable_slots_verified': 358, 'candidate_sha256': sha(candidate),
             'pixel_transfer_enabled': cpu, 'pixel_transfer_runtime_observed': False,
+            **({'queue_state_sha256': sha(out / 'source/NabuDisplaySwapState.h')} if cpu else {}),
             **({'gpu_scanout_handoff': {'trigger': 'nabu-gpu-scanout=1', 'wire_version': 1,
                 'wire_sha256': sha(out / 'source/NabuGpuScanoutWire.h'),
                 'zero_copy': True, 'hardware_tested': False}} if scanout else {}),

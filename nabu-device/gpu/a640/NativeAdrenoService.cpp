@@ -85,6 +85,10 @@ extern volatile uint64_t nabu_scanout_offers,nabu_scanout_completed,nabu_scanout
 extern volatile uint64_t nabu_scanout_waits,nabu_scanout_timeouts,nabu_scanout_abandoned;
 extern volatile uint64_t nabu_scanout_maps,nabu_scanout_map_hits;
 extern volatile uint32_t nabu_scanout_ready,nabu_scanout_last_status,nabu_scanout_pending;
+extern volatile uint64_t nabu_legacy_display_gpu_callbacks,nabu_legacy_display_gpu_callback_returns;
+extern volatile uint64_t nabu_legacy_display_retired,nabu_legacy_display_retire_rejected;
+extern volatile uint64_t nabu_legacy_display_gpu_stale,nabu_legacy_display_gpu_disabled;
+extern volatile uint64_t nabu_legacy_display_gpu_request_changed,nabu_legacy_display_gpu_gate_failed;
 extern unsigned int real_ncpus;
 extern uint32_t processor_avail_count;
 unsigned int ml_get_cpu_count(void);
@@ -202,6 +206,20 @@ void nabuGpuProbeWriterSample()
         sample,nabu_scanout_ready,nabu_scanout_pending,
         static_cast<unsigned long long>(nabu_scanout_offers),static_cast<unsigned long long>(nabu_scanout_completed),
         static_cast<unsigned long long>(nabu_scanout_fallbacks),nabu_scanout_last_status));
+    emit(snprintf(line,sizeof(line),
+        "NabuGPU: writer_retire=%u callbacks=%llu returned=%llu retired=%llu rejected=%llu\n",
+        sample,
+        static_cast<unsigned long long>(__atomic_load_n(&nabu_legacy_display_gpu_callbacks,__ATOMIC_RELAXED)),
+        static_cast<unsigned long long>(__atomic_load_n(&nabu_legacy_display_gpu_callback_returns,__ATOMIC_RELAXED)),
+        static_cast<unsigned long long>(__atomic_load_n(&nabu_legacy_display_retired,__ATOMIC_RELAXED)),
+        static_cast<unsigned long long>(__atomic_load_n(&nabu_legacy_display_retire_rejected,__ATOMIC_RELAXED))));
+    emit(snprintf(line,sizeof(line),
+        "NabuGPU: writer_retire_guard=%u stale=%llu disabled=%llu changed=%llu gate_fail=%llu\n",
+        sample,
+        static_cast<unsigned long long>(__atomic_load_n(&nabu_legacy_display_gpu_stale,__ATOMIC_RELAXED)),
+        static_cast<unsigned long long>(__atomic_load_n(&nabu_legacy_display_gpu_disabled,__ATOMIC_RELAXED)),
+        static_cast<unsigned long long>(__atomic_load_n(&nabu_legacy_display_gpu_request_changed,__ATOMIC_RELAXED)),
+        static_cast<unsigned long long>(__atomic_load_n(&nabu_legacy_display_gpu_gate_failed,__ATOMIC_RELAXED))));
     emit(snprintf(line,sizeof(line),
         "NabuGPU: writer_scanout_wait=%u calls=%llu timeout=%llu abandoned=%llu maps=%llu hits=%llu\n",
         sample,static_cast<unsigned long long>(nabu_scanout_waits),static_cast<unsigned long long>(nabu_scanout_timeouts),

@@ -137,6 +137,7 @@ def main():
     elif cpu:
         shutil.copy2(device / 'platform/NabuLegacyCpuPresent.cpp', source / 'NativeLegacyDisplay.cpp')
         shutil.copy2(device / 'platform/NabuLegacyCpuPixels.h', source / 'NabuLegacyCpuPixels.h')
+        shutil.copy2(device / 'platform/NabuDisplaySwapState.h', source / 'NabuDisplaySwapState.h')
         if scanout:
             for name in ('NabuGpuScanoutHandoff.h', 'NabuGpuScanoutWire.h'):
                 shutil.copy2(device / 'platform' / name, source / name)
