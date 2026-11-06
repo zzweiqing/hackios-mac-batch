@@ -23,14 +23,14 @@ extern "C" __attribute__((noinline, used)) bool nabu_data_persist_allow_open(
 
 OPEN_OLD = '''        persist::Open result = overlayBits && stage ? overlay.open(ops, pages, seedHash, mode == 1, overlayBits, discardRequested())
                                                           : persist::Open::Failed;'''
-OPEN_NEW = '''        uint8_t headerBlock[persist::kBlock];
+OPEN_NEW = '''        uint8_t *headerBlock = stage;
         bool allowed = overlayBits && stage && native_data_persist_gpt == 0 &&
                        ops.read(0, 1, headerBlock);
         if (allowed) {
           overlay.header = persist::checkHeader(headerBlock, pages, seedHash, nullptr);
           allowed = nabu_data_persist_allow_open(overlay.header, mode, discardRequested());
         }
-        persist::Open result = allowed ? overlay.open(ops, pages, seedHash, mode == 1, overlayBits, discardRequested())
+        persist::Open result = allowed ? overlay.open(ops, pages, seedHash, mode == 1, overlayBits, discardRequested(), stage)
                                       : persist::Open::Failed;'''
 
 AFTER_OLD = '        native_data_persist_gpt_after = native_ufs_store_gpt_check();\n'
@@ -79,3 +79,13 @@ def metadata(text):
     return dict(contract=CONTRACT, generator_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 embedded_source_identity=identity(), actual_source_sha256=hashlib.sha256(text.encode()).hexdigest(),
                 symbol='_nabu_data_persist_allow_open', runtime_qualified=False)
+
+
+def overlay_source(text):
+    """Use the already allocated stage page instead of three inlined 4K stack arrays."""
+    text = once(text, 'uint8_t *bits, bool discard = false)',
+                'uint8_t *bits, bool discard, uint8_t *scratch)')
+    text = once(text, '    uint8_t block[kBlock];\n',
+                '    if (!scratch) return Open::Failed;\n    uint8_t *block = scratch;\n')
+    text = once(text, '    uint8_t zero[kBlock] = {};\n', '    memset(block, 0, kBlock);\n')
+    return once(text, 'ops.write (1 + b, 1, zero)', 'ops.write (1 + b, 1, block)')

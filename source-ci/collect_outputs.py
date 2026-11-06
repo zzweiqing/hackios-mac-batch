@@ -126,7 +126,7 @@ def selected_files(upstream):
                                                path.name in ('NativeUfs.o', 'compile.log')):
                 add(path, path.relative_to(work))
             elif relative == 'native-ram-block' and path.name in (
-                    'NativeRamBlock.o', 'NativeRamBlock.cpp', 'compile.log', 'NabuGpuUserprobeAddon.h'):
+                    'NativeRamBlock.o', 'NativeRamBlock.cpp', 'compile.log', 'NabuGpuUserprobeAddon.h', 'PersistOverlay.h'):
                 add(path, path.relative_to(work))
 
     display = build / 'native-legacy-display'

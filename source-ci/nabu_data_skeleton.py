@@ -7,6 +7,7 @@ that image's /Library/Preferences and /usr/share/zoneinfo indirection.
 """
 import hashlib
 import plistlib
+from pathlib import Path
 
 from nabu_graphics_startup import _recount_hunks, _replace_once
 
@@ -180,6 +181,71 @@ AFTER_DATA = '''#if (DEVELOPMENT || DEBUG) && defined(XNU_NATIVE_LEGACY_DISPLAY)
 \t\tnabu_graphics_start_after_root();
 \t}
 #endif
+'''
+
+PROOF_HELPER = r'''/* NABU_DATA_PROOF_V1: optional real Data file, never an automatic boot prerequisite. */
+static __attribute__((noinline, used)) void
+native_owner_data_proof(mount_t data_mount)
+{
+	char requested[17] = {0};
+	if (!PE_parse_boot_argn("nabu-data-proof", requested, sizeof(requested))) return;
+	int valid = strlen(requested) == 16;
+	for (unsigned i = 0; valid && i < 16; ++i)
+		valid = (requested[i] >= '0' && requested[i] <= '9') || (requested[i] >= 'a' && requested[i] <= 'f');
+	if (!valid) { printf("NABU DATA PROOF error=%d reason=nonce\n", EINVAL); return; }
+	extern volatile uint32_t native_data_persist_state, native_data_persist_gpt_after;
+	uint64_t mode = 0;
+	PE_parse_boot_argn("nabu-data-persist", &mode, sizeof(mode));
+	if (mode != 2 || (native_data_persist_state != 2 && native_data_persist_state != 3) ||
+	    native_data_persist_gpt_after != 0) {
+		printf("NABU DATA PROOF error=%d reason=not_persistent state=%u\n", ENXIO, native_data_persist_state);
+		return;
+	}
+	printf("NABUDATA_PROOF_SOURCE_SHA256=__SOURCE_ID__\n");
+	const char *path = "/private/var/.nabu-data-proof-v1";
+	vfs_context_t ctx = vfs_context_current();
+	vnode_t parent = NULLVP, vp = NULLVP;
+	int error = vnode_lookup("/private/var", VNODE_LOOKUP_NOFOLLOW, &parent, ctx);
+	if (!error) {
+		error = vnode_vtype(parent) != VDIR ? ENOTDIR : vnode_mount(parent) != data_mount ? EXDEV : 0;
+		vnode_put(parent);
+	}
+	if (error) { printf("NABU DATA PROOF error=%d reason=parent\n", error); return; }
+	char text[24] = {0}, stored[17] = {0};
+	int created = 0, resid = 0;
+	error = vnode_open(path, FREAD | O_NOFOLLOW, 0, 0, &vp, ctx);
+	if (error == ENOENT) {
+		error = vnode_open(path, O_CREAT | O_EXCL | FWRITE | O_NOFOLLOW, 0600, 0, &vp, ctx);
+		created = !error;
+	}
+	if (!error) {
+		error = vnode_vtype(vp) != VREG ? EFTYPE : vnode_mount(vp) != data_mount ? EXDEV : 0;
+		if (!error && created) {
+			memcpy(text, "NUDP1 ", 6); memcpy(text + 6, requested, 16); text[22] = '\n';
+			error = vn_rdwr(UIO_WRITE, vp, text, 23, 0, UIO_SYSSPACE, IO_NOAUTH | IO_UNIT,
+			    vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx));
+			if (!error && resid) error = EIO;
+			if (!error) error = VNOP_FSYNC(vp, MNT_WAIT, ctx);
+			if (!error) memcpy(stored, requested, 16);
+		} else if (!error) {
+			struct vnode_attr va; VATTR_INIT(&va); VATTR_WANTED(&va, va_data_size); VATTR_WANTED(&va, va_uid);
+			error = vnode_getattr(vp, &va, ctx);
+			if (!error && (!VATTR_IS_SUPPORTED(&va, va_data_size) || !VATTR_IS_SUPPORTED(&va, va_uid) ||
+			    va.va_data_size != 23 || va.va_uid != 0)) error = EINVAL;
+			if (!error) error = vn_rdwr(UIO_READ, vp, text, 23, 0, UIO_SYSSPACE, IO_NOAUTH,
+			    vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx));
+			if (!error && (resid || memcmp(text, "NUDP1 ", 6) || text[22] != '\n')) error = EINVAL;
+			for (unsigned i = 6; !error && i < 22; ++i)
+				if (!((text[i] >= '0' && text[i] <= '9') || (text[i] >= 'a' && text[i] <= 'f'))) error = EINVAL;
+			if (!error) memcpy(stored, text + 6, 16);
+		}
+		int closed = vnode_close(vp, created ? FWRITE : FREAD, ctx);
+		if (!error) error = closed;
+	}
+	printf("NABU DATA PROOF action=%s requested=%s stored=%s previous=%u error=%d\n",
+	    created ? "created" : "read", requested, stored, (unsigned)(!error && strcmp(requested, stored) != 0), error);
+}
+
 '''
 
 HELPER = r'''static int
@@ -362,6 +428,7 @@ __FILES__
 	if (disable_watchdogd == 1) printf("NABU DATA: launchd override disables com.apple.watchdogd\n");
 	if (skip_setup == 1) printf("NABU DATA: Setup preferences seeded (SetupDone, no auto-dim)\n");
 	if (cpu_present == 1) printf("NABU DATA: framebuffer preferences seeded (no deep/compressed)\n");
+	native_owner_data_proof(data_mount);
 	return 0;
 }
 
@@ -381,7 +448,8 @@ def helper_source():
     files = '\n'.join(f'\t\t{{ "{gate}", "/private/var/{path}", {_c_string(content)}, {len(content)}, '
                       f'0{mode:o}, {uid}, {gid} }},'
                       for gate, path, content, mode, uid, gid in seeded)
-    return (HELPER.replace('__DIRECTORIES__', rows)
+    identity = hashlib.sha256(Path(__file__).read_bytes().replace(b'\r\n', b'\n')).hexdigest()
+    return (PROOF_HELPER.replace('__SOURCE_ID__', identity) + HELPER.replace('__DIRECTORIES__', rows)
             .replace('__SYMLINKS__', links)
             .replace('__FILES__', files))
 
