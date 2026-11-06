@@ -51,6 +51,9 @@ def qualify(read, candidate):
                 embedded_source_identity=source_id, actual_source_sha256=sha(ram_source),
                 symbol=symbol, runtime_qualified=False), 'RAM Data source/object/report mismatch')
     overlay_header = read(ram_prefix+'PersistOverlay.h')
+    direct_header = read(ram_prefix+'DirectDisk.h')
+    require(ram_report.get('direct_header_sha256') == sha(direct_header) and
+            b'#include "PersistOverlay.h"' in direct_header, 'Direct Data header must use the local overlay header')
     require(ram_report.get('overlay_header_sha256') == sha(overlay_header) and
             b'uint8_t *scratch)' in overlay_header and b'uint8_t *block = scratch;' in overlay_header and
             b'uint8_t block[kBlock];' not in overlay_header and b'uint8_t zero[kBlock]' not in overlay_header,

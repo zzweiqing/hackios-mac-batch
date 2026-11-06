@@ -62,6 +62,9 @@ def main():
     if persistent_store:
         (out / 'PersistOverlay.h').write_text(nabu_data_persist_source.overlay_source(
             (original.parent / 'PersistOverlay.h').read_text(encoding='utf-8')), encoding='utf-8')
+        # DirectDisk's quoted include must resolve to this same transformed header.
+        # Leaving it in the upstream directory would include a second Overlay definition.
+        (out / 'DirectDisk.h').write_bytes((original.parent / 'DirectDisk.h').read_bytes())
     text = nabu_storage_media.source(text, 'ram')
     source.write_text(text, encoding='utf-8')
     obj = out / 'NativeRamBlock.o'
@@ -97,6 +100,7 @@ def main():
         'optional_ufs_persistence': persistent_store,
         'data_persistence': nabu_data_persist_source.metadata(text) if persistent_store else None,
         'overlay_header_sha256': hashlib.sha256((out / 'PersistOverlay.h').read_bytes()).hexdigest() if persistent_store else None,
+        'direct_header_sha256': hashlib.sha256((out / 'DirectDisk.h').read_bytes()).hexdigest() if persistent_store else None,
         'gpu_userprobe_addon': support,
         'object_sha256': hashlib.sha256(data).hexdigest(),
         'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
