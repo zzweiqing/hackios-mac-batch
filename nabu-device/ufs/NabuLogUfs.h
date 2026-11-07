@@ -49,30 +49,19 @@ static int nabuLogIo(bool write,uint64_t lba,uint32_t blocks,uint8_t *data,bool 
   nabu_log_io_reason=result==kIOReturnSuccess?"ok":"transport";
   return result==kIOReturnSuccess?1:-1;
 }
+/* Keep the writer runnable with the verified counter/yield wait. A shared
+ * historical timer IRQ count does not prove this CPU's deadline wake path.
+ * Each priority depression still has the known-good one-ms expiry. */
 static void nabuLogPause(unsigned milliseconds)
 {
-  static unsigned sleep_event;
-  static bool sleep_announced=false;
   uint64_t deadline;
   clock_interval_to_deadline(milliseconds,kMillisecondScale,&deadline);
   unsigned budget=milliseconds>1000?1000000:milliseconds*1000;
   do {
     nabu_boot_watch_poll();
     if(mach_absolute_time()>=deadline)break;
-    if(__atomic_load_n(&armcpu_gic_ready,__ATOMIC_RELAXED) &&
-       __atomic_load_n(&armcpu_timer_interrupts,__ATOMIC_RELAXED)) {
-      if(!sleep_announced) {
-        sleep_announced=true;
-        IOLog("NABULOG2: writer deadline sleep enabled; timer interrupt observed\n");
-      }
-      if(assert_wait_deadline(&sleep_event,THREAD_UNINT,deadline)==THREAD_WAITING) {
-        ++nabu_log_sleeps;
-        thread_block(THREAD_CONTINUE_NULL);
-      }
-    } else {
-      ++nabu_log_fallback_yields;
-      thread_yield_internal(1);
-    }
+    ++nabu_log_fallback_yields;
+    thread_yield_internal(1);
   } while(budget-- && mach_absolute_time()<deadline);
 }
 static void nabuLogCpuSample()
