@@ -18,7 +18,6 @@ static uint8_t nabu_log_headers[2][4096],nabu_log_header[4096];
 static const char *nabu_log_io_reason="none";
 static IOReturn nabu_log_io_result;
 static uint32_t nabu_log_io_scsi;
-static uint64_t nabu_log_sleeps,nabu_log_fallback_yields;
 extern "C" {
 volatile unsigned nabu_log_writer_state=0,nabu_log_writer_rounds=0,nabu_log_writer_failures=0;
 uint64_t nabu_log_committed_end=0;
@@ -49,9 +48,9 @@ static int nabuLogIo(bool write,uint64_t lba,uint32_t blocks,uint8_t *data,bool 
   nabu_log_io_reason=result==kIOReturnSuccess?"ok":"transport";
   return result==kIOReturnSuccess?1:-1;
 }
-/* Keep the writer runnable with the verified counter/yield wait. A shared
- * historical timer IRQ count does not prove this CPU's deadline wake path.
- * Each priority depression still has the known-good one-ms expiry. */
+/* Keep the counter deadline, but give each priority depression an expiry.
+ * XNU's zero-ms yield has no restoration timer and can starve forever under
+ * continuous single-CPU load, before this loop gets to check its deadline. */
 static void nabuLogPause(unsigned milliseconds)
 {
   uint64_t deadline;
@@ -59,29 +58,8 @@ static void nabuLogPause(unsigned milliseconds)
   unsigned budget=milliseconds>1000?1000000:milliseconds*1000;
   do {
     nabu_boot_watch_poll();
-    if(mach_absolute_time()>=deadline)break;
-    ++nabu_log_fallback_yields;
     thread_yield_internal(1);
   } while(budget-- && mach_absolute_time()<deadline);
-}
-static void nabuLogCpuSample()
-{
-  static unsigned samples;
-  static uint64_t next,last_wall,last_cpu;
-  const uint64_t current=mach_absolute_time();
-  if(samples>=64 || current<next)return;
-  const uint64_t runtime=thread_get_runtime_self();
-  const bool valid=samples && current>last_wall && runtime>=last_cpu;
-  uint64_t wall_ns=0,cpu_ns=0;
-  if(valid) {
-    absolutetime_to_nanoseconds(current-last_wall,&wall_ns);
-    absolutetime_to_nanoseconds(runtime-last_cpu,&cpu_ns);
-  }
-  last_wall=current;last_cpu=runtime;
-  clock_interval_to_deadline(10000,kMillisecondScale,&next);
-  IOLog("NABULOG2: writer_cpu sample=%u valid=%u wall_us=%llu cpu_us=%llu sleeps=%llu fallback_yields=%llu\n",
-    ++samples,valid?1u:0u,(unsigned long long)(wall_ns/1000),(unsigned long long)(cpu_ns/1000),
-    (unsigned long long)nabu_log_sleeps,(unsigned long long)nabu_log_fallback_yields);
 }
 static int nabuLogRead(void *,uint64_t lba,uint32_t blocks,uint8_t *data)
 {
@@ -253,7 +231,6 @@ static void nabuLogThread(void *,wait_result_t)
       /* Opt-in early SMP counters first: they must land before the first
        * snapshot even while the optional GPU probe callback is unset. */
       nabuLogEarlySmpPoll();
-      nabuLogCpuSample();
       /* No console, GPU lock or MMIO: the opt-in owner probe can leave its
        * software state even when the GPU worker's sleep/console path stalls. */
       void (*probe_poll)(void)=__atomic_load_n(&nabu_log_probe_poll,__ATOMIC_ACQUIRE);
