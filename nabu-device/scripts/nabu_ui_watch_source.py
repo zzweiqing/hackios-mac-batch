@@ -1,11 +1,11 @@
 """Reversible, explicitly enabled UI exec and first-main-thread observations."""
 
-CONTRACT = {'version': 6,
+CONTRACT = {'version': 7,
  'trigger': 'nabu-ui-watch=1',
- 'targets': ['SpringBoard', 'backboardd', 'runningboardd'],
+ 'targets': ['SpringBoard', 'backboardd', 'runningboardd', 'profiled'],
  'paths': ['/System/Library/CoreServices/SpringBoard.app/SpringBoard',
            '/usr/libexec/backboardd',
-           '/usr/libexec/runningboardd'],
+           '/usr/libexec/runningboardd', '/usr/libexec/profiled'],
  'symbols': ['_nabu_ui_watch_snapshot',
              '_nabu_ui_watch_exit_note',
              '_nabu_ui_watch_activation',
@@ -34,7 +34,7 @@ CONTRACT = {'version': 6,
  'symbol_references_by_object': {'kern_exit.c': ['_nabu_ui_watch_exit_note']},
  'max_samples': 64,
  'interval_us': 10000000,
- 'max_threads': 3,
+ 'max_threads': 4,
  'max_events': 96,
  'max_exec_contexts': 0,
  'max_line_bytes': 256,
@@ -90,7 +90,7 @@ extern int nabu_ui_watch_task_wait_chain_snapshot(thread_t, unsigned, uint64_t [
 /* XNU thread state bits; thread.h's definitions are private to osfmk. */
 enum { NABU_UI_TH_TERMINATE = 0x10, NABU_UI_TH_TERMINATE2 = 0x20 };
 
-enum { NABU_UI_TARGETS = 3, NABU_UI_MAX_EVENTS = 96, NABU_UI_MAX_SAMPLES = 64 };
+enum { NABU_UI_TARGETS = 4, NABU_UI_MAX_EVENTS = 96, NABU_UI_MAX_SAMPLES = 64 };
 enum { NABU_UI_EMPTY = 0, NABU_UI_CLAIMING = 1, NABU_UI_READY = 2, NABU_UI_CLOSED = 3 };
 struct nabu_ui_slot {
     unsigned phase;
@@ -109,11 +109,11 @@ struct nabu_ui_event {
 static struct nabu_ui_slot nabu_ui_slots[NABU_UI_TARGETS];
 static struct nabu_ui_event nabu_ui_events[NABU_UI_MAX_EVENTS];
 static const char *const nabu_ui_names[NABU_UI_TARGETS] = {
-    "SpringBoard", "backboardd", "runningboardd"
+    "SpringBoard", "backboardd", "runningboardd", "profiled"
 };
 static const char *const nabu_ui_paths[NABU_UI_TARGETS] = {
     "/System/Library/CoreServices/SpringBoard.app/SpringBoard",
-    "/usr/libexec/backboardd", "/usr/libexec/runningboardd"
+    "/usr/libexec/backboardd", "/usr/libexec/runningboardd", "/usr/libexec/profiled"
 };
 static int nabu_ui_enabled_cache = -1;
 static unsigned nabu_ui_closed, nabu_ui_event_count, nabu_ui_event_dropped, nabu_ui_seen_mask;

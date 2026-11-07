@@ -7,7 +7,9 @@ CONTRACT = {
     'trigger': 'nabu-service-wait=1 or 2 after successful lsd csstore mmap with nabu-ls-mmap=1',
     'targets': ['SpringBoard', 'backboardd', 'runningboardd', 'lsd'],
     'detail_trigger': 'nabu-service-wait=2',
-    'detail_targets': ['lsd', 'peer'],
+    'detail_targets': ['SpringBoard', 'backboardd', 'runningboardd', 'lsd', 'peer'],
+    'fallback_peer_name': 'profiled',
+    'stack_thread_filter': 'blocked except workqueue return (trap 368, hint 15)',
     'named_peer_detail': True,
     'peer_identity': 'pid and proc_uniqueid, checked under proc_lock',
     'peer_selection': 'receiver of the longest-persisting lsd special-reply wait, kept until replaced',
@@ -15,10 +17,12 @@ CONTRACT = {
     'interval_seconds': 10,
     'max_threads_scanned': 128,
     'max_rows_per_process': 32,
+    'first_thread_always_sampled': True,
+    'priority_stack_rows': 'first lsd row and first peer row before remaining UI threads',
     'max_processes_per_pass': 5,
     'process_selection': 'first matching referenced task per name, or the selected peer pid and uniqueid, per pass',
     'new_worker': True,
-    'user_memory_read': 'detail only: frame records of blocked lsd/peer threads, once per wait signature and at the final pass',
+    'user_memory_read': 'detail only: frame records of blocked startup callers and peer, once per wait signature and at the final pass',
     'stack_signature': 'proc_uniqueid, tid, pc, lr, trap, receive_name',
     'stack_read_attempts_per_signature': 2,
     'max_frames': 12,
@@ -77,7 +81,7 @@ struct nabu_service_row {
     int receiver;
     char name[17], receiver_name[17];
 };
-/* Detail mode only (nabu-service-wait=2), for lsd and the selected peer.
+/* Detail mode only (nabu-service-wait=2), for startup callers and the selected peer.
  * port_status: 0 not a receive-only wait, 1 special reply port, 2 no name/space,
  * 3 receive translation failed, 4 ordinary receive port.
  * ts_status: 0 not linked to a workloop, 1 inheritor read, 2 turnstile busy.
@@ -154,6 +158,8 @@ nabu_service_target(struct proc *process)
     const int named = nabu_service_named(proc_name_address(process));
     if (named >= 0) return named;
     const int peer = __atomic_load_n(&nabu_service_peer_pid, __ATOMIC_RELAXED);
+    if (nabu_service_detail_mode && peer <= 0 && !strcmp(proc_name_address(process), "profiled"))
+        return NABU_SERVICE_PEER;
     return nabu_service_detail_mode && peer > 0 && proc_pid(process) == peer ? NABU_SERVICE_PEER : -1;
 }
 
@@ -182,7 +188,8 @@ nabu_service_capture(struct proc *process, void *unused)
     proc_lock(process);
     const int target = nabu_service_target(process);
     if (target < 0 || (nabu_service_seen_mask & (1U << target)) ||
-        (target == NABU_SERVICE_PEER && proc_uniqueid(process) != nabu_service_peer_uniqueid)) {
+        (target == NABU_SERVICE_PEER && nabu_service_peer_pid > 0 &&
+            proc_uniqueid(process) != nabu_service_peer_uniqueid)) {
         proc_unlock(process);
         return 0;
     }
@@ -195,6 +202,12 @@ nabu_service_capture(struct proc *process, void *unused)
     struct nabu_service_task *record = &nabu_service_tasks[target];
     record->pid = proc_pid(process);
     record->uniqueid = proc_uniqueid(process);
+    if (target == NABU_SERVICE_PEER && nabu_service_peer_pid <= 0) {
+        nabu_service_peer_uniqueid = record->uniqueid;
+        nabu_service_peer_source = 3; /* Explicit migration service, not inferred from an IPC port. */
+        nabu_service_name(nabu_service_peer_name, proc_name_address(process));
+        __atomic_store_n(&nabu_service_peer_pid, record->pid, __ATOMIC_RELAXED);
+    }
     nabu_service_seen_mask |= 1U << target;
     proc_unlock(process);
     record->status = 1;
@@ -205,8 +218,7 @@ nabu_service_capture(struct proc *process, void *unused)
     ipc_space_t space = task->itk_space;
     if (space != IS_NULL) is_reference(space);
     nabu_service_spaces[target] = space;
-    const unsigned detailed = nabu_service_detail_mode && (target >= NABU_SERVICE_LSD ||
-        (record->pid == nabu_service_peer_pid && record->uniqueid == nabu_service_peer_uniqueid));
+    const unsigned detailed = nabu_service_detail_mode;
     if (detailed) {
         /* Frame records are read after every task/proc/thread lock is dropped. */
         vm_map_t map = task->map;
@@ -225,7 +237,8 @@ nabu_service_capture(struct proc *process, void *unused)
     queue_iterate(&task->threads, thread, thread_t, task_threads) {
         if (record->scanned >= limit) break;
         const unsigned index = record->scanned++;
-        if ((index + limit - record->rotation) % limit >= NABU_SERVICE_ROWS) continue;
+        if (index != 0 && (index + limit - record->rotation) % limit >=
+            NABU_SERVICE_ROWS - (record->rotation != 0)) continue;
         if (record->rows >= NABU_SERVICE_ROWS) break;
         struct nabu_service_row *row = &record->records[record->rows++];
         row->tid = thread_tid(thread);
@@ -483,7 +496,10 @@ nabu_service_resolve_detail(unsigned target, unsigned final_pass)
         const struct nabu_service_row *row = &record->records[index];
         struct nabu_service_detail *detail = &nabu_service_details[target][index];
         if (row->sampled != 0) continue;
-        nabu_service_stack(target, row, detail, final_pass);
+        /* An idle workqueue-return thread has no caller work to attribute. Keep
+         * its raw row, reserving walks for the actual startup call paths. */
+        if (row->trap == 368 && row->hint == 15) continue;
+        if (detail->stack_status == 0) nabu_service_stack(target, row, detail, final_pass);
         if (nabu_service_receive_only(row)) nabu_service_port(target, row, detail);
     }
 }
@@ -718,6 +734,15 @@ nabu_service_worker(void *unused, wait_result_t result)
             nabu_service_resolve(target);
         }
         if (nabu_service_detail_mode) {
+            /* Keep both ends' first threads visible even when the UI fills the
+             * shared walk budget. Other rows retain rotation and omission counts. */
+            for (unsigned target = NABU_SERVICE_LSD; target <= NABU_SERVICE_PEER; ++target) {
+                const struct nabu_service_task *record = &nabu_service_tasks[target];
+                if (!record->rows || record->vm_status == 0) continue;
+                const struct nabu_service_row *row = &record->records[0];
+                if (row->sampled == 0 && !(row->trap == 368 && row->hint == 15))
+                    nabu_service_stack(target, row, &nabu_service_details[target][0], pass == NABU_SERVICE_PASSES);
+            }
             /* Give the lsd call path first use of the bounded stack budget. */
             __atomic_store_n(&nabu_service_phase, 20 + NABU_SERVICE_LSD, __ATOMIC_RELAXED);
             nabu_service_resolve_detail(NABU_SERVICE_LSD, pass == NABU_SERVICE_PASSES);
