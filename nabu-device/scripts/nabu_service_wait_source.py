@@ -3,11 +3,11 @@ import hashlib
 from pathlib import Path
 
 CONTRACT = {
-    'version': 3,
+    'version': 4,
     'trigger': 'nabu-service-wait=1 or 2 after successful lsd csstore mmap with nabu-ls-mmap=1',
     'targets': ['SpringBoard', 'backboardd', 'runningboardd', 'lsd'],
     'detail_trigger': 'nabu-service-wait=2',
-    'detail_targets': ['SpringBoard', 'backboardd', 'runningboardd', 'lsd', 'peer', 'nehelper'],
+    'detail_targets': ['SpringBoard', 'backboardd', 'runningboardd', 'lsd', 'peer', 'nehelper', 'configd'],
     'fallback_peer_name': 'profiled',
     'stack_thread_filter': 'blocked except workqueue return (trap 368, hint 15)',
     'named_peer_detail': True,
@@ -18,8 +18,8 @@ CONTRACT = {
     'max_threads_scanned': 128,
     'max_rows_per_process': 32,
     'first_thread_always_sampled': True,
-    'priority_stack_rows': 'first row of every target before remaining threads, nehelper and peer first',
-    'max_processes_per_pass': 6,
+    'priority_stack_rows': 'first row of every target before remaining threads, configd, nehelper and peer first',
+    'max_processes_per_pass': 7,
     'process_selection': 'first matching referenced task per name, or the selected peer pid and uniqueid, per pass',
     'new_worker': True,
     'user_memory_read': 'detail only: frame records of blocked startup callers and peer, once per wait signature and at the final pass',
@@ -36,10 +36,10 @@ CONTRACT = {
     'symbols': ['_nabu_service_wait_start', '_nabu_service_wait_snapshot'],
 }
 
-MARKER = '\n#define NABU_SERVICE_WAIT_VERSION 3\n'
+MARKER = '\n#define NABU_SERVICE_WAIT_VERSION 4\n'
 ANY_MARKER = '\n#define NABU_SERVICE_WAIT_VERSION '
 HELPER = r'''
-#define NABU_SERVICE_WAIT_VERSION 3
+#define NABU_SERVICE_WAIT_VERSION 4
 #include <arm/thread.h>
 #include <arm64/proc_reg.h>
 #include <ipc/ipc_space.h>
@@ -71,8 +71,9 @@ const char nabu_service_wait_identity[] __attribute__((used)) =
     "NABUSERVICE_SOURCE_SHA256=__NABU_SERVICE_SOURCE_ID__";
 
 enum { NABU_SERVICE_PASSES = 16, NABU_SERVICE_SCAN = 128, NABU_SERVICE_ROWS = 32,
-       NABU_SERVICE_TEXT = 131072, NABU_SERVICE_TARGETS = 6, NABU_SERVICE_LSD = 3,
-       NABU_SERVICE_PEER = 4, NABU_SERVICE_NEHELPER = 5, NABU_SERVICE_FRAMES = 24, NABU_SERVICE_WALKS = 48,
+       NABU_SERVICE_TEXT = 131072, NABU_SERVICE_TARGETS = 7, NABU_SERVICE_LSD = 3,
+       NABU_SERVICE_PEER = 4, NABU_SERVICE_NEHELPER = 5, NABU_SERVICE_CONFIGD = 6,
+       NABU_SERVICE_FRAMES = 24, NABU_SERVICE_WALKS = 48,
        NABU_SERVICE_WALKED = 256 };
 /* A frame-pointer chain longer than this from the saved SP is not a thread stack. */
 #define NABU_SERVICE_STACK_SPAN (16ULL << 20)
@@ -135,7 +136,7 @@ static uint64_t nabu_service_wait_tids[NABU_SERVICE_ROWS];
 static uint32_t nabu_service_wait_names[NABU_SERVICE_ROWS];
 static unsigned nabu_service_wait_counts[NABU_SERVICE_ROWS], nabu_service_wait_rows;
 static const char *const nabu_service_names[] = {
-    "SpringBoard", "backboardd", "runningboardd", "lsd", "peer", "nehelper"
+    "SpringBoard", "backboardd", "runningboardd", "lsd", "peer", "nehelper", "configd"
 };
 
 static uint64_t
@@ -759,7 +760,7 @@ nabu_service_worker(void *unused, wait_result_t result)
         }
         if (nabu_service_detail_mode) {
             /* Keep each first thread visible within the shared walk budget. */
-            const unsigned priority[] = { NABU_SERVICE_NEHELPER, NABU_SERVICE_PEER, NABU_SERVICE_LSD, 0, 1, 2 };
+            const unsigned priority[] = { NABU_SERVICE_CONFIGD, NABU_SERVICE_NEHELPER, NABU_SERVICE_PEER, NABU_SERVICE_LSD, 0, 1, 2 };
             for (unsigned slot = 0; slot < NABU_SERVICE_TARGETS; ++slot) {
                 const unsigned target = priority[slot];
                 const struct nabu_service_task *record = &nabu_service_tasks[target];

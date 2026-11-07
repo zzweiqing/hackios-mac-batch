@@ -38,10 +38,10 @@ def qualify(read, candidate):
                 constants[name] = ast.literal_eval(node.value)
     require(set(constants) == {'CONTRACT', 'HELPER'}, 'Missing service observer constants')
     contract = constants['CONTRACT']
-    require(contract.get('version') == 3 and contract.get('symbols') == list(SYMBOLS) and
+    require(contract.get('version') == 4 and contract.get('symbols') == list(SYMBOLS) and
             contract.get('targets') == ['SpringBoard', 'backboardd', 'runningboardd', 'lsd'] and
             contract.get('detail_trigger') == 'nabu-service-wait=2' and
-            contract.get('detail_targets') == ['SpringBoard', 'backboardd', 'runningboardd', 'lsd', 'peer', 'nehelper'] and
+            contract.get('detail_targets') == ['SpringBoard', 'backboardd', 'runningboardd', 'lsd', 'peer', 'nehelper', 'configd'] and
             contract.get('fallback_peer_name') == 'profiled' and
             contract.get('stack_thread_filter') == 'blocked except workqueue return (trap 368, hint 15)' and
             contract.get('named_peer_detail') is True and
@@ -52,8 +52,8 @@ def qualify(read, candidate):
             contract.get('max_passes') == 16 and contract.get('interval_seconds') == 10 and
             contract.get('max_threads_scanned') == 128 and contract.get('max_rows_per_process') == 32 and
             contract.get('first_thread_always_sampled') is True and
-            contract.get('priority_stack_rows') == 'first row of every target before remaining threads, nehelper and peer first' and
-            contract.get('max_processes_per_pass') == 6 and contract.get('new_worker') is True and
+            contract.get('priority_stack_rows') == 'first row of every target before remaining threads, configd, nehelper and peer first' and
+            contract.get('max_processes_per_pass') == 7 and contract.get('new_worker') is True and
             contract.get('max_frames') == 24 and contract.get('max_stack_walks_per_pass') == 48 and
             contract.get('publication_bytes') == 131072 and contract.get('maximum_line_bytes') == 255 and
             contract.get('worker_may_block') is True and
