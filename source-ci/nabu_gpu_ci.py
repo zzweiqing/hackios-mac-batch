@@ -239,7 +239,8 @@ def qualify_userprobe_boot(read, candidate):
     exec_trace_constants = {}
     for item in ast.parse(generator.decode('utf-8')).body:
         if isinstance(item, ast.Assign) and len(item.targets) == 1 and isinstance(item.targets[0], ast.Name):
-            if item.targets[0].id in ('RAM_HELPER', 'RAM_GATE', 'DATA_BRANCH', 'PARENTS_BEFORE', 'PARENTS_AFTER'):
+            if item.targets[0].id in ('RAM_HELPER', 'RAM_GATE', 'DATA_BRANCH', 'PARENTS_BEFORE', 'PARENTS_AFTER',
+                                     'DATA_EXTERNAL_HELPER', 'DATA_EXTERNAL_BRANCH'):
                 constants[item.targets[0].id] = ast.literal_eval(item.value).encode()
             elif item.targets[0].id == 'CACHE_ENTRY_COUNT':
                 cache_entries = ast.literal_eval(item.value)
@@ -253,6 +254,18 @@ def qualify_userprobe_boot(read, candidate):
     require(ram_report.get('actual_source_sha256') == sha(ram) and
             ram.count(constants['RAM_HELPER']) == 1 and ram.count(constants['RAM_GATE']) == 1,
             'Actual RAM source lacks the closed inline GPU userprobe transport')
+    external_bound = 'DATA_EXTERNAL_HELPER' in constants
+    if external_bound:
+        require('DATA_EXTERNAL_BRANCH' in constants and
+                b'nabu_gpu_userprobe_external_selected()' in constants['RAM_GATE'] and
+                b'return nabu_gpu_userprobe_external(data, bytes);' in constants['RAM_GATE'] and
+                b'nabu_gpu_userprobe_external_valid(payload, size)' in constants['RAM_HELPER'] and
+                b'nabu-gpu-addon-sha256' in constants['RAM_HELPER'] and
+                b'nabu-gpu-addon-mode' in constants['RAM_HELPER'] and
+                b'nabu-gpu-addon-bytes' in constants['RAM_HELPER'] and
+                b'#define NABU_GPU_USERPROBE_EXTERNAL_MAX 67108864u' in header and
+                b'#define NABU_GPU_USERPROBE_SET_WALLPAPER 0x1ffff000u' in header,
+                'External wallpaper addon identity or closed range gate changed')
     obj = read(prefix + 'NativeRamBlock.o')
     archive = read(prefix + 'libNativeRamBlock.a')
     members = archive_members(archive)
@@ -266,6 +279,11 @@ def qualify_userprobe_boot(read, candidate):
     require(data.count(constants['DATA_BRANCH']) == 1 and capture.get('gpu_userprobe_boot') is True and
             capture.get('hooks', {}).get('bsd/kern/kern_exec.c') == sha(data),
             'Actual XNU source lacks the opt-in owner probe job')
+    if external_bound:
+        require(data.count(constants['DATA_EXTERNAL_HELPER']) == 1 and data.count(constants['DATA_EXTERNAL_BRANCH']) == 1 and
+                data.index(constants['DATA_EXTERNAL_BRANCH']) < data.index(constants['DATA_BRANCH']) and
+                b'NabuGPU: wallpaper floating_stage=' in candidate,
+                'Actual kernel lacks the external wallpaper validation or both union mounts')
     parents_fixed = 'PARENTS_AFTER' in constants
     if parents_fixed:
         require(data.count(constants['PARENTS_AFTER']) == 1 and constants['PARENTS_BEFORE'] not in data,
@@ -322,6 +340,8 @@ def qualify_userprobe_boot(read, candidate):
         require(b'NabuGPU: probe_exec_stage=' in candidate,
                 'Final kernel lacks the probe exec-stage record format')
     extra_required = {'_native_ram_block_gpu_addon'}
+    if external_bound:
+        extra_required.add('_nabu_gpu_userprobe_external_selected')
     if process_bound:
         extra_required |= {'_nabu_gpu_userprobe_exit_note', '_nabu_gpu_userprobe_exec_snapshot',
                            '_nabu_log_probe_poll', '_nabu_log_probe_process_snapshot'}
@@ -344,6 +364,9 @@ def qualify_userprobe_boot(read, candidate):
                 'pipeline_pack_max': 8388608} if pack_bound else {}),
             **({'plugin_clients_transport': True, 'plugin_clients_addon_files': [10, 11],
                 'plugin_clients_max': 256} if clients_bound else {}),
+            **({'external_wallpaper_transport': True, 'external_wallpaper_addon_files': [26, 27, 28],
+                'external_wallpaper_max': 67108864, 'external_payload_sha256_required': True,
+                'external_precedes_inline': True} if external_bound else {}),
             **({'exec_stage_observer': True, 'exec_stage_records_maximum': 32} if exec_trace_constants else {}),
             **({'process_observer': True, 'exit_source_sha256': sha(exit_source),
                 'process_symbols': {name: definitions[name] for name in sorted(extra_required)}} if process_bound else {}),

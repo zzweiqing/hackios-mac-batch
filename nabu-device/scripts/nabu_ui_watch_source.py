@@ -687,6 +687,30 @@ def exit_source(text, restore=False):
     return text
 
 EXEC_PAIRS = (
+    (r'''	uint32_t nabu_wallpaper_probe = 0;
+	extern int nabu_gpu_userprobe_external_selected(void);
+	if (PE_parse_boot_argn("nabu-gpu-userprobe", &nabu_wallpaper_probe, sizeof(nabu_wallpaper_probe)) &&
+	    nabu_wallpaper_probe == 1 && nabu_gpu_userprobe_external_selected()) {
+		extern void nabu_gpu_userprobe_exec_snapshot(uint32_t out[6]);
+		extern void (*nabu_log_probe_process_snapshot)(uint32_t *);
+		__atomic_store_n(&nabu_log_probe_process_snapshot, nabu_gpu_userprobe_exec_snapshot, __ATOMIC_RELEASE);
+		nabu_gpu_wallpaper_prepare(p, scratch);
+		return;
+	}
+''',
+     r'''#define nabu_gpu_userprobe_exec_snapshot nabu_ui_watch_snapshot
+	uint32_t nabu_wallpaper_probe = 0;
+	extern int nabu_gpu_userprobe_external_selected(void);
+	if (PE_parse_boot_argn("nabu-gpu-userprobe", &nabu_wallpaper_probe, sizeof(nabu_wallpaper_probe)) &&
+	    nabu_wallpaper_probe == 1 && nabu_gpu_userprobe_external_selected()) {
+		extern void nabu_gpu_userprobe_exec_snapshot(uint32_t out[6]);
+		extern void (*nabu_log_probe_process_snapshot)(uint32_t *);
+		__atomic_store_n(&nabu_log_probe_process_snapshot, nabu_gpu_userprobe_exec_snapshot, __ATOMIC_RELEASE);
+		nabu_gpu_wallpaper_prepare(p, scratch);
+		return;
+	}
+#undef nabu_gpu_userprobe_exec_snapshot
+'''),
     ('static int exec_activate_image(struct image_params *imgp);\n',
      'static int exec_activate_image(struct image_params *imgp, int *nabu_ui_target_out);\n'),
     ('static int\nexec_activate_image(struct image_params *imgp)\n{\n',

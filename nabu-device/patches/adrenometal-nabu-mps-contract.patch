@@ -1,0 +1,48 @@
+diff --git a/NativeBridgeMetalFrontend.mm b/NativeBridgeMetalFrontend.mm
+--- a/NativeBridgeMetalFrontend.mm
++++ b/NativeBridgeMetalFrontend.mm
+@@ -1138,6 +1138,14 @@
+ static void completed(void *context);
+ static void scheduled(void *context);
+ @implementation NBCommandBuffer
++static char kUserDictionaryKey;
++- (id)userDictionary {
++ @synchronized(self) {
++  NSMutableDictionary *dictionary=objc_getAssociatedObject(self,&kUserDictionaryKey);
++  if(!dictionary){dictionary=[NSMutableDictionary dictionary];objc_setAssociatedObject(self,&kUserDictionaryKey,dictionary,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
++  return dictionary;
++ }
++}
+ - (instancetype)init {
+  if((self=[super init])) {
+   _scheduledHandlers=[NSMutableArray array];
+@@ -1729,6 +1737,12 @@
+ @end
+ @implementation NBDeviceMethods
+ - (NSString *)name {return gName;}
++- (NSUInteger)minimumTextureBufferAlignmentForPixelFormat:(NSUInteger)format {
++ return ((NSUInteger (*)(id,SEL,NSUInteger))objc_msgSend)(self,sel_registerName("minimumLinearTextureAlignmentForPixelFormat:"),format);
++}
++- (NSUInteger)iosurfaceReadOnlyTextureAlignmentBytes {
++ return ((NSUInteger (*)(id,SEL,NSUInteger))objc_msgSend)(self,sel_registerName("minimumLinearTextureAlignmentForPixelFormat:"),MTLPixelFormatRGBA16Float);
++}
+ - (uint64_t)registryID {return gRegistryID;}
+ - (NSUInteger)maxBufferLength {return nmb_device_max_buffer_length(gDevice);}
+ - (BOOL)hasUnifiedMemory {return YES;}
+@@ -2101,6 +2115,16 @@
+  // The original registration (_MTLAddDevice) asserts that a plugin's device conforms to Metal's private device protocol as well; the target's own
+  // drivers get it from their IOGPU base class. Conformance only answers conformsToProtocol:, the methods are still looked up one by one.
+  if(Protocol *spi=objc_getProtocol("MTLDeviceSPI"))class_addProtocol(cls,spi);
++{
++  static const char *const conformances[][2]={
++   {"NBBuffer","MTLBuffer"},{"NBTexture","MTLTexture"},{"NBLibrary","MTLLibrary"},{"NBFunction","MTLFunction"},
++   {"NBComputePipeline","MTLComputePipelineState"},{"NBRenderPipeline","MTLRenderPipelineState"},{"NBSampler","MTLSamplerState"},
++   {"NBDepthStencil","MTLDepthStencilState"},{"NBEvent","MTLEvent"},{"NBSharedEvent","MTLSharedEvent"},{"NBFence","MTLFence"},
++   {"NBQueue","MTLCommandQueue"},{"NBCommandBuffer","MTLCommandBuffer"},{"NBEncoder","MTLCommandEncoder"},
++   {"NBComputeEncoder","MTLComputeCommandEncoder"},{"NBRenderEncoder","MTLRenderCommandEncoder"},{"NBBlitEncoder","MTLBlitCommandEncoder"},
++   {"NBHeap","MTLHeap"},{"NBBinaryArchive","MTLBinaryArchive"}};
++  for(const auto &c:conformances){Class k=objc_getClass(c[0]);Protocol *pr=objc_getProtocol(c[1]);if(k&&pr)class_addProtocol(k,pr);}
++}
+  objc_registerClassPair(cls);
+  gDeviceObject=[cls new];
+  return gDeviceObject;

@@ -10,8 +10,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
+import sys
 
 # Gitlinks of UniXNU cd2dd1bd (checked against the checkout's tree before use).
 SUBMODULES = {
@@ -29,7 +31,11 @@ ADRENOMETAL_PATCHES = ('patches/adrenometal-shader-cache-optional.patch', 'patch
                        'patches/adrenometal-nabu-scanout.patch', 'patches/adrenometal-nabu-problem-report.patch',
                        'patches/adrenometal-nabu-ci-kernels.patch')
 FPS_PATCHES = ADRENOMETAL_PATCHES[:-1] + ('patches/adrenometal-nabu-source-cache.patch',)
-WALLPAPER_PATCHES = FPS_PATCHES + (ADRENOMETAL_PATCHES[-1], 'patches/adrenometal-nabu-ci-function-identity.patch')
+MPS_CONTRACT_PATCH = 'patches/adrenometal-nabu-mps-contract.patch'
+MPS_CONTRACT_UPSTREAM = '6d7f73437087c57ee54a41adceb1735daaea405e'
+GPU_CORE_COUNT_PATCH = 'patches/adrenometal-nabu-gpu-core-count.patch'
+WALLPAPER_PATCHES = FPS_PATCHES + (ADRENOMETAL_PATCHES[-1], 'patches/adrenometal-nabu-ci-function-identity.patch',
+                                 MPS_CONTRACT_PATCH, GPU_CORE_COUNT_PATCH)
 ASYNC_PATCH = 'patches/adrenometal-nabu-async-creation.patch'
 ASYNC_PATCHES = ADRENOMETAL_PATCHES[:4] + (ASYNC_PATCH,)
 COMPLETION_PATCH = 'patches/adrenometal-nabu-completion-wait.patch'
@@ -83,6 +89,187 @@ def plugin_patches(fps_opt=False, async_fix=False, completion_fix=False, complet
     # The FPS experiment starts from the four-patch, desktop-capable plugin.
     # Preserve the separate CoreImage experiment instead of mixing its changes in.
     return FPS_PATCHES if fps_opt else ADRENOMETAL_PATCHES
+
+
+def mps_contract_source(frontend):
+    def section(start, end):
+        if frontend.count(start) != 1:
+            raise ValueError('MPS contract source drift: ' + start)
+        tail = frontend.split(start, 1)[1]
+        if end not in tail:
+            raise ValueError('MPS contract source lacks terminator: ' + end)
+        return start + tail.split(end, 1)[0]
+
+    dictionary = section('static char kUserDictionaryKey;\n', '- (instancetype)init')
+    alignment = section('- (NSUInteger)minimumTextureBufferAlignmentForPixelFormat:', '- (uint64_t)registryID')
+    protocols = section('  static const char *const conformances[][2]={\n', '\n}\n objc_registerClassPair')
+    pairs = re.findall(r'\{"(NB\w+)","(MTL\w+)"\}', protocols)
+    expected = (
+        ('NBBuffer', 'MTLBuffer'), ('NBTexture', 'MTLTexture'), ('NBLibrary', 'MTLLibrary'),
+        ('NBFunction', 'MTLFunction'), ('NBComputePipeline', 'MTLComputePipelineState'),
+        ('NBRenderPipeline', 'MTLRenderPipelineState'), ('NBSampler', 'MTLSamplerState'),
+        ('NBDepthStencil', 'MTLDepthStencilState'), ('NBEvent', 'MTLEvent'), ('NBSharedEvent', 'MTLSharedEvent'),
+        ('NBFence', 'MTLFence'), ('NBQueue', 'MTLCommandQueue'), ('NBCommandBuffer', 'MTLCommandBuffer'),
+        ('NBEncoder', 'MTLCommandEncoder'), ('NBComputeEncoder', 'MTLComputeCommandEncoder'),
+        ('NBRenderEncoder', 'MTLRenderCommandEncoder'), ('NBBlitEncoder', 'MTLBlitCommandEncoder'),
+        ('NBHeap', 'MTLHeap'), ('NBBinaryArchive', 'MTLBinaryArchive'),
+    )
+    if tuple(pairs) != expected or '- (id)userDictionary' not in dictionary or \
+            '- (NSUInteger)iosurfaceReadOnlyTextureAlignmentBytes' not in alignment:
+        raise ValueError('MPS contract methods or protocol set changed')
+    for name, _ in pairs:
+        parent = 'NBEvent' if name == 'NBSharedEvent' else 'NBEncoder' if name in (
+            'NBComputeEncoder', 'NBRenderEncoder', 'NBBlitEncoder') else 'NBObject'
+        declarations = re.findall(r'^@interface\s+' + name + r'\s*:\s*(\w+)\b', frontend, re.MULTILINE)
+        implementations = re.findall(r'^@implementation\s+' + name + r'\s*(?:\{|$)', frontend, re.MULTILINE)
+        if declarations != [parent] or len(implementations) != 1:
+            raise ValueError('MPS production class declaration or implementation changed: ' + name)
+    declarations = '\n'.join('@interface %s : NSObject\n@end\n@implementation %s\n@end' % (name, name)
+                             for name, _ in pairs if name != 'NBCommandBuffer')
+    protocol_objects = ','.join('@protocol(%s)' % protocol for _, protocol in pairs)
+    class_objects = ','.join('[%s class]' % name for name, _ in pairs)
+    return MPS_CONTRACT_HARNESS.replace('__CLASSES__', declarations).replace(
+        '__DICTIONARY__', dictionary).replace('__ALIGNMENT__', alignment).replace(
+        '__PROTOCOL_INSTALL__', protocols).replace('__PROTOCOLS__', protocol_objects).replace(
+        '__CLASS_OBJECTS__', class_objects)
+
+
+MPS_CONTRACT_HARNESS = r'''
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#import <objc/message.h>
+#import <objc/runtime.h>
+#import <dispatch/dispatch.h>
+#include <cstdio>
+#include <cstdlib>
+
+static void require(bool condition,const char *why) {
+ if(!condition){fprintf(stderr,"FAIL %s\n",why);exit(2);}
+}
+__CLASSES__
+@interface NBCommandBuffer : NSObject
+- (id)userDictionary;
+@end
+@implementation NBCommandBuffer
+__DICTIONARY__
+@end
+@interface NBDeviceMethods : NSObject
+@property(nonatomic) NSUInteger requestedFormat;
+- (NSUInteger)minimumLinearTextureAlignmentForPixelFormat:(NSUInteger)format;
+- (NSUInteger)minimumTextureBufferAlignmentForPixelFormat:(NSUInteger)format;
+- (NSUInteger)iosurfaceReadOnlyTextureAlignmentBytes;
+@end
+@implementation NBDeviceMethods
+- (NSUInteger)minimumLinearTextureAlignmentForPixelFormat:(NSUInteger)format {
+ self.requestedFormat=format;return format==MTLPixelFormatRGBA16Float?512:256;
+}
+__ALIGNMENT__
+@end
+static void installProtocols() {
+__PROTOCOL_INSTALL__
+}
+int main() {
+ @autoreleasepool {
+  Protocol *protocols[]={__PROTOCOLS__};
+  Class classes[]={__CLASS_OBJECTS__};
+  NSMutableArray *instances=[NSMutableArray array];
+  const size_t count=sizeof(classes)/sizeof(classes[0]);
+  require(count==19,"closed protocol set");
+  for(size_t index=0;index<count;++index) {
+   require(protocols[index]!=nil,"Metal protocol available");
+   require(!class_conformsToProtocol(classes[index],protocols[index]),"negative conformance control");
+   id instance=[classes[index] new];[instances addObject:instance];
+   require(![instance conformsToProtocol:protocols[index]],"existing object negative control");
+  }
+  installProtocols();
+  for(size_t index=0;index<count;++index) {
+   require([[classes[index] new] conformsToProtocol:protocols[index]],"object protocol installed");
+   require([instances[index] conformsToProtocol:protocols[index]],"existing object protocol installed");
+  }
+  NBCommandBuffer *first=[NBCommandBuffer new],*second=[NBCommandBuffer new];
+  NSMutableDictionary *dictionary=[first userDictionary];
+  require([dictionary isKindOfClass:[NSMutableDictionary class]],"mutable dictionary");
+  dictionary[@"MPS-state"]=@37;
+  require([first userDictionary]==dictionary,"stable dictionary identity");
+  require([[first userDictionary][@"MPS-state"] isEqual:@37],"state retained");
+  require([second userDictionary]!=dictionary && [[second userDictionary] count]==0,"per-buffer isolation");
+  dispatch_apply(64,dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),^(size_t index) {
+   (void)index;require([first userDictionary]==dictionary,"concurrent identity");
+  });
+  NBCommandBuffer *cold=[NBCommandBuffer new];
+  NSMutableArray *identities=[NSMutableArray array];
+  dispatch_apply(64,dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),^(size_t index) {
+   (void)index;id identity=[cold userDictionary];
+   @synchronized(identities){[identities addObject:identity];}
+  });
+  for(id identity in identities)require(identity==[cold userDictionary],"concurrent first initialization");
+  NBDeviceMethods *device=[NBDeviceMethods new];
+  require([device minimumTextureBufferAlignmentForPixelFormat:MTLPixelFormatBGRA8Unorm]==256,"buffer alignment forwarded");
+  require(device.requestedFormat==MTLPixelFormatBGRA8Unorm,"buffer format preserved");
+  require([device iosurfaceReadOnlyTextureAlignmentBytes]==512,"IOSurface alignment forwarded");
+  require(device.requestedFormat==MTLPixelFormatRGBA16Float,"IOSurface format preserved");
+  puts("MPS_OBJECT_CONTRACT_OK protocols=19 dictionary=stable-isolated alignment=forwarded gpu=not-exercised");
+ }
+ return 0;
+}
+'''
+
+
+def qualify_mps_contract(frontend, output, env):
+    if sys.platform != 'darwin' or env.get('GITHUB_ACTIONS') != 'true':
+        raise SystemExit('MPS Foundation/Metal qualification runs only in macOS GitHub Actions')
+    source = mps_contract_source(frontend.read_text())
+    output.mkdir()
+    harness = output / 'mps-contract.mm'
+    harness.write_text(source)
+    binary = output / 'mps-contract'
+    with (output / 'compile.log').open('w') as log:
+        run(['xcrun', '--sdk', 'macosx', 'clang++', '-std=c++17', '-fobjc-arc',
+             '-framework', 'Foundation', '-framework', 'Metal', harness, '-o', binary],
+            env=env, stdout=log, stderr=subprocess.STDOUT)
+    result = subprocess.run([str(binary)], env=env, text=True, capture_output=True, timeout=30)
+    (output / 'run.log').write_text(result.stdout + result.stderr)
+    expected = 'MPS_OBJECT_CONTRACT_OK protocols=19 dictionary=stable-isolated alignment=forwarded gpu=not-exercised'
+    if result.returncode or result.stdout.strip() != expected:
+        raise SystemExit('MPS object contract qualification failed; see ' + str(output / 'run.log'))
+    return dict(upstream_commit=MPS_CONTRACT_UPSTREAM, frontend_sha256=sha(frontend),
+                harness_sha256=sha(harness), metal_protocols=19, command_buffer_dictionary=True,
+                iosurface_alignment_forwarded=True, texture_buffer_alignment_forwarded=True,
+                host_foundation_metal_qualified=True, qualification_scope='protocol-registration-shim',
+                gpu_core_count_changed=False,
+                gpu_exercised=False, runtime_qualified=False)
+
+
+def qualify_gpu_core_count(bridge, output, env):
+    bridge = Path(bridge)
+    helper = bridge / 'NabuGpuCoreCount.rs'
+    source = bridge / 'NativeMetalObjects.rs'
+    text = source.read_text()
+    binding = '''        let reported = device.private().count(c).value();
+        return if selector == "gpuCoreCount" {
+            nabu_gpu_core_count::answer(reported, p.vendor_id, p.device_id)
+        } else {
+            reported
+        }.ok_or_else(none);'''
+    if text.count('include!("NabuGpuCoreCount.rs");') != 1 or text.count(binding) != 1:
+        raise ValueError('GPU core-count fallback is not bound to the real Vulkan identity and runtime answer')
+    output.mkdir()
+    archived = output / helper.name
+    shutil.copyfile(helper, archived)
+    shutil.copyfile(source, output / source.name)
+    binary = output / ('gpu-core-count.exe' if sys.platform == 'win32' else 'gpu-core-count')
+    with (output / 'compile.log').open('w') as log:
+        run(['rustc', '+' + RUST, '--edition=2024', '--test', archived, '-o', binary],
+            env=env, stdout=log, stderr=subprocess.STDOUT)
+    result = subprocess.run([str(binary), '--test-threads=1'], env=env, text=True,
+                            capture_output=True, timeout=30)
+    (output / 'run.log').write_text(result.stdout + result.stderr)
+    if result.returncode or '4 passed; 0 failed;' not in result.stdout:
+        raise SystemExit('GPU core-count production Rust qualification failed')
+    return dict(helper_sha256=sha(helper), bridge_sha256=sha(source), production_rust_tests=4,
+                vendor_id='0x5143', device_id='0x06040001', fallback_sp_cores=2,
+                topology_source='Mesa 85fda3b36405bcaea8bffc64aa4f2651dc90770d GPUId(640) num_sp_cores=2',
+                reported_answer_has_priority=True, gpu_exercised=False, runtime_qualified=False)
 
 
 def prepare_runtime_qos(metal, device):
@@ -221,6 +408,11 @@ def build(root, device, output, env, fps_opt=False, async_fix=False, completion_
         frontend = root / 'drivers/AdrenoMetal/NativeBridgeMetalFrontend.mm'
         shutil.copyfile(frontend, source_output / frontend.name)
         report['wallpaper_source_sha256'] = {frontend.name: sha(frontend)}
+        report['mps_object_contract'] = qualify_mps_contract(frontend, output / 'mps-contract', env)
+        report['mps_object_contract']['patch_sha256'] = sha(device / MPS_CONTRACT_PATCH)
+        report['gpu_core_count'] = qualify_gpu_core_count(root / 'drivers/AdrenoMetal/bridge',
+                                                        output / 'gpu-core-count', env)
+        report['gpu_core_count']['patch_sha256'] = sha(device / GPU_CORE_COUNT_PATCH)
         report['wallpaper_support'] = dict(extern_function_names=True, ci_kernel_functions=True,
             stitched_libraries=True, function_bitcode_identity=True, runtime_qualified=False)
     report['scanout_wire_sha256'] = sha(device / 'platform/NabuGpuScanoutWire.h')

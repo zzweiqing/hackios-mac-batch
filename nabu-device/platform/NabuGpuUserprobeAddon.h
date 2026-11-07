@@ -26,6 +26,9 @@
 #define NABU_GPU_USERPROBE_PLUGIN_PACK_MAX 8388608u
 /* Processes besides backboardd that get their own native Metal device (NativeAdrenoMetalPlugin.mm listedClient). */
 #define NABU_GPU_USERPROBE_PLUGIN_CLIENTS_MAX 256u
+#define NABU_GPU_USERPROBE_EXTERNAL_MAX 67108864u
+#define NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX 8388608u
+#define NABU_GPU_USERPROBE_WALLPAPER_CAML_MAX 1048576u
 
 static inline uint32_t nabu_probe_u32(const uint8_t *p)
 {
@@ -65,6 +68,23 @@ static const struct nabu_gpu_userprobe_kind nabu_gpu_userprobe_kinds[] = {
     {"addons/NativeAdrenoMetal.publish", 0644, NABU_GPU_USERPROBE_PLUGIN_PUBLISH_MAX},
     {"addons/NativeAdrenoMetal.m2vpack", 0644, NABU_GPU_USERPROBE_PLUGIN_PACK_MAX},
     {"addons/NativeAdrenoMetal.clients", 0644, NABU_GPU_USERPROBE_PLUGIN_CLIENTS_MAX},
+    {"wallpaper-background/main.caml", 0644, NABU_GPU_USERPROBE_WALLPAPER_CAML_MAX},
+    {"wallpaper-background/assets/Background Dark.png", 0644, NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX},
+    {"wallpaper-background/assets/Background Light.png", 0644, NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX},
+    {"wallpaper-floating/main.caml", 0644, NABU_GPU_USERPROBE_WALLPAPER_CAML_MAX},
+    {"wallpaper-floating/assets/Aqua Dark.png", 0644, NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX},
+    {"wallpaper-floating/assets/Aqua Light.png", 0644, NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX},
+    {"wallpaper-floating/assets/Green Dark.png", 0644, NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX},
+    {"wallpaper-floating/assets/Green Light.png", 0644, NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX},
+    {"wallpaper-floating/assets/Orange Dark.png", 0644, NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX},
+    {"wallpaper-floating/assets/Orange Light.png", 0644, NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX},
+    {"wallpaper-floating/assets/Red Dark.png", 0644, NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX},
+    {"wallpaper-floating/assets/Red Landscape Patch.png", 0644, NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX},
+    {"wallpaper-floating/assets/Red Light.png", 0644, NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX},
+    {"wallpaper-floating/assets/Red Yellow Edge Patch Dark.png", 0644, NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX},
+    {"wallpaper-floating/assets/Red Yellow Edge Patch Light.png", 0644, NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX},
+    {"wallpaper-floating/assets/Yellow Dark.png", 0644, NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX},
+    {"wallpaper-floating/assets/Yellow Light.png", 0644, NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX},
 };
 #define NABU_GPU_USERPROBE_KIND_COUNT (sizeof(nabu_gpu_userprobe_kinds) / sizeof(nabu_gpu_userprobe_kinds[0]))
 /* The exact kind set of each form, bit i for nabu_gpu_userprobe_kinds[i]. */
@@ -75,15 +95,24 @@ static const struct nabu_gpu_userprobe_kind nabu_gpu_userprobe_kinds[] = {
 #define NABU_GPU_USERPROBE_SET_PUBLISH 0x3efu
 #define NABU_GPU_USERPROBE_SET_PACK 0x7efu
 #define NABU_GPU_USERPROBE_SET_CLIENTS_BIT 0x800u
+#define NABU_GPU_USERPROBE_SET_WALLPAPER 0x1ffff000u
 
-static inline int nabu_gpu_userprobe_addon_valid(const uint8_t *data, uint64_t bytes)
+static inline int nabu_gpu_userprobe_addon_valid_form(const uint8_t *data, uint64_t bytes, int external)
 {
     if (!data || bytes < 24 || memcmp(data, "NGPUADD2", 8) ||
         nabu_probe_u32(data + 12) || nabu_probe_u64(data + 16) != bytes) return 0;
     const unsigned count = nabu_probe_u32(data + 8);
     unsigned expected;
     uint64_t limit;
-    switch (count) {
+    if (external) {
+        limit = NABU_GPU_USERPROBE_EXTERNAL_MAX;
+        switch (count) {
+        case 26: expected = NABU_GPU_USERPROBE_SET_PUBLISH | NABU_GPU_USERPROBE_SET_WALLPAPER; break;
+        case 27: expected = NABU_GPU_USERPROBE_SET_PACK | NABU_GPU_USERPROBE_SET_WALLPAPER; break;
+        case 28: expected = NABU_GPU_USERPROBE_SET_PACK | NABU_GPU_USERPROBE_SET_CLIENTS_BIT | NABU_GPU_USERPROBE_SET_WALLPAPER; break;
+        default: return 0;
+        }
+    } else switch (count) {
     case 2: expected = NABU_GPU_USERPROBE_SET_PROBE; limit = NABU_GPU_USERPROBE_ADDON_MAX; break;
     case 4: expected = NABU_GPU_USERPROBE_SET_CACHE; limit = NABU_GPU_USERPROBE_ADDON_MAX; break;
     case 5: expected = NABU_GPU_USERPROBE_SET_TURNIP; limit = NABU_GPU_USERPROBE_TURNIP_ADDON_MAX; break;
@@ -94,7 +123,9 @@ static inline int nabu_gpu_userprobe_addon_valid(const uint8_t *data, uint64_t b
     default: return 0;
     }
     /* Ten files are either the pack form or the published form with the client list: the names decide. */
-    const unsigned alternative = count == 10 ? (NABU_GPU_USERPROBE_SET_PUBLISH | NABU_GPU_USERPROBE_SET_CLIENTS_BIT) : expected;
+    unsigned alternative = count == 10 ? (NABU_GPU_USERPROBE_SET_PUBLISH | NABU_GPU_USERPROBE_SET_CLIENTS_BIT) : expected;
+    if (external && count == 27)
+        alternative = NABU_GPU_USERPROBE_SET_PUBLISH | NABU_GPU_USERPROBE_SET_CLIENTS_BIT | NABU_GPU_USERPROBE_SET_WALLPAPER;
     if (bytes > limit) return 0;
     uint64_t at = 24;
     unsigned seen = 0;
@@ -125,5 +156,24 @@ static inline int nabu_gpu_userprobe_addon_valid(const uint8_t *data, uint64_t b
         at += name_padded + packed_padded;
     }
     return (seen == expected || seen == alternative) && at == bytes;
+}
+
+static inline int nabu_gpu_userprobe_addon_valid(const uint8_t *data, uint64_t bytes)
+{
+    return nabu_gpu_userprobe_addon_valid_form(data, bytes, 0);
+}
+
+static inline int nabu_gpu_userprobe_external_valid(const uint8_t *data, uint64_t bytes)
+{
+    return nabu_gpu_userprobe_addon_valid_form(data, bytes, 1);
+}
+
+static inline int nabu_gpu_userprobe_external_range_valid(uint64_t physical, uint64_t bytes,
+    uint64_t physical_base, uint64_t physical_size, uint32_t mode, uint64_t expected_bytes)
+{
+    return mode == 1 && bytes >= 24 && bytes <= NABU_GPU_USERPROBE_EXTERNAL_MAX &&
+        bytes == expected_bytes && !(physical & 4095) && physical >= physical_base &&
+        physical <= UINT64_MAX - bytes && physical_base <= UINT64_MAX - physical_size &&
+        bytes <= physical_size && physical - physical_base <= physical_size - bytes;
 }
 #endif

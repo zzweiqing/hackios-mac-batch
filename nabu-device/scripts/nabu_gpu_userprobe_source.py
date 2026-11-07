@@ -98,6 +98,46 @@ EXIT_HOOK = '''\t/* NABU_GPU_USERPROBE_EXIT_V1: a successful exit must also leav
 RAM_HELPER = r'''/* NABU_GPU_USERPROBE_INLINE_V1 */
 #include "NabuGpuUserprobeAddon.h"
 static OSData *nabu_gpu_userprobe_retained;
+extern "C" int nabu_gpu_userprobe_external_selected(void)
+{
+  IORegistryEntry *map = IORegistryEntry::fromPath("/chosen/memory-map", gIODTPlane);
+  if (!map) return 0;
+  const int selected = map->getProperty("GpuAddon") != nullptr;
+  map->release();
+  return selected;
+}
+static int nabu_gpu_userprobe_external(const uint8_t **data, uint64_t *bytes)
+{
+  IORegistryEntry *map = IORegistryEntry::fromPath("/chosen/memory-map", gIODTPlane);
+  IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
+  if (!map || !chosen) {if (map) map->release(); if (chosen) chosen->release(); return 0;}
+  OSData *range = OSDynamicCast(OSData, map->getProperty("GpuAddon"));
+  OSData *identity = OSDynamicCast(OSData, chosen->getProperty("nabu-gpu-addon-sha256"));
+  OSData *mode = OSDynamicCast(OSData, chosen->getProperty("nabu-gpu-addon-mode"));
+  OSData *length = OSDynamicCast(OSData, chosen->getProperty("nabu-gpu-addon-bytes"));
+  uint64_t physical = 0, size = 0, expected_size = 0;
+  uint32_t selected_mode = 0;
+  uint8_t expected[32] = {};
+  const bool fields = range && range->getLength() == 16 && identity && identity->getLength() == 32 &&
+      mode && mode->getLength() == 4 && length && length->getLength() == 8;
+  if (fields) {
+    physical = nabu_probe_u64(static_cast<const uint8_t *>(range->getBytesNoCopy()));
+    size = nabu_probe_u64(static_cast<const uint8_t *>(range->getBytesNoCopy()) + 8);
+    selected_mode = nabu_probe_u32(static_cast<const uint8_t *>(mode->getBytesNoCopy()));
+    expected_size = nabu_probe_u64(static_cast<const uint8_t *>(length->getBytesNoCopy()));
+    memcpy(expected, identity->getBytesNoCopy(), sizeof(expected));
+  }
+  map->release(); chosen->release();
+  if (!fields || !nabu_gpu_userprobe_external_range_valid(physical, size, gPhysBase, gPhysSize,
+      selected_mode, expected_size)) return 0;
+  const uint8_t *payload = reinterpret_cast<const uint8_t *>(ml_static_ptovirt(physical));
+  if (!payload || !nabu_gpu_userprobe_external_valid(payload, size)) return 0;
+  SHA256_CTX context; uint8_t digest[32];
+  SHA256_Init(&context); SHA256_Update(&context, payload, size); SHA256_Final(digest, &context);
+  if (memcmp(digest, expected, sizeof(digest))) return 0;
+  *data = payload; *bytes = size;
+  return 1;
+}
 static int nabu_gpu_userprobe_inline(const uint8_t **data, uint64_t *bytes)
 {
   if (!nabu_gpu_userprobe_retained) {
@@ -127,8 +167,84 @@ static int nabu_gpu_userprobe_inline(const uint8_t **data, uint64_t *bytes)
 
 '''
 RAM_GATE = '''  uint32_t nabu_probe = 0;
+  if (nabu_gpu_userprobe_external_selected()) {
+    if (!PE_parse_boot_argn("nabu-gpu-userprobe", &nabu_probe, sizeof(nabu_probe)) || nabu_probe != 1) return 0;
+    return nabu_gpu_userprobe_external(data, bytes);
+  }
   if (PE_parse_boot_argn("nabu-gpu-userprobe", &nabu_probe, sizeof(nabu_probe)) && nabu_probe == 1)
     return nabu_gpu_userprobe_inline(data, bytes);
+'''
+DATA_EXTERNAL_HELPER = r'''/* NABU_GPU_WALLPAPER_EXTERNAL_V1 */
+static void nabu_gpu_wallpaper_prepare(proc_t p, user_addr_t scratch)
+{
+    const uint8_t *payload = NULL;
+    uint64_t bytes = 0;
+    if (!native_ram_block_gpu_addon || !native_ram_block_gpu_addon(&payload, &bytes)) {
+        printf("NabuGPU: wallpaper external rejected before install\n");
+        return;
+    }
+    uint32_t files = 0;
+    memcpy(&files, payload + 8, sizeof(files));
+    if (files != 26 && files != 27 && files != 28) return;
+    native_gpu_addon_install(p, scratch);
+    if (native_gpu_addon_files != (int)files || native_gpu_addon_failed || native_gpu_addon_error) {
+        printf("NabuGPU: wallpaper install refused files=%d failed=%d error=%d\n",
+            native_gpu_addon_files, native_gpu_addon_failed, native_gpu_addon_error);
+        return;
+    }
+    static const char daemons[] = "/private/var/ngpu/daemons", daemon_point[] = "/System/Library/LaunchDaemons";
+    native_gpu_addon_mount(p, scratch, 0x600, daemons, sizeof(daemons), daemon_point, sizeof(daemon_point),
+        "/System/Library/LaunchDaemons/com.apple.backboardd.plist",
+        "/System/Library/LaunchDaemons/org.hackios.nabu-gpu-userprobe.plist",
+        &native_gpu_addon2_stage, &native_gpu_addon2_status);
+    if (native_gpu_addon2_stage != 5 || native_gpu_addon2_status) return;
+    static const char bin[] = "/private/var/ngpu/bin", bin_point[] = "/usr/bin";
+    native_gpu_addon_mount(p, scratch, 0x800, bin, sizeof(bin), bin_point, sizeof(bin_point),
+        "/usr/bin/IOMFB_FDR_Loader", "/usr/bin/nabu-gpu-userprobe",
+        &native_gpu_addon3_stage, &native_gpu_addon3_status);
+    if (native_gpu_addon3_stage != 5 || native_gpu_addon3_status) return;
+    static const char cache[] = "/private/var/ngpu/cache", cache_point[] = "/System/Library/xpc";
+    native_gpu_addon_mount(p, scratch, 0x400, cache, sizeof(cache), cache_point, sizeof(cache_point),
+        "/System/Library/xpc/foreground_user_endpoints.plist", "/System/Library/xpc/launchd.plist.sig",
+        &native_gpu_addon_stage, &native_gpu_addon_status);
+    if (native_gpu_addon_stage != 5 || native_gpu_addon_status) return;
+    static const char plugin[] = "/private/var/ngpu/addons", plugin_point[] = "/System/Library/Extensions";
+    volatile int stage = 0, status = -1;
+    native_gpu_addon_mount(p, scratch, 0xa00, plugin, sizeof(plugin), plugin_point, sizeof(plugin_point),
+        "/System/Library/Extensions/AGXMetalA10.bundle", "/System/Library/Extensions/NativeAdrenoMetal.bundle/Info.plist",
+        &stage, &status);
+    printf("NabuGPU: wallpaper plugin_stage=%d plugin_status=%d files=%u\n", stage, status, files);
+    if (stage != 5 || status) return;
+    static const char background[] = "/private/var/ngpu/wallpaper-background";
+    static const char background_point[] = "/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/"
+        "7570.iPadOS_17-810w-1080h@2x~ipad.wallpaper/7570.iPadOS_17_Background-810w-1080h@2x~ipad.ca";
+    native_gpu_addon_mount(p, scratch, 0x400, background, sizeof(background), background_point, sizeof(background_point),
+        "/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/7570.iPadOS_17-810w-1080h@2x~ipad.wallpaper/7570.iPadOS_17_Background-810w-1080h@2x~ipad.ca/index.xml",
+        "/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/7570.iPadOS_17-810w-1080h@2x~ipad.wallpaper/7570.iPadOS_17_Background-810w-1080h@2x~ipad.ca/assets/Background Light.png",
+        &stage, &status);
+    printf("NabuGPU: wallpaper background_stage=%d background_status=%d\n", stage, status);
+    if (stage != 5 || status) return;
+    static const char floating[] = "/private/var/ngpu/wallpaper-floating";
+    static const char floating_point[] = "/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/"
+        "7570.iPadOS_17-810w-1080h@2x~ipad.wallpaper/7570.iPadOS_17_Floating-810w-1080h@2x~ipad.ca";
+    native_gpu_addon_mount(p, scratch, 0x600, floating, sizeof(floating), floating_point, sizeof(floating_point),
+        "/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/7570.iPadOS_17-810w-1080h@2x~ipad.wallpaper/7570.iPadOS_17_Floating-810w-1080h@2x~ipad.ca/assetManifest.caml",
+        "/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/7570.iPadOS_17-810w-1080h@2x~ipad.wallpaper/7570.iPadOS_17_Floating-810w-1080h@2x~ipad.ca/assets/Aqua Light.png",
+        &stage, &status);
+    printf("NabuGPU: wallpaper floating_stage=%d floating_status=%d original_animation=1\n", stage, status);
+}
+
+'''
+DATA_EXTERNAL_BRANCH = '''\tuint32_t nabu_wallpaper_probe = 0;
+\textern int nabu_gpu_userprobe_external_selected(void);
+\tif (PE_parse_boot_argn("nabu-gpu-userprobe", &nabu_wallpaper_probe, sizeof(nabu_wallpaper_probe)) &&
+\t    nabu_wallpaper_probe == 1 && nabu_gpu_userprobe_external_selected()) {
+\t\textern void nabu_gpu_userprobe_exec_snapshot(uint32_t out[6]);
+\t\textern void (*nabu_log_probe_process_snapshot)(uint32_t *);
+\t\t__atomic_store_n(&nabu_log_probe_process_snapshot, nabu_gpu_userprobe_exec_snapshot, __ATOMIC_RELEASE);
+\t\tnabu_gpu_wallpaper_prepare(p, scratch);
+\t\treturn;
+\t}
 '''
 DATA_BRANCH = '''\t/* NABU_GPU_USERPROBE_JOB_V1 */
 \tuint32_t nabu_probe = 0;
@@ -226,12 +342,16 @@ def data_source(text, restore=False):
             raise ValueError('GPU userprobe Data source changed after patching')
         if text.count(PARENTS_AFTER) != 1 or PARENTS_BEFORE in text:
             raise ValueError('GPU userprobe parent creation changed after patching')
-        result = text.replace(DATA_BRANCH, '', 1).replace(PARENTS_AFTER, PARENTS_BEFORE, 1) if restore else text
+        if text.count(DATA_EXTERNAL_HELPER) != 1 or text.count(DATA_EXTERNAL_BRANCH) != 1:
+            raise ValueError('GPU wallpaper external transport changed after patching')
+        result = text.replace(DATA_BRANCH, '', 1).replace(DATA_EXTERNAL_HELPER, '', 1).replace(
+            DATA_EXTERNAL_BRANCH, '', 1).replace(PARENTS_AFTER, PARENTS_BEFORE, 1) if restore else text
         return exec_source(result, restore=restore)
     if restore:
         return text
     text = once(text, PARENTS_BEFORE, PARENTS_AFTER)
-    return exec_source(once(text, DATA_ANCHOR, DATA_ANCHOR + DATA_BRANCH))
+    full_anchor = 'static void\n' + DATA_ANCHOR
+    return exec_source(once(text, full_anchor, DATA_EXTERNAL_HELPER + full_anchor + DATA_EXTERNAL_BRANCH + DATA_BRANCH))
 
 
 def exec_trace_source(text, restore=False):

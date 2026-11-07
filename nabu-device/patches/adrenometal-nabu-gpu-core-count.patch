@@ -1,0 +1,67 @@
+diff --git a/bridge/NativeMetalObjects.rs b/bridge/NativeMetalObjects.rs
+--- a/bridge/NativeMetalObjects.rs
++++ b/bridge/NativeMetalObjects.rs
+@@ -444,12 +444,21 @@
+     })
+ }
+ 
++mod nabu_gpu_core_count {
++    include!("NabuGpuCoreCount.rs");
++}
++
+ fn device_answer(device: &NmbDevice, selector: &str, arg: u64) -> Result<u64, String> {
+     let d = &device.0;
+     let p = d.properties();
+     let none = || format!("the device has no answer for {selector}");
+     if let Some(c) = PrivateCount::ALL.into_iter().find(|c| c.selector() == selector) {
+-        return device.private().count(c).value().ok_or_else(none);
++        let reported = device.private().count(c).value();
++        return if selector == "gpuCoreCount" {
++            nabu_gpu_core_count::answer(reported, p.vendor_id, p.device_id)
++        } else {
++            reported
++        }.ok_or_else(none);
+     }
+     if let Some(f) = PrivateFlag::ALL.into_iter().find(|f| f.selector() == selector) {
+         return device.private().flag(f).value().map(u64::from).ok_or_else(none);
+diff --git a/bridge/NabuGpuCoreCount.rs b/bridge/NabuGpuCoreCount.rs
+new file mode 100644
+--- /dev/null
++++ b/bridge/NabuGpuCoreCount.rs
+@@ -0,0 +1,36 @@
++pub fn answer(reported: Option<u64>, vendor_id: u32, device_id: u32) -> Option<u64> {
++    reported.filter(|count| *count > 0).or_else(|| {
++        (vendor_id == 0x5143 && device_id == 0x06040001).then_some(2)
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::answer;
++
++    #[test]
++    fn exact_a640_identity() {
++        assert_eq!(answer(None, 0x5143, 0x06040001), Some(2));
++        assert_eq!(answer(Some(0), 0x5143, 0x06040001), Some(2));
++    }
++
++    #[test]
++    fn wrong_vendor_is_unknown() {
++        assert_eq!(answer(None, 0x13b5, 0x06040001), None);
++        assert_eq!(answer(Some(0), 0x13b5, 0x06040001), None);
++    }
++
++    #[test]
++    fn wrong_chip_is_unknown() {
++        for device_id in [0x06040000, 0x06030500, 0x07040001, 0] {
++            assert_eq!(answer(None, 0x5143, device_id), None);
++        }
++    }
++
++    #[test]
++    fn reported_answer_has_priority() {
++        assert_eq!(answer(Some(7), 0x5143, 0x06040001), Some(7));
++        assert_eq!(answer(Some(11), 0x13b5, 0x06040001), Some(11));
++        assert_eq!(answer(Some(13), 0x5143, 0x07040001), Some(13));
++    }
++}
