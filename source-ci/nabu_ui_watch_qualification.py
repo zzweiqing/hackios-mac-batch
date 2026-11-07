@@ -181,16 +181,22 @@ def qualify(read, candidate):
     constants = source_constants(generator)
     contract = constants['CONTRACT']
     version = contract.get('version', 1)
-    targets = ['SpringBoard', 'backboardd', 'runningboardd'] + (['profiled'] if version == 7 else [])
+    targets = ['SpringBoard', 'backboardd', 'runningboardd'] + (['profiled'] if version >= 7 else [])
+    if version >= 8:
+        targets.append('nehelper')
     require(contract.get('max_samples') == 64 and contract.get('interval_us') == 10000000 and
             contract.get('max_threads') == len(targets) and contract.get('targets') == targets,
             'UI scope or budget changed')
-    require(type(version) is int and version in (1, 2, 3, 4, 5, 6, 7),
+    require(type(version) is int and version in (1, 2, 3, 4, 5, 6, 7, 8),
             'Unknown UI observer contract version')
-    if version == 7:
-        require(contract.get('paths', [])[-1:] == ['/usr/libexec/profiled'] and
+    if version >= 7:
+        require(contract.get('paths', [])[3:4] == ['/usr/libexec/profiled'] and
                 b'"/usr/libexec/profiled"' in constants['EXEC_HELPER'].encode(),
                 'UI v7 requires the real profiled executable path')
+    if version >= 8:
+        require(contract.get('paths', [])[4:] == ['/usr/libexec/nehelper'] and
+                b'"/usr/libexec/nehelper"' in constants['EXEC_HELPER'].encode(),
+                'UI v8 requires the real nehelper executable path')
     if version >= 2:
         require(contract.get('target_association') == 'activation-call-output' and
                 contract.get('max_exec_contexts') == 0 and

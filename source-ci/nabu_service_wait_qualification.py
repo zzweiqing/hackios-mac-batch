@@ -38,22 +38,23 @@ def qualify(read, candidate):
                 constants[name] = ast.literal_eval(node.value)
     require(set(constants) == {'CONTRACT', 'HELPER'}, 'Missing service observer constants')
     contract = constants['CONTRACT']
-    require(contract.get('version') == 2 and contract.get('symbols') == list(SYMBOLS) and
+    require(contract.get('version') == 3 and contract.get('symbols') == list(SYMBOLS) and
             contract.get('targets') == ['SpringBoard', 'backboardd', 'runningboardd', 'lsd'] and
             contract.get('detail_trigger') == 'nabu-service-wait=2' and
-            contract.get('detail_targets') == ['SpringBoard', 'backboardd', 'runningboardd', 'lsd', 'peer'] and
+            contract.get('detail_targets') == ['SpringBoard', 'backboardd', 'runningboardd', 'lsd', 'peer', 'nehelper'] and
             contract.get('fallback_peer_name') == 'profiled' and
             contract.get('stack_thread_filter') == 'blocked except workqueue return (trap 368, hint 15)' and
             contract.get('named_peer_detail') is True and
             contract.get('peer_identity') == 'pid and proc_uniqueid, checked under proc_lock' and
-            contract.get('stack_signature') == 'proc_uniqueid, tid, pc, lr, trap, receive_name' and
+            contract.get('stack_signature') == 'proc_uniqueid, tid, pc, lr, trap, receive_name, sp, fp, options, send_name' and
+            contract.get('reply_copyout_pid') == 'historical PID only; current lookup does not prove historical process identity' and
             contract.get('stack_read_attempts_per_signature') == 2 and
             contract.get('max_passes') == 16 and contract.get('interval_seconds') == 10 and
             contract.get('max_threads_scanned') == 128 and contract.get('max_rows_per_process') == 32 and
             contract.get('first_thread_always_sampled') is True and
-            contract.get('priority_stack_rows') == 'first lsd row and first peer row before remaining UI threads' and
-            contract.get('max_processes_per_pass') == 5 and contract.get('new_worker') is True and
-            contract.get('max_frames') == 12 and contract.get('max_stack_walks_per_pass') == 48 and
+            contract.get('priority_stack_rows') == 'first row of every target before remaining threads, nehelper and peer first' and
+            contract.get('max_processes_per_pass') == 6 and contract.get('new_worker') is True and
+            contract.get('max_frames') == 24 and contract.get('max_stack_walks_per_pass') == 48 and
             contract.get('publication_bytes') == 131072 and contract.get('maximum_line_bytes') == 255 and
             contract.get('worker_may_block') is True and
             str(contract.get('user_memory_read', '')).startswith('detail only:') and
@@ -79,7 +80,8 @@ def qualify(read, candidate):
     require(b'    nabu_service_wait_snapshot();' in exec_source and SYMBOLS[1].encode() in exec_object,
             'Actual writer callback lacks the service snapshot hook')
     require(b'NabuService: row' in candidate and b'NabuService: pulse' in candidate and
-            b'NabuService: port' in candidate and b'NabuService: frames' in candidate,
+            b'NabuService: port' in candidate and b'NabuService: frames' in candidate and
+            b'NabuService: copyout' in candidate,
             'Final kernel lacks the service record formats')
     return dict(compiled=True, contract=contract, source_sha256=sha(source), generator_sha256=sha(generator),
                 embedded_source_identity=identity, object_sha256=sha(obj),

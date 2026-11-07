@@ -3,11 +3,11 @@ import hashlib
 from pathlib import Path
 
 CONTRACT = {
-    'version': 2,
+    'version': 3,
     'trigger': 'nabu-service-wait=1 or 2 after successful lsd csstore mmap with nabu-ls-mmap=1',
     'targets': ['SpringBoard', 'backboardd', 'runningboardd', 'lsd'],
     'detail_trigger': 'nabu-service-wait=2',
-    'detail_targets': ['SpringBoard', 'backboardd', 'runningboardd', 'lsd', 'peer'],
+    'detail_targets': ['SpringBoard', 'backboardd', 'runningboardd', 'lsd', 'peer', 'nehelper'],
     'fallback_peer_name': 'profiled',
     'stack_thread_filter': 'blocked except workqueue return (trap 368, hint 15)',
     'named_peer_detail': True,
@@ -18,14 +18,15 @@ CONTRACT = {
     'max_threads_scanned': 128,
     'max_rows_per_process': 32,
     'first_thread_always_sampled': True,
-    'priority_stack_rows': 'first lsd row and first peer row before remaining UI threads',
-    'max_processes_per_pass': 5,
+    'priority_stack_rows': 'first row of every target before remaining threads, nehelper and peer first',
+    'max_processes_per_pass': 6,
     'process_selection': 'first matching referenced task per name, or the selected peer pid and uniqueid, per pass',
     'new_worker': True,
     'user_memory_read': 'detail only: frame records of blocked startup callers and peer, once per wait signature and at the final pass',
-    'stack_signature': 'proc_uniqueid, tid, pc, lr, trap, receive_name',
+    'stack_signature': 'proc_uniqueid, tid, pc, lr, trap, receive_name, sp, fp, options, send_name',
+    'reply_copyout_pid': 'historical PID only; current lookup does not prove historical process identity',
     'stack_read_attempts_per_signature': 2,
-    'max_frames': 12,
+    'max_frames': 24,
     'max_stack_walks_per_pass': 48,
     'changes_syscall_result': False,
     'ipc_lookup_outside_task_and_scheduler_locks': True,
@@ -35,10 +36,10 @@ CONTRACT = {
     'symbols': ['_nabu_service_wait_start', '_nabu_service_wait_snapshot'],
 }
 
-MARKER = '\n#define NABU_SERVICE_WAIT_VERSION 2\n'
+MARKER = '\n#define NABU_SERVICE_WAIT_VERSION 3\n'
 ANY_MARKER = '\n#define NABU_SERVICE_WAIT_VERSION '
 HELPER = r'''
-#define NABU_SERVICE_WAIT_VERSION 2
+#define NABU_SERVICE_WAIT_VERSION 3
 #include <arm/thread.h>
 #include <arm64/proc_reg.h>
 #include <ipc/ipc_space.h>
@@ -70,8 +71,8 @@ const char nabu_service_wait_identity[] __attribute__((used)) =
     "NABUSERVICE_SOURCE_SHA256=__NABU_SERVICE_SOURCE_ID__";
 
 enum { NABU_SERVICE_PASSES = 16, NABU_SERVICE_SCAN = 128, NABU_SERVICE_ROWS = 32,
-       NABU_SERVICE_TEXT = 131072, NABU_SERVICE_TARGETS = 5, NABU_SERVICE_LSD = 3,
-       NABU_SERVICE_PEER = 4, NABU_SERVICE_FRAMES = 12, NABU_SERVICE_WALKS = 48,
+       NABU_SERVICE_TEXT = 131072, NABU_SERVICE_TARGETS = 6, NABU_SERVICE_LSD = 3,
+       NABU_SERVICE_PEER = 4, NABU_SERVICE_NEHELPER = 5, NABU_SERVICE_FRAMES = 24, NABU_SERVICE_WALKS = 48,
        NABU_SERVICE_WALKED = 256 };
 /* A frame-pointer chain longer than this from the saved SP is not a thread stack. */
 #define NABU_SERVICE_STACK_SPAN (16ULL << 20)
@@ -95,8 +96,10 @@ struct nabu_service_detail {
     uintptr_t holder_task;
     unsigned port_status, port_kr, special, link, dest_active, dest_kotype, dest_match;
     unsigned ts_status, ts_flags, frame_count, stack_status, holder_match;
-    int dest, holder_pid;
-    char dest_name[17];
+    int dest, holder_pid, historical_pid;
+    uint64_t current_uniqueid;
+    unsigned current_lookup;
+    char dest_name[17], current_name[17];
 };
 struct nabu_service_task {
     uint64_t uniqueid, sampled_us;
@@ -119,7 +122,7 @@ static unsigned nabu_service_published_bytes, nabu_service_generation;
 static unsigned nabu_service_reader_busy, nabu_service_emitted_generation;
 static unsigned nabu_service_detail_mode, nabu_service_walks, nabu_service_walked_count;
 struct nabu_service_walk_key {
-    uint64_t uniqueid, tid, pc, lr, trap, receive_name;
+    uint64_t uniqueid, tid, pc, lr, trap, receive_name, sp, fp, options, send_name;
     unsigned attempts, finished;
 };
 static struct nabu_service_walk_key nabu_service_walked[NABU_SERVICE_WALKED];
@@ -132,7 +135,7 @@ static uint64_t nabu_service_wait_tids[NABU_SERVICE_ROWS];
 static uint32_t nabu_service_wait_names[NABU_SERVICE_ROWS];
 static unsigned nabu_service_wait_counts[NABU_SERVICE_ROWS], nabu_service_wait_rows;
 static const char *const nabu_service_names[] = {
-    "SpringBoard", "backboardd", "runningboardd", "lsd", "peer"
+    "SpringBoard", "backboardd", "runningboardd", "lsd", "peer", "nehelper"
 };
 
 static uint64_t
@@ -147,8 +150,9 @@ static int
 nabu_service_named(const char *name)
 {
     if (!name) return -1;
-    for (unsigned index = 0; index < NABU_SERVICE_PEER; ++index)
-        if (!strcmp(name, nabu_service_names[index])) return (int)index;
+    for (unsigned index = 0; index < NABU_SERVICE_TARGETS; ++index)
+        if (index != NABU_SERVICE_PEER && (index < NABU_SERVICE_PEER || nabu_service_detail_mode) &&
+            !strcmp(name, nabu_service_names[index])) return (int)index;
     return -1;
 }
 
@@ -392,10 +396,15 @@ nabu_service_port(unsigned target, const struct nabu_service_row *row, struct na
             ts = filt_ipc_kqueue_turnstile(port->ip_sync_inheritor_knote);
         } else if (detail->link == PORT_SYNC_LINK_WORKLOOP_STASH) {
             ts = port->ip_sync_inheritor_ts;
+        } else if (detail->link == PORT_SYNC_LINK_NO_LINKAGE) {
+            detail->historical_pid = ipc_special_reply_get_pid_locked(port);
         }
         if (ts != TURNSTILE_NULL) nabu_service_turnstile(ts, detail);
     }
     ip_mq_unlock(port);
+    if (detail->historical_pid > 0)
+        detail->current_lookup = nabu_service_proc_name(detail->historical_pid, 0,
+            &detail->current_uniqueid, detail->current_name);
     if (detail->holder_pid > 0 && detail->holder_task) {
         char holder_name[17] = {0};
         detail->holder_match = nabu_service_proc_name(detail->holder_pid, detail->holder_task,
@@ -415,7 +424,7 @@ nabu_service_port(unsigned target, const struct nabu_service_row *row, struct na
 }
 
 static struct nabu_service_walk_key *
-nabu_service_walk_key(unsigned target, const struct nabu_service_row *row)
+nabu_service_walk_key(unsigned target, const struct nabu_service_row *row, const struct nabu_service_detail *detail)
 {
     const uint64_t uniqueid = nabu_service_tasks[target].uniqueid;
     const uint64_t receive_name = row->trap == (uint64_t)-47 ? row->registers[5] >> 32 : 0;
@@ -423,11 +432,16 @@ nabu_service_walk_key(unsigned target, const struct nabu_service_row *row)
         if (nabu_service_walked[index].uniqueid == uniqueid && nabu_service_walked[index].tid == row->tid &&
             nabu_service_walked[index].pc == row->pc && nabu_service_walked[index].lr == row->lr &&
             nabu_service_walked[index].trap == row->trap &&
-            nabu_service_walked[index].receive_name == receive_name) return &nabu_service_walked[index];
+            nabu_service_walked[index].receive_name == receive_name &&
+            nabu_service_walked[index].sp == detail->sp && nabu_service_walked[index].fp == detail->fp &&
+            nabu_service_walked[index].options == row->registers[1] &&
+            nabu_service_walked[index].send_name == row->registers[3]) return &nabu_service_walked[index];
     if (nabu_service_walked_count >= NABU_SERVICE_WALKED) return NULL;
     struct nabu_service_walk_key *key = &nabu_service_walked[nabu_service_walked_count++];
     key->uniqueid = uniqueid; key->tid = row->tid; key->pc = row->pc; key->lr = row->lr;
     key->trap = row->trap; key->receive_name = receive_name;
+    key->sp = detail->sp; key->fp = detail->fp;
+    key->options = row->registers[1]; key->send_name = row->registers[3];
     return key;
 }
 
@@ -441,7 +455,7 @@ nabu_service_stack(unsigned target, const struct nabu_service_row *row, struct n
         detail->stack_status = 8;
         return;
     }
-    struct nabu_service_walk_key *key = nabu_service_walk_key(target, row);
+    struct nabu_service_walk_key *key = nabu_service_walk_key(target, row, detail);
     if (!final_pass && key == NULL) {
         detail->stack_status = 8;
         return;
@@ -581,7 +595,7 @@ nabu_service_format(const char *format, ...)
     const int bytes = vsnprintf(line, sizeof(line), format, arguments);
     va_end(arguments);
     if (bytes <= 0 || (unsigned)bytes >= sizeof(line) ||
-        (unsigned)bytes > NABU_SERVICE_TEXT - nabu_service_draft_bytes) {
+        (unsigned)bytes > NABU_SERVICE_TEXT - sizeof(line) - nabu_service_draft_bytes) {
         ++nabu_service_dropped_lines;
         return;
     }
@@ -606,6 +620,11 @@ nabu_service_publish_detail(unsigned pass, unsigned target, unsigned index)
                 pass, nabu_service_names[target], record->pid, (unsigned long long)row->tid, detail->dest,
                 detail->dest_active, detail->dest_kotype, detail->dest_match,
                 (unsigned long long)detail->dest_uniqueid, detail->dest_name);
+        if (detail->port_status == 1 && detail->link == PORT_SYNC_LINK_NO_LINKAGE)
+            nabu_service_format("NabuService: copyout pass=%u proc=%s pid=%d tid=%llu historical_pid=%d current_lookup=%u current_uniq=%llu current_name=%s\n",
+                pass, nabu_service_names[target], record->pid, (unsigned long long)row->tid,
+                detail->historical_pid, detail->current_lookup, (unsigned long long)detail->current_uniqueid,
+                detail->current_name);
     }
     /* 0: not blocked in user space; 1: this wait signature needs no further walk. */
     if (detail->stack_status <= 1) return;
@@ -634,8 +653,8 @@ nabu_service_publish(unsigned resolved)
     const unsigned targets = nabu_service_detail_mode ? NABU_SERVICE_TARGETS : NABU_SERVICE_PEER;
     nabu_service_draft_bytes = 0;
     nabu_service_dropped_lines = 0;
-    nabu_service_format("NabuService: begin pass=%u resolved=%u abs_us=%llu\n", pass, resolved,
-        (unsigned long long)nabu_service_now());
+    nabu_service_format("NabuService: begin pass=%u resolved=%u abs_us=%llu version=%u\n", pass, resolved,
+        (unsigned long long)nabu_service_now(), NABU_SERVICE_WAIT_VERSION);
     if (nabu_service_detail_mode)
         nabu_service_format("NabuService: peerpick pass=%u pid=%d count=%u source=%u name=%s walks=%u walked=%u uniq=%llu\n",
             pass, __atomic_load_n(&nabu_service_peer_pid, __ATOMIC_RELAXED), nabu_service_peer_count,
@@ -683,9 +702,14 @@ nabu_service_publish(unsigned resolved)
             if (detailed && resolved) nabu_service_publish_detail(pass, target, index);
         }
     }
-    nabu_service_format("NabuService: end pass=%u resolved=%u seen_mask=%x dropped_lines=%u abs_us=%llu\n",
+    char end[256];
+    const int end_bytes = snprintf(end, sizeof(end), "NabuService: end pass=%u resolved=%u seen_mask=%x dropped_lines=%u abs_us=%llu\n",
         pass, resolved, nabu_service_seen_mask, nabu_service_dropped_lines,
         (unsigned long long)nabu_service_now());
+    if (end_bytes > 0 && (unsigned)end_bytes < sizeof(end)) {
+        memcpy(nabu_service_draft + nabu_service_draft_bytes, end, (unsigned)end_bytes);
+        nabu_service_draft_bytes += (unsigned)end_bytes;
+    }
     if (!__atomic_exchange_n(&nabu_service_publish_gate, 1, __ATOMIC_ACQUIRE)) {
         memcpy(nabu_service_published, nabu_service_draft, nabu_service_draft_bytes);
         nabu_service_published_bytes = nabu_service_draft_bytes;
@@ -734,20 +758,19 @@ nabu_service_worker(void *unused, wait_result_t result)
             nabu_service_resolve(target);
         }
         if (nabu_service_detail_mode) {
-            /* Keep both ends' first threads visible even when the UI fills the
-             * shared walk budget. Other rows retain rotation and omission counts. */
-            for (unsigned target = NABU_SERVICE_LSD; target <= NABU_SERVICE_PEER; ++target) {
+            /* Keep each first thread visible within the shared walk budget. */
+            const unsigned priority[] = { NABU_SERVICE_NEHELPER, NABU_SERVICE_PEER, NABU_SERVICE_LSD, 0, 1, 2 };
+            for (unsigned slot = 0; slot < NABU_SERVICE_TARGETS; ++slot) {
+                const unsigned target = priority[slot];
                 const struct nabu_service_task *record = &nabu_service_tasks[target];
                 if (!record->rows || record->vm_status == 0) continue;
                 const struct nabu_service_row *row = &record->records[0];
                 if (row->sampled == 0 && !(row->trap == 368 && row->hint == 15))
                     nabu_service_stack(target, row, &nabu_service_details[target][0], pass == NABU_SERVICE_PASSES);
             }
-            /* Give the lsd call path first use of the bounded stack budget. */
-            __atomic_store_n(&nabu_service_phase, 20 + NABU_SERVICE_LSD, __ATOMIC_RELAXED);
-            nabu_service_resolve_detail(NABU_SERVICE_LSD, pass == NABU_SERVICE_PASSES);
-            for (unsigned target = 0; target < NABU_SERVICE_TARGETS; ++target) {
-                if (target == NABU_SERVICE_LSD || nabu_service_tasks[target].vm_status == 0) continue;
+            for (unsigned slot = 0; slot < NABU_SERVICE_TARGETS; ++slot) {
+                const unsigned target = priority[slot];
+                if (nabu_service_tasks[target].vm_status == 0) continue;
                 __atomic_store_n(&nabu_service_phase, 20 + target, __ATOMIC_RELAXED);
                 nabu_service_resolve_detail(target, pass == NABU_SERVICE_PASSES);
             }
