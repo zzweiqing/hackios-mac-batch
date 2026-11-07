@@ -38,14 +38,22 @@ def qualify(read, candidate):
                 constants[name] = ast.literal_eval(node.value)
     require(set(constants) == {'CONTRACT', 'HELPER'}, 'Missing service observer constants')
     contract = constants['CONTRACT']
-    require(contract.get('version') == 1 and contract.get('symbols') == list(SYMBOLS) and
+    require(contract.get('version') == 2 and contract.get('symbols') == list(SYMBOLS) and
             contract.get('targets') == ['SpringBoard', 'backboardd', 'runningboardd', 'lsd'] and
+            contract.get('detail_trigger') == 'nabu-service-wait=2' and
+            contract.get('detail_targets') == ['lsd', 'peer'] and
+            contract.get('named_peer_detail') is True and
+            contract.get('peer_identity') == 'pid and proc_uniqueid, checked under proc_lock' and
+            contract.get('stack_signature') == 'proc_uniqueid, tid, pc, lr, trap, receive_name' and
+            contract.get('stack_read_attempts_per_signature') == 2 and
             contract.get('max_passes') == 16 and contract.get('interval_seconds') == 10 and
             contract.get('max_threads_scanned') == 128 and contract.get('max_rows_per_process') == 32 and
-            contract.get('max_processes_per_pass') == 4 and contract.get('new_worker') is True and
+            contract.get('max_processes_per_pass') == 5 and contract.get('new_worker') is True and
+            contract.get('max_frames') == 12 and contract.get('max_stack_walks_per_pass') == 48 and
             contract.get('publication_bytes') == 131072 and contract.get('maximum_line_bytes') == 255 and
             contract.get('worker_may_block') is True and
-            contract.get('user_memory_read') is False and contract.get('changes_syscall_result') is False,
+            str(contract.get('user_memory_read', '')).startswith('detail only:') and
+            contract.get('changes_syscall_result') is False,
             'Unexpected service observer contract')
     identity = sha(generator.replace(b'\r\n', b'\n'))
     helper = constants['HELPER'].replace('__NABU_SERVICE_SOURCE_ID__', identity).encode()
@@ -66,7 +74,8 @@ def qualify(read, candidate):
     exec_object = read('outputs/tree/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/kern_exec.o')
     require(b'    nabu_service_wait_snapshot();' in exec_source and SYMBOLS[1].encode() in exec_object,
             'Actual writer callback lacks the service snapshot hook')
-    require(b'NabuService: row' in candidate and b'NabuService: pulse' in candidate,
+    require(b'NabuService: row' in candidate and b'NabuService: pulse' in candidate and
+            b'NabuService: port' in candidate and b'NabuService: frames' in candidate,
             'Final kernel lacks the service record formats')
     return dict(compiled=True, contract=contract, source_sha256=sha(source), generator_sha256=sha(generator),
                 embedded_source_identity=identity, object_sha256=sha(obj),
