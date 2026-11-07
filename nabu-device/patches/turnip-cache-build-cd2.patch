@@ -1,0 +1,39 @@
+--- a/scripts/build-turnip-darwin.py
++++ b/scripts/build-turnip-darwin.py
+@@ -43,7 +43,7 @@
+ options = ['-Dgallium-drivers=', '-Dvulkan-drivers=freedreno', '-Dfreedreno-kmds=darwin',
+            '-Dtu-darwin-abi-dir=' + str(args.abi_directory.resolve()), '-Dplatforms=macos', '-Dglx=disabled',
+            '-Degl=disabled', '-Dgbm=disabled', '-Dopengl=false', '-Dgles1=disabled', '-Dgles2=disabled',
+-           '-Dllvm=disabled', '-Dshared-glapi=disabled', '-Dxmlconfig=disabled', '-Dshader-cache=disabled',
++           '-Dllvm=disabled', '-Dshared-glapi=disabled', '-Dxmlconfig=disabled', '-Dshader-cache=enabled',
+            '-Dtools=', '-Dbuild-tests=false', '-Dvideo-codecs=', '-Dvulkan-layers=']
+ setup = [ROOT / '.cache/mesa-venv/bin/meson', 'setup', OUT, SOURCE, '--wrap-mode=nodownload']
+ if args.target == 'ios':
+@@ -88,6 +88,16 @@
+     source_id = hashlib.sha256(json.dumps(profile, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+ elif args.builtin_pack:
+     sys.exit('UNIXNU_RECORD_HASHES=0 builds runtime builtin shaders; omit --builtin-pack')
++# Pipeline cache identity names actual compiler source, independent of library mtime.
++cache_diff = subprocess.check_output(['git', '-C', SOURCE, 'diff', 'HEAD', '--binary'])
++cache_untracked = subprocess.check_output(
++    ['git', '-C', SOURCE, 'ls-files', '--others', '--exclude-standard', '-z']).split(b'\0')
++cache_extras = {name.decode(): hashlib.sha256((SOURCE / name.decode()).read_bytes()).hexdigest()
++                for name in cache_untracked if name and (SOURCE / name.decode()).is_file()}
++cache_source = dict(mesa_revision=pins['mesa']['commit'],
++                    source_diff_sha256=hashlib.sha256(cache_diff).hexdigest(),
++                    extra_sources=cache_extras)
++cache_build_id = hashlib.sha256(json.dumps(cache_source, sort_keys=True).encode()).hexdigest()[:40]
+ OUT.mkdir(parents=True, exist_ok=True)
+ pack_header = ''
+ pack_sha = None
+@@ -100,8 +110,9 @@
+                       ''.join(','.join('0x%02x' % b for b in pack[i:i+16]) + ',\n' for i in range(0,len(pack),16)) + '};\n')
+     pack_header = str(header)
+     pack_sha = hashlib.sha256(pack).hexdigest()
+-(OUT / 'builtin-build-profile.json').write_text(json.dumps(dict(source_id=source_id, profile=profile,
++(OUT / 'builtin-build-profile.json').write_text(json.dumps(dict(source_id=source_id, profile=profile, pipeline_cache_build_id=cache_build_id,
+     embedded_pack_sha256=pack_sha, builtin_pack_required=bool(args.builtin_pack)), indent=2) + '\n')
++options += ['-Dtu-build-id=' + cache_build_id]
+ options += ['-Dtu-builtin-source-id=' + source_id, '-Dtu-builtin-pack-header=' + pack_header]
+ log = LOGS / ('mesa-tu-%s-configure.log' % args.target)
+ with log.open('w') as stream:

@@ -1,0 +1,53 @@
+--- a/NativeBridgeMetalFrontend.mm
++++ b/NativeBridgeMetalFrontend.mm
+@@ -26,6 +26,7 @@
+ #include <execinfo.h>
+ #include <mach/mach.h>
+ #include "bridge/NativeMetalObjects.h"
++#include "NabuPrivateShaderCache.h"
+ #include "NativeBridgeMetalFrontend.h"
+ 
+ extern "C" void sys_dcache_flush(void *start, size_t length);
+@@ -1810,7 +1811,10 @@
+ extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint64_t registryID,void (*missing)(const char *,const char *)) {
+  if(gDeviceObject)return gDeviceObject;
+  gMissing=missing;gInFlight=[NSMutableSet set];
+- gDevice=nmb_device_open(loader,cache);
++ {
++  nabu_shader_cache::Environment cacheEnvironment(cache);
++  gDevice=nmb_device_open(loader,cache);
++ }
+  if(!gDevice){NBLOG(@"native-metal: device refused: %s",nmb_last_error());return nil;}
+  gDeviceHostCoherent=nmb_device_host_coherent(gDevice);
+  if(cache){gJournalPath=std::string(cache)+"/pipelines.log";gJournalBegan=nowUs();}
+--- a/NativeTurnipSmoke.h
++++ b/NativeTurnipSmoke.h
+@@ -14,6 +14,7 @@
+ #define VK_NO_PROTOTYPES 1
+ #include <vulkan/vulkan_core.h>
+ #include "NativeAdrenoMetalConfig.h"
++#include "NabuPrivateShaderCache.h"
+ #include "NativeTurnipShaders.h"   // generated: scripts/gen-turnip-smoke-shaders.py
+ #include <dlfcn.h>
+ #include <mach/mach.h>
+@@ -430,10 +431,9 @@
+         return out;
+     };
+     // The Darwin backend reaches the driver the same way the plugin does: the AGX accelerator service with open type 0x4147, ABI methods through
+-    // an admitted selector. Nothing to configure; set here only so the choice is visible. The shader disk cache is off: this runs inside a
+-    // system process whose home directory is not ours to fill.
++    // an admitted selector. The owner probe caches only under its existing private Data addon root.
+     setenv("TU_DARWIN_SERVICE", "IOAcceleratorES", 0);
+-    setenv("MESA_SHADER_CACHE_DISABLE", "true", 0);
++    nabu_shader_cache::Environment cacheEnvironment("/private/var/ngpu");
+     // The board selects Turnip's submission options for its command processor.
+     if (NATIVE_ADRENO_TURNIP_SMOKE_DEBUG[0]) {
+         setenv("TU_DEBUG", NATIVE_ADRENO_TURNIP_SMOKE_DEBUG, 0);
+@@ -503,6 +503,7 @@
+     Device d;
+     r = vkCreateDevice(physical, &dci, nullptr, &d.device);
+     if (r != VK_SUCCESS) return fail(5, r);
++    cacheEnvironment.finish();
+     mark(0x6005);
+ #define TURNIP_RESOLVE(name) d.name = reinterpret_cast<PFN_##name>(vkGetDeviceProcAddr(d.device, #name)); if (!d.name) return fail(5, -8);
+     TURNIP_DEVICE_FNS(TURNIP_RESOLVE)
