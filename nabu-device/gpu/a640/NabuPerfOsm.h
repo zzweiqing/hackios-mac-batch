@@ -67,6 +67,8 @@ public:
             domain.enable = domain.regs[0] & 1;
             uint32_t previous = 0;
             domain.lutValid = 1;
+            domain.initialIndex = -1;
+            domain.stepIndex = -1;
             for (unsigned i = 0; i < 40; ++i) {
                 const uint32_t word = domain.regs[kLutWord + i * kLutStride];
                 const uint32_t freq = (word >> 30) ? 19200u * (word & 0xff) : 300000u;
@@ -83,6 +85,7 @@ public:
             snprintf(line_ + used, sizeof(line_) - used, "\n");
             emit();
             const uint32_t state = domain.regs[kPerfStateWord];
+            domain.initialIndex = int32_t(state);
             const uint32_t khz = domain.lutValid && state < domain.lutCount ? domain.lut[state] : 0;
             const int vote = d ? int(domain.regs[kCurrentVoteWord] & 0x3ff) : -1;
             snprintf(line_, sizeof(line_),
@@ -117,6 +120,52 @@ public:
         }
     }
 
+    /* Apply one schedule step's CPU/L3 targets. MHz==0 restores the domain's
+     * initial index when a previous step changed it, else does nothing. Step
+     * lines bypass the periodic line budget. */
+    void retarget(const uint32_t cpuMHz[3], uint32_t l3MHz, unsigned stepNumber)
+    {
+        if (!active_ || !io_) return;
+        for (unsigned d = 0; d < 4; ++d) {
+            const uint32_t target = d ? cpuMHz[d - 1] : l3MHz;
+            Domain &domain = domains_[d];
+            if (!domain.regs) continue;
+            if (!target) {
+                if (domain.stepIndex < 0) continue;      /* nothing to restore */
+                applyIndex(d, domain, domain.initialIndex, "step", stepNumber);
+                domain.stepIndex = -1;                  /* stop re-asserting */
+                continue;
+            }
+            if (!domain.lutValid || !domain.enable) {
+                snprintf(line_, sizeof(line_),
+                         "NabuPerf: osm dom=%s phase=step n=%u refuse reason=%s\n",
+                         nabu_perf_osm_detail::kNames[d], stepNumber,
+                         domain.lutValid ? "enable" : "lut");
+                emitStep();
+                continue;
+            }
+            const uint64_t targetKHz = uint64_t(target) * 1000;
+            unsigned index = domain.lutCount - 1;
+            for (unsigned i = 0; i < domain.lutCount; ++i) {
+                if (uint64_t(domain.lut[i]) >= targetKHz) { index = i; break; }
+            }
+            applyIndex(d, domain, int32_t(index), "step", stepNumber);
+            domain.stepIndex = int32_t(index);
+        }
+    }
+
+    /* Schedule finished: restore every domain a step changed to its initial index. */
+    void restoreAll(unsigned stepNumber)
+    {
+        if (!active_ || !io_) return;
+        for (unsigned d = 0; d < 4; ++d) {
+            Domain &domain = domains_[d];
+            if (!domain.regs || domain.stepIndex < 0) continue;
+            applyIndex(d, domain, domain.initialIndex, "restore", stepNumber);
+            domain.stepIndex = -1;
+        }
+    }
+
     void tick(uint64_t nowUs)
     {
         if (!active_ || !io_) return;
@@ -124,19 +173,20 @@ public:
             lastAssertUs_ = nowUs;
             for (unsigned d = 0; d < 4; ++d) {
                 Domain &domain = domains_[d];
-                if (domain.targetIndex < 0 || !domain.regs) continue;
-                if (domain.regs[kPerfStateWord] == uint32_t(domain.targetIndex)) continue;
-                domain.regs[kPerfStateWord] = uint32_t(domain.targetIndex);
+                const int32_t want = domain.stepIndex >= 0 ? domain.stepIndex : domain.targetIndex;
+                if (want < 0 || !domain.regs) continue;
+                if (domain.regs[kPerfStateWord] == uint32_t(want)) continue;
+                domain.regs[kPerfStateWord] = uint32_t(want);
                 if (io_->barrier) io_->barrier(io_->cookie);
                 snprintf(line_, sizeof(line_), "NabuPerf: osm dom=%s phase=assert target=%d state=%u\n",
-                         nabu_perf_osm_detail::kNames[d], domain.targetIndex,
+                         nabu_perf_osm_detail::kNames[d], want,
                          domain.regs[kPerfStateWord]);
                 emit();
             }
         }
         if (!observe_) return;
         const uint64_t elapsed = nowUs > startedUs_ ? nowUs - startedUs_ : 0;
-        const uint64_t interval = elapsed < 300000000ULL ? 10000000ULL : 60000000ULL;
+        const uint64_t interval = elapsed < 900000000ULL ? 10000000ULL : 60000000ULL;
         if (nowUs < lastObserveUs_ + interval) return;
         lastObserveUs_ = nowUs;
         for (unsigned d = 0; d < 4; ++d) {
@@ -162,12 +212,14 @@ private:
         uint32_t enable;
         uint32_t targetMHz;
         int32_t targetIndex;
+        int32_t initialIndex;   /* perf_state captured at begin(), before any vote */
+        int32_t stepIndex;      /* last schedule-applied index, -1 = none */
     };
 
     static const uint32_t kRegionSize = 0x1400;
     static const uint32_t kLutWord = 0x110 / 4, kLutStride = 32 / 4;
     static const uint32_t kCurrentVoteWord = 0x704 / 4, kPerfStateWord = 0x920 / 4;
-    static const uint32_t kLineCap = 200;
+    static const uint32_t kLineCap = 600;
 
     Domain domains_[4]{};
     const NabuPerfOsmIO *io_ = nullptr;
@@ -175,12 +227,32 @@ private:
     uint64_t startedUs_ = 0, lastAssertUs_ = 0, lastObserveUs_ = 0;
     uint32_t observe_ = 0, lines_ = 0, active_ = 0;
 
+    /* Write perf_state + barrier + readback and log the step/restore line. */
+    void applyIndex(unsigned d, Domain &domain, int32_t index, const char *phase,
+                    unsigned stepNumber)
+    {
+        if (index < 0 || !domain.regs) return;
+        domain.regs[kPerfStateWord] = uint32_t(index);
+        if (io_->barrier) io_->barrier(io_->cookie);
+        const uint32_t readback = domain.regs[kPerfStateWord];
+        snprintf(line_, sizeof(line_),
+                 "NabuPerf: osm dom=%s phase=%s n=%u target=%d state=%u\n",
+                 nabu_perf_osm_detail::kNames[d], phase, stepNumber, index, readback);
+        emitStep();
+    }
+
     void emit()
     {
         if (lines_ < kLineCap && io_ && io_->log) {
             io_->log(io_->cookie, line_);
             ++lines_;
         }
+    }
+
+    /* Schedule step/restore lines are never subject to the periodic budget. */
+    void emitStep()
+    {
+        if (io_ && io_->log) io_->log(io_->cookie, line_);
     }
 };
 

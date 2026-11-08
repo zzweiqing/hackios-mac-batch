@@ -30,6 +30,7 @@ bool nabu_touch_publish(IOService *platform);
 // [0] stage reached, [1] frames read, [2] frames with fingers, [3] checksum drops,
 // [4] HID reports sent, [5] last handleReport status, [6] latch hits, [7] firmware downloads
 volatile uint32_t nabu_touch_stats[8] = {};
+volatile uint32_t nabu_synth_swipes = {};   // nabu-synth workload progress
 volatile uint64_t nabu_touch_registry_id = 0;
 }
 
@@ -695,6 +696,98 @@ bool decode(const uint8_t *d, Frame &frame, bool &wdtPattern, unsigned logBudget
   return true;
 }
 
+// ------------------------------------------------- nabu-synth workload
+// Pure motion helpers (kept side-effect free so tests can extract them).
+// Page-swipe x at moveElapsedUs into the 320 ms linear move; swipe parity picks
+// direction (even 26000->7000, odd 7000->26000). Position is a pure function of
+// elapsed time so frame jitter cannot change the swipe speed.
+int nabuSynthSwipeX(unsigned swipe, uint64_t moveElapsedUs)
+{
+  const int64_t from = (swipe & 1) ? 7000 : 26000;
+  const int64_t to = (swipe & 1) ? 26000 : 7000;
+  const uint64_t t = moveElapsedUs > 320000 ? 320000 : moveElapsedUs;
+  return int(from + (to - from) * int64_t(t) / 320000);
+}
+// Unlock-flick y at moveElapsedUs into the 240 ms move (31500 -> 14000).
+int nabuSynthFlickY(uint64_t moveElapsedUs)
+{
+  const uint64_t t = moveElapsedUs > 240000 ? 240000 : moveElapsedUs;
+  return int(31500 - (31500 - 14000) * int64_t(t) / 240000);
+}
+uint64_t nabuSynthNowNs()
+{
+  uint64_t ns = 0;
+  absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+  return ns;
+}
+void nabuSynthDown(NabuTouchHid *hid, int x, int y)
+{
+  Frame frame{};
+  frame.count = 1;
+  frame.ids[0] = 1; frame.xs[0] = x; frame.ys[0] = y;
+  hid->deliver(frame);
+}
+void nabuSynthLift(NabuTouchHid *hid)
+{
+  Frame frame{};
+  frame.count = 0;
+  hid->deliver(frame);
+}
+// Runs the synthetic swipe script for 900 s starting at kernel uptime
+// nabu-synth seconds. Never runs unless the boot-arg is set; never re-arms.
+void synthThread(void *arg, wait_result_t)
+{
+  NabuTouchHid *hid = static_cast<NabuTouchHid *>(arg);
+  if (hid) { hid->retain(); }
+  uint32_t startSec = 0;
+  PE_parse_boot_argn("nabu-synth", &startSec, sizeof(startSec));
+  if (!hid || !startSec) { if (hid) { hid->release(); } return; }
+  const uint64_t startNs = uint64_t(startSec) * 1000000000ULL;
+  uint64_t now;
+  while ((now = nabuSynthNowNs()) < startNs) { IOSleep(100); }
+  const uint64_t endNs = now + 900000000000ULL;
+  TLOG("synth begin uptime_s=%u", startSec);
+  // Two unlock flicks: down (16384,31500), linear move to (16384,14000) over
+  // 240 ms, lift, then a 3 s pause after each.
+  for (unsigned f = 0; f < 2; ++f) {
+    const uint64_t f0 = nabuSynthNowNs();
+    nabuSynthDown(hid, 16384, 31500);
+    for (;;) {
+      const uint64_t e = nabuSynthNowNs() - f0;
+      if (e >= 240000000ULL) { break; }
+      nabuSynthDown(hid, 16384, nabuSynthFlickY(e / 1000));
+      IOSleep(8);
+    }
+    nabuSynthLift(hid);
+    IOSleep(3000);
+  }
+  // Alternating page swipes at y=14000 until start+900 s; one cycle is 900 ms.
+  unsigned swipe = 0, logged = 0;
+  while (nabuSynthNowNs() < endNs) {
+    const uint64_t c0 = nabuSynthNowNs();
+    const uint64_t cycleEnd = c0 + 900000000ULL;
+    nabuSynthDown(hid, nabuSynthSwipeX(swipe, 0), 14000);
+    for (;;) {
+      const uint64_t e = nabuSynthNowNs() - c0;
+      if (e >= 320000000ULL) { break; }
+      nabuSynthDown(hid, nabuSynthSwipeX(swipe, e / 1000), 14000);
+      IOSleep(8);
+    }
+    nabuSynthLift(hid);
+    ++swipe;
+    nabu_synth_swipes = swipe;
+    if (swipe - logged >= 25) {
+      logged = swipe;
+      TLOG("synth progress swipes=%u uptime_ns=%llu", swipe,
+           (unsigned long long)nabuSynthNowNs());
+    }
+    while (nabuSynthNowNs() < cycleEnd && nabuSynthNowNs() < endNs) { IOSleep(20); }
+  }
+  nabu_synth_swipes = swipe;
+  TLOG("synth end swipes=%u uptime_ns=%llu", swipe, (unsigned long long)nabuSynthNowNs());
+  hid->release();
+}
+
 void touchThread(void *, wait_result_t)
 {
   uint32_t delay = 10;
@@ -702,6 +795,18 @@ void touchThread(void *, wait_result_t)
   IOSleep(delay * 1000);
   nabu_touch_stats[0] = 1;
   NabuTouchHid *hid = publishHid();
+  // The synthetic workload uses only the published HID device, so it starts
+  // before (and independently of) the SPI firmware/hardware init below.
+  {
+    uint32_t synthStart = 0;
+    if (hid && PE_parse_boot_argn("nabu-synth", &synthStart, sizeof(synthStart)) && synthStart) {
+      thread_t synth;
+      if (kernel_thread_start(synthThread, hid, &synth) == KERN_SUCCESS) {
+        thread_deallocate(synth);
+        TLOG("synth worker started start_s=%u", synthStart);
+      }
+    }
+  }
   Firmware fw;
   gScratch = static_cast<uint8_t *>(IOMalloc(kScratch));
   if (!hid || !gScratch || !loadFirmware(fw)) { TLOG("stopped before hardware"); return; }

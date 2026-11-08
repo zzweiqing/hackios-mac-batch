@@ -17,6 +17,7 @@
 #include "AdrenoPM4.h"
 #include "NabuPerfConfig.h"
 #include "NabuPerfOsm.h"
+#include "NabuPerfSchedule.h"
 #include "NabuPerfWindow.h"
 #include "NativeAdrenoABI.h"
 #include "NativeAdrenoSubmit.h"
@@ -129,7 +130,9 @@ void nabuPerfOsmLog(void *,const char *line)
 NabuPerfConfig nabuPerfConfig;
 const NabuPerfOsmIO nabuPerfOsmIO{nullptr,nabuPerfMap,nabuPerfBarrier,nabuPerfNowUs,nabuPerfOsmLog};
 NabuPerfOsm nabuPerfOsm;
+NabuPerfSchedule nabuPerfSchedule;
 static uint32_t nabuPerfGpuLevelEffective=1;
+static uint32_t nabuPerfStepGpu=0;   /* gpuLevel requested by the previous step */
 #if defined(NABU_GPU_METAL) && NABU_GPU_METAL
 void nabuPerfWindowTick(uint64_t current)
 {
@@ -150,14 +153,14 @@ void nabuPerfWindowTick(uint64_t current)
     nabuPerfWindowAggregate(samples,n,&stats);
     char line[384];
     snprintf(line,sizeof(line),
-        "NabuPerf: win t_us=%llu dt_us=%llu sub=%u lost=%u stalled=%u lat_avg=%u lat_p50=%u lat_p95=%u lat_max=%llu cpu_avg=%u map=%llu free=%llu alloc=%llu tlb=%llu ring=%llu retire=%llu off=%llu done=%llu pend=%u fb=%llu touch=%u gpu=%u clients=%u\n",
+        "NabuPerf: win t_us=%llu dt_us=%llu sub=%u lost=%u stalled=%u lat_avg=%u lat_p50=%u lat_p95=%u lat_max=%llu cpu_avg=%u map=%llu free=%llu alloc=%llu tlb=%llu ring=%llu retire=%llu off=%llu done=%llu pend=%u fb=%llu touch=%u gpu=%u step=%u clients=%u\n",
         (unsigned long long)current,(unsigned long long)(current-lastEmit),n,lost,stalled,
         stats.latAvg,stats.latP50,stats.latP95,(unsigned long long)stats.latMax,stats.cpuAvg,
         (unsigned long long)stats.mapUs,(unsigned long long)stats.freeUs,(unsigned long long)stats.allocUs,
         (unsigned long long)stats.tlbUs,(unsigned long long)stats.ringUs,(unsigned long long)stats.retireUs,
         (unsigned long long)nabu_scanout_offers,(unsigned long long)nabu_scanout_completed,
         nabu_scanout_pending,(unsigned long long)nabu_scanout_fallbacks,4294967295u,
-        nabuPerfGpuLevelEffective,stats.distinctClients);
+        nabuPerfGpuLevelEffective,nabuPerfSchedule.currentStep(),stats.distinctClients);
     IOLog("%s",line);
     ++lines;
     lastEmit=current;
@@ -474,6 +477,11 @@ public:
     unsigned poll();
     void wait(unsigned milliseconds);
     void dump() const;
+    /* Runtime HFI performance vote for the nabu-perf schedule. Returns the
+     * exchange result; on success the live level is published to the window
+     * line. Never fatal to the caller. */
+    IOReturn setGpuLevel(unsigned level);
+    unsigned gpuTableLevels() const { return power_.tables().performance[0]; }
 };
 
 A640State *state=nullptr;
@@ -1286,12 +1294,14 @@ IOReturn A640State::start()
     IOLog("NativeAdrenoA6xx: enabling CX clocks and parent votes\n");
     const NativeAdrenoA6xxIo io{this,read,write,delay};
     status=power_.enableCx(io,resources_.aopDoorbellOffset,resources_.aopDoorbellValue,
-        nabuPerfConfig.gpuLevel);
+        nabuPerfConfig.tableLevel);
     if(status) {
         return fail(status);
     }
+    /* Startup vote uses only the static knob (1 when none); tableLevel may be
+     * larger so schedule steps find their levels already published. */
     nabuPerfGpuLevelEffective=nabuPerfEffectiveLevel(power_.tables().performance[0],
-        nabuPerfConfig.gpuLevel);
+        nabuPerfConfig.gpuLevel?nabuPerfConfig.gpuLevel:1);
     native_adreno_a6xx_stats[0]=3;
     nabuGpuState(3,0,"starting");
     if(native_adreno_checkpoint("smmu-contexts"))return fail(kIOReturnNotReady);
@@ -1464,6 +1474,14 @@ unsigned A640State::poll()
 #endif
 }
 
+IOReturn A640State::setGpuLevel(unsigned level)
+{
+    const IOReturn result=gmu_.setPerformance(uint32_t(level));
+    if(result==kIOReturnSuccess && level>=1 && level<=6)
+        nabuPerfGpuLevelEffective=level;
+    return result;
+}
+
 void A640State::dump() const
 {
     const auto &power=failureCaptured_?failedPowerReport_:power_.report();
@@ -1518,6 +1536,71 @@ void registrationWorker(void *,wait_result_t)
     }
 }
 
+/* Render a schedule step back to its atom text for the step log line. */
+static void nabuPerfStepCfg(const NabuPerfStep &s,char *out,size_t cap)
+{
+    size_t used=snprintf(out,cap,"%s",s.baseline?"0":"");
+    bool maxed=false;
+    for(unsigned i=0;i<3;++i)if(s.cpuMHz[i]==NABU_PERF_MAX_MHZ)maxed=true;
+    if(s.l3MHz==NABU_PERF_MAX_MHZ)maxed=true;
+    if(maxed&&used+2<cap)used+=snprintf(out+used,cap-used,"%sm",used?"+":"");
+    if(s.gpuLevel&&used+16<cap)used+=snprintf(out+used,cap-used,"%sg%u",used?"+":"",s.gpuReqMHz);
+    bool cpu=false;
+    for(unsigned i=0;i<3;++i)if(s.cpuMHz[i]&&s.cpuMHz[i]!=NABU_PERF_MAX_MHZ)cpu=true;
+    if(cpu&&used+24<cap){
+        used+=snprintf(out+used,cap-used,"%sc%u:%u:%u",used?"+":"",
+            s.cpuMHz[0]==NABU_PERF_MAX_MHZ?0u:s.cpuMHz[0],
+            s.cpuMHz[1]==NABU_PERF_MAX_MHZ?0u:s.cpuMHz[1],
+            s.cpuMHz[2]==NABU_PERF_MAX_MHZ?0u:s.cpuMHz[2]);
+    }
+    if(s.l3MHz&&s.l3MHz!=NABU_PERF_MAX_MHZ&&used+16<cap)
+        snprintf(out+used,cap-used,"%sl%u",used?"+":"",s.l3MHz);
+    if(!used)snprintf(out,cap,"0");
+}
+
+/* Drive one schedule tick: OSM retarget plus an optional runtime GPU vote.
+ * Runs in the hardware worker after state->poll(); every failure is logged
+ * and never fatal, and a failed GPU vote is not retried. */
+static void nabuPerfScheduleTick(uint64_t nowUs)
+{
+    const NabuPerfScheduleAction action=nabuPerfSchedule.tick(nowUs);
+    if(!action.stepChanged&&!action.finished)return;
+    if(action.finished){
+        nabuPerfOsm.restoreAll(nabuPerfConfig.stepCount);
+        if(state)state->setGpuLevel(1);
+        nabuPerfStepGpu=0;
+        IOLog("NabuPerf: schedule finished t_us=%llu\n",(unsigned long long)nowUs);
+        return;
+    }
+    const unsigned n=action.step;
+    if(!n||n>nabuPerfConfig.stepCount)return;
+    const NabuPerfStep &s=nabuPerfConfig.steps[n-1];
+    nabuPerfOsm.retarget(s.cpuMHz,s.l3MHz,n);
+    const uint32_t levels=state?state->gpuTableLevels():0;
+    uint32_t want=0,ack=0;bool voted=false,skipped=false;
+    if(s.gpuLevel){
+        if(levels&&s.gpuLevel<levels){
+            want=s.gpuLevel;
+            ack=uint32_t(state->setGpuLevel(want));
+            voted=(ack==0);
+        }else{
+            skipped=true;
+            IOLog("NabuPerf: step n=%u gpu level %u skipped (table levels %u)\n",
+                n,s.gpuLevel,levels);
+        }
+    }
+    if(!voted&&nabuPerfStepGpu&&state){
+        want=1;
+        ack=uint32_t(state->setGpuLevel(1));
+    }
+    nabuPerfStepGpu=s.gpuLevel;
+    char cfg[96];
+    nabuPerfStepCfg(s,cfg,sizeof(cfg));
+    IOLog("NabuPerf: step n=%u/%u t_us=%llu cfg=%s gpu_idx=%u gpu_ack=%08x%s\n",
+        n,nabuPerfConfig.stepCount,(unsigned long long)nowUs,cfg,
+        want?want:1,ack,skipped?" skipped":"");
+}
+
 void hardwareWorker(void *,wait_result_t)
 {
     thread_set_thread_name(current_thread(),"adreno-a640");
@@ -1529,6 +1612,7 @@ void hardwareWorker(void *,wait_result_t)
         IOLog("NabuPerf: nabu-perf-invalid\n");
     }
     nabuPerfOsm.begin(nabuPerfConfig,nabuPerfOsmIO);
+    nabuPerfSchedule.begin(nabuPerfConfig);
     state=new A640State;
     if(!state) {
         native_adreno_a6xx_stats[1]=uint32_t(kIOReturnNoMemory);
@@ -1543,6 +1627,7 @@ void hardwareWorker(void *,wait_result_t)
         state->wait(pollDelay);
         pollDelay=state->poll();
         nabuPerfOsm.tick(vmNow());
+        nabuPerfScheduleTick(vmNow());
     }
 }
 void registrationEntry(void *argument,wait_result_t result)

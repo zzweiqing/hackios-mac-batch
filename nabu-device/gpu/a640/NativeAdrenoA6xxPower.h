@@ -53,6 +53,7 @@ struct NativeAdrenoA6xxReport {
     uint32_t gmuAoInterrupts;
     uint32_t gmuFenceStatus;
     uint32_t performanceVote;
+    uint32_t runtimeVote;   /* last setPerformance() exchange result */
 };
 
 /* NativeAdrenoA6xxTables contains the A6xx HFI v2 wire payloads (the vendor

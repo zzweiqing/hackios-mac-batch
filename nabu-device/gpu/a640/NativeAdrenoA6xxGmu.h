@@ -73,6 +73,10 @@ public:
     IOReturn acquirePerformanceCounters();
     IOReturn releasePerformanceCounters();
     IOReturn poll();
+    /* Runtime HFI performance vote {1,level,level}; requires a running GMU and
+     * a published table with enough levels. Bad arguments return without
+     * touching report state. */
+    IOReturn setPerformance(uint32_t level);
     IOReturn stop();
     bool running() const { return running_; }
     const NativeAdrenoA6xxReport &report() const { return report_; }

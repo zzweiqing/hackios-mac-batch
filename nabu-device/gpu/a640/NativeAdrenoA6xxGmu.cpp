@@ -967,6 +967,18 @@ IOReturn NativeAdrenoA6xxGmu::poll()
     return kIOReturnSuccess;
 }
 
+IOReturn NativeAdrenoA6xxGmu::setPerformance(uint32_t level)
+{
+    if (!running_ || report_.status != 0 ||
+        level < 1 || level >= config_.tables->performance[0]) {
+        return kIOReturnBadArgument;
+    }
+    const uint32_t payload[] = {1, level, level};
+    const IOReturn result = exchange(30, payload, 3);
+    report_.runtimeVote = uint32_t(result);
+    return result;
+}
+
 IOReturn NativeAdrenoA6xxGmu::stop()
 {
     if (!attempted_) {
