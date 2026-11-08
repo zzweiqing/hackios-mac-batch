@@ -100,7 +100,7 @@ extern "C" IOReturn native_adreno_accelerator_publish(IOService *provider,uint32
     service->setName("AGXAccelerator");
     if(!service->setProperty("MetalPluginName","NativeAdrenoMetal") ||
        !service->setProperty("MetalPluginClassName","NativeAdrenoMetalDevice") ||
-       !service->setProperty("NativeSandboxGrantProcess","backboardd,iconservicesagent,CollectionsPoster,Preferences,AegirPoster,PhotosPosterProvider,UnityPosterExtension,KaleidoscopePoster") ||
+       !service->setProperty("NativeSandboxGrantProcess","backboardd,iconservicesagent,CollectionsPoster,Preferences,AegirPoster,PhotosPosterProvider,UnityPosterExtension,KaleidoscopePoster,PosterBoard") ||
        !service->setProperty("NativeSandboxGrantEntitlement","com.apple.security.ts.opengl-or-metal") ||
        !service->setProperty("NativeSandboxGrantConnectType",0x4147,32) ||
        !service->setProperty("ChipId",chipId,32)) {
