@@ -8,6 +8,7 @@ PARENTS_BEFORE = '\tfor (size_t i = sizeof("/private/var/ngpu/") - 1; parent[i];
 PARENTS_AFTER = ('\t/* NABU_GPU_USERPROBE_PARENTS_V1: create ngpu before its children. */\n'
                  '\tfor (size_t i = sizeof("/private/var/") - 1; parent[i]; ++i) {\n')
 CACHE_ENTRY_COUNT = 4
+WALLPAPER_VARIANT_VERSION = 1
 EXEC_ANCHOR = 'static int\nexec_activate_image(struct image_params *imgp)\n{\n'
 EXEC_LOCAL = '\tint nabu_probe_target = 0; /* NABU_GPU_USERPROBE_EXEC_V1 */\n'
 EXEC_ENTER = '''\tnabu_probe_target = !strcmp(excpath, "/usr/bin/nabu-gpu-userprobe") ||
@@ -98,6 +99,10 @@ EXIT_HOOK = '''\t/* NABU_GPU_USERPROBE_EXIT_V1: a successful exit must also leav
 RAM_HELPER = r'''/* NABU_GPU_USERPROBE_INLINE_V1 */
 #include "NabuGpuUserprobeAddon.h"
 static OSData *nabu_gpu_userprobe_retained;
+extern "C" int nabu_gpu_userprobe_external_variant(const uint8_t *data, uint64_t bytes)
+{
+  return nabu_gpu_userprobe_external_has_variant(data, bytes);
+}
 extern "C" int nabu_gpu_userprobe_external_selected(void)
 {
   IORegistryEntry *map = IORegistryEntry::fromPath("/chosen/memory-map", gIODTPlane);
@@ -185,7 +190,10 @@ static void nabu_gpu_wallpaper_prepare(proc_t p, user_addr_t scratch)
     }
     uint32_t files = 0;
     memcpy(&files, payload + 8, sizeof(files));
-    if (files != 26 && files != 27 && files != 28) return;
+    if (files < 26 || files > 29) return;
+    extern int nabu_gpu_userprobe_external_variant(const uint8_t *, uint64_t);
+    const int variant = nabu_gpu_userprobe_external_variant(payload, bytes);
+    if (variant < 0) return;
     native_gpu_addon_install(p, scratch);
     if (native_gpu_addon_files != (int)files || native_gpu_addon_failed || native_gpu_addon_error) {
         printf("NabuGPU: wallpaper install refused files=%d failed=%d error=%d\n",
@@ -215,6 +223,17 @@ static void nabu_gpu_wallpaper_prepare(proc_t p, user_addr_t scratch)
         &stage, &status);
     printf("NabuGPU: wallpaper plugin_stage=%d plugin_status=%d files=%u\n", stage, status, files);
     if (stage != 5 || status) return;
+    if (variant) {
+        static const char variant_source[] = "/private/var/ngpu/wallpaper-variant";
+        static const char variant_point[] = "/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/"
+            "7570.iPadOS_17-810w-1080h@2x~ipad.wallpaper";
+        native_gpu_addon_mount(p, scratch, 0x400, variant_source, sizeof(variant_source), variant_point, sizeof(variant_point),
+            "/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/7570.iPadOS_17-810w-1080h@2x~ipad.wallpaper/7570.iPadOS_17_Background-810w-1080h@2x~ipad.ca/index.xml",
+            "/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/7570.iPadOS_17-810w-1080h@2x~ipad.wallpaper/Wallpaper.plist",
+            &stage, &status);
+        printf("NabuGPU: wallpaper variant_stage=%d variant_status=%d\n", stage, status);
+        if (stage != 5 || status) return;
+    }
     static const char background[] = "/private/var/ngpu/wallpaper-background";
     static const char background_point[] = "/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/"
         "7570.iPadOS_17-810w-1080h@2x~ipad.wallpaper/7570.iPadOS_17_Background-810w-1080h@2x~ipad.ca";
@@ -329,6 +348,11 @@ def once(text, old, new):
 
 def ram_source(text):
     if RAM_MARKER in text:
+        if text.count(RAM_HELPER) == 0:
+            legacy = RAM_HELPER.replace('extern "C" int nabu_gpu_userprobe_external_variant(const uint8_t *data, uint64_t bytes)\n'
+                '{\n  return nabu_gpu_userprobe_external_has_variant(data, bytes);\n}\n', '', 1)
+            if text.count(legacy) == 1:
+                text = text.replace(legacy, RAM_HELPER, 1)
         if text.count(RAM_HELPER) != 1 or text.count(RAM_GATE) != 1:
             raise ValueError('GPU userprobe RAM source changed after patching')
         return text
@@ -338,6 +362,16 @@ def ram_source(text):
 
 def data_source(text, restore=False):
     if DATA_MARKER in text:
+        if text.count(DATA_EXTERNAL_HELPER) == 0:
+            legacy = DATA_EXTERNAL_HELPER.replace('    if (files < 26 || files > 29) return;\n'
+                '    extern int nabu_gpu_userprobe_external_variant(const uint8_t *, uint64_t);\n'
+                '    const int variant = nabu_gpu_userprobe_external_variant(payload, bytes);\n'
+                '    if (variant < 0) return;\n', '    if (files != 26 && files != 27 && files != 28) return;\n', 1)
+            start = legacy.index('    if (variant) {\n')
+            end = legacy.index('    static const char background[]', start)
+            legacy = legacy[:start] + legacy[end:]
+            if text.count(legacy) == 1:
+                text = text.replace(legacy, DATA_EXTERNAL_HELPER, 1)
         if text.count(DATA_BRANCH) != 1:
             raise ValueError('GPU userprobe Data source changed after patching')
         if text.count(PARENTS_AFTER) != 1 or PARENTS_BEFORE in text:

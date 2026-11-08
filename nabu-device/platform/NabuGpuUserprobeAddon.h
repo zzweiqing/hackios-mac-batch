@@ -29,6 +29,8 @@
 #define NABU_GPU_USERPROBE_EXTERNAL_MAX 67108864u
 #define NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX 8388608u
 #define NABU_GPU_USERPROBE_WALLPAPER_CAML_MAX 1048576u
+#define NABU_GPU_USERPROBE_WALLPAPER_VARIANT_MAX 16384u
+#define NABU_GPU_USERPROBE_WALLPAPER_VARIANT_PATH "wallpaper-variant/Wallpaper.plist"
 
 static inline uint32_t nabu_probe_u32(const uint8_t *p)
 {
@@ -85,6 +87,7 @@ static const struct nabu_gpu_userprobe_kind nabu_gpu_userprobe_kinds[] = {
     {"wallpaper-floating/assets/Red Yellow Edge Patch Light.png", 0644, NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX},
     {"wallpaper-floating/assets/Yellow Dark.png", 0644, NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX},
     {"wallpaper-floating/assets/Yellow Light.png", 0644, NABU_GPU_USERPROBE_WALLPAPER_PNG_MAX},
+    {NABU_GPU_USERPROBE_WALLPAPER_VARIANT_PATH, 0644, NABU_GPU_USERPROBE_WALLPAPER_VARIANT_MAX},
 };
 #define NABU_GPU_USERPROBE_KIND_COUNT (sizeof(nabu_gpu_userprobe_kinds) / sizeof(nabu_gpu_userprobe_kinds[0]))
 /* The exact kind set of each form, bit i for nabu_gpu_userprobe_kinds[i]. */
@@ -96,6 +99,7 @@ static const struct nabu_gpu_userprobe_kind nabu_gpu_userprobe_kinds[] = {
 #define NABU_GPU_USERPROBE_SET_PACK 0x7efu
 #define NABU_GPU_USERPROBE_SET_CLIENTS_BIT 0x800u
 #define NABU_GPU_USERPROBE_SET_WALLPAPER 0x1ffff000u
+#define NABU_GPU_USERPROBE_SET_VARIANT_BIT 0x20000000u
 
 static inline int nabu_gpu_userprobe_addon_valid_form(const uint8_t *data, uint64_t bytes, int external)
 {
@@ -105,13 +109,10 @@ static inline int nabu_gpu_userprobe_addon_valid_form(const uint8_t *data, uint6
     unsigned expected;
     uint64_t limit;
     if (external) {
+        if (count < 26 || count > 29) return 0;
         limit = NABU_GPU_USERPROBE_EXTERNAL_MAX;
-        switch (count) {
-        case 26: expected = NABU_GPU_USERPROBE_SET_PUBLISH | NABU_GPU_USERPROBE_SET_WALLPAPER; break;
-        case 27: expected = NABU_GPU_USERPROBE_SET_PACK | NABU_GPU_USERPROBE_SET_WALLPAPER; break;
-        case 28: expected = NABU_GPU_USERPROBE_SET_PACK | NABU_GPU_USERPROBE_SET_CLIENTS_BIT | NABU_GPU_USERPROBE_SET_WALLPAPER; break;
-        default: return 0;
-        }
+        expected = NABU_GPU_USERPROBE_SET_PACK | NABU_GPU_USERPROBE_SET_CLIENTS_BIT |
+            NABU_GPU_USERPROBE_SET_WALLPAPER | NABU_GPU_USERPROBE_SET_VARIANT_BIT;
     } else switch (count) {
     case 2: expected = NABU_GPU_USERPROBE_SET_PROBE; limit = NABU_GPU_USERPROBE_ADDON_MAX; break;
     case 4: expected = NABU_GPU_USERPROBE_SET_CACHE; limit = NABU_GPU_USERPROBE_ADDON_MAX; break;
@@ -124,8 +125,6 @@ static inline int nabu_gpu_userprobe_addon_valid_form(const uint8_t *data, uint6
     }
     /* Ten files are either the pack form or the published form with the client list: the names decide. */
     unsigned alternative = count == 10 ? (NABU_GPU_USERPROBE_SET_PUBLISH | NABU_GPU_USERPROBE_SET_CLIENTS_BIT) : expected;
-    if (external && count == 27)
-        alternative = NABU_GPU_USERPROBE_SET_PUBLISH | NABU_GPU_USERPROBE_SET_CLIENTS_BIT | NABU_GPU_USERPROBE_SET_WALLPAPER;
     if (bytes > limit) return 0;
     uint64_t at = 24;
     unsigned seen = 0;
@@ -155,6 +154,10 @@ static inline int nabu_gpu_userprobe_addon_valid_form(const uint8_t *data, uint6
         seen |= kind;
         at += name_padded + packed_padded;
     }
+    if (external) {
+        const unsigned required = NABU_GPU_USERPROBE_SET_PUBLISH | NABU_GPU_USERPROBE_SET_WALLPAPER;
+        return (seen & required) == required && at == bytes;
+    }
     return (seen == expected || seen == alternative) && at == bytes;
 }
 
@@ -166,6 +169,23 @@ static inline int nabu_gpu_userprobe_addon_valid(const uint8_t *data, uint64_t b
 static inline int nabu_gpu_userprobe_external_valid(const uint8_t *data, uint64_t bytes)
 {
     return nabu_gpu_userprobe_addon_valid_form(data, bytes, 1);
+}
+
+/* Invalid input is distinct from a valid legacy addon without variant metadata. */
+static inline int nabu_gpu_userprobe_external_has_variant(const uint8_t *data, uint64_t bytes)
+{
+    if (!nabu_gpu_userprobe_external_valid(data, bytes)) return -1;
+    const char name[] = NABU_GPU_USERPROBE_WALLPAPER_VARIANT_PATH;
+    uint64_t at = 24;
+    for (unsigned index = 0; index < nabu_probe_u32(data + 8); ++index) {
+        const uint32_t length = nabu_probe_u32(data + at);
+        const uint64_t packed = nabu_probe_u64(data + at + 16);
+        at += 24;
+        if (length == sizeof(name) && !memcmp(data + at, name, sizeof(name))) return 1;
+        at += ((uint64_t)length + 7) & ~UINT64_C(7);
+        at += (packed + 7) & ~UINT64_C(7);
+    }
+    return 0;
 }
 
 static inline int nabu_gpu_userprobe_external_range_valid(uint64_t physical, uint64_t bytes,
