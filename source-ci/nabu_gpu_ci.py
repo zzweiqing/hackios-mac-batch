@@ -270,7 +270,7 @@ def qualify_userprobe_boot(read, candidate):
                 b'#define NABU_GPU_USERPROBE_SET_WALLPAPER 0x1ffff000u' in header,
                 'External wallpaper addon identity or closed range gate changed')
         if variant_version is not None:
-            require(variant_version == 1 and
+            require(variant_version in (1, 2) and
                     b'#define NABU_GPU_USERPROBE_WALLPAPER_VARIANT_MAX 16384u' in header and
                     b'#define NABU_GPU_USERPROBE_SET_VARIANT_BIT 0x20000000u' in header and
                     b'wallpaper-variant/Wallpaper.plist' in header and
@@ -280,6 +280,12 @@ def qualify_userprobe_boot(read, candidate):
                     constants['DATA_EXTERNAL_HELPER'].index(b'variant_point, sizeof(variant_point)') <
                     constants['DATA_EXTERNAL_HELPER'].index(b'background_point, sizeof(background_point)'),
                     'External wallpaper variant kind, presence gate or mount order changed')
+            if variant_version == 2:
+                require(b'/* NABU_GPU_WALLPAPER_VIEW_V1 */' in constants['DATA_EXTERNAL_HELPER'] and
+                        b'metadata_bytes > 16384' in constants['DATA_EXTERNAL_HELPER'] and
+                        b'native_gpu_addon_equal(mounted, metadata, metadata_bytes, 0644, ctx)' in constants['DATA_EXTERNAL_HELPER'] and
+                        b'variant_view_status=' in constants['DATA_EXTERNAL_HELPER'],
+                        'External wallpaper metadata view lacks the bounded byte comparison')
     obj = read(prefix + 'NativeRamBlock.o')
     archive = read(prefix + 'libNativeRamBlock.a')
     members = archive_members(archive)
@@ -301,6 +307,9 @@ def qualify_userprobe_boot(read, candidate):
         if variant_version is not None:
             require(b'NabuGPU: wallpaper variant_stage=' in candidate,
                     'Final kernel lacks the optional wallpaper metadata mount record')
+            if variant_version == 2:
+                require(b'NabuGPU: wallpaper variant_view_status=' in candidate,
+                        'Final kernel lacks the metadata view result')
     parents_fixed = 'PARENTS_AFTER' in constants
     if parents_fixed:
         require(data.count(constants['PARENTS_AFTER']) == 1 and constants['PARENTS_BEFORE'] not in data,
@@ -387,9 +396,12 @@ def qualify_userprobe_boot(read, candidate):
                 'external_wallpaper_addon_files': [26, 27, 28, 29] if variant_version is not None else [26, 27, 28],
                 'external_wallpaper_max': 67108864, 'external_payload_sha256_required': True,
                 'external_precedes_inline': True} if external_bound else {}),
-            **({'external_wallpaper_variant_transport': True, 'external_wallpaper_variant_version': 1,
+            **({'external_wallpaper_variant_transport': True, 'external_wallpaper_variant_version': variant_version,
                 'external_wallpaper_variant_path': 'wallpaper-variant/Wallpaper.plist',
                 'external_wallpaper_variant_max': 16384} if external_bound and variant_version is not None else {}),
+            **({'external_wallpaper_variant_view_compiled': True,
+                'external_wallpaper_variant_view_runtime_verified': False}
+               if external_bound and variant_version == 2 else {}),
             **({'exec_stage_observer': True, 'exec_stage_records_maximum': 32} if exec_trace_constants else {}),
             **({'process_observer': True, 'exit_source_sha256': sha(exit_source),
                 'process_symbols': {name: definitions[name] for name in sorted(extra_required)}} if process_bound else {}),

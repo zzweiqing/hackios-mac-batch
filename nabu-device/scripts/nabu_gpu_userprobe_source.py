@@ -8,7 +8,7 @@ PARENTS_BEFORE = '\tfor (size_t i = sizeof("/private/var/ngpu/") - 1; parent[i];
 PARENTS_AFTER = ('\t/* NABU_GPU_USERPROBE_PARENTS_V1: create ngpu before its children. */\n'
                  '\tfor (size_t i = sizeof("/private/var/") - 1; parent[i]; ++i) {\n')
 CACHE_ENTRY_COUNT = 4
-WALLPAPER_VARIANT_VERSION = 1
+WALLPAPER_VARIANT_VERSION = 2
 EXEC_ANCHOR = 'static int\nexec_activate_image(struct image_params *imgp)\n{\n'
 EXEC_LOCAL = '\tint nabu_probe_target = 0; /* NABU_GPU_USERPROBE_EXEC_V1 */\n'
 EXEC_ENTER = '''\tnabu_probe_target = !strcmp(excpath, "/usr/bin/nabu-gpu-userprobe") ||
@@ -233,6 +233,59 @@ static void nabu_gpu_wallpaper_prepare(proc_t p, user_addr_t scratch)
             &stage, &status);
         printf("NabuGPU: wallpaper variant_stage=%d variant_status=%d\n", stage, status);
         if (stage != 5 || status) return;
+        /* NABU_GPU_WALLPAPER_VIEW_V1 */
+        /* The installer has just bound this source to the validated addon.
+         * A same-name lower file also passes lookup, so compare the mounted bytes. */
+        vfs_context_t ctx = vfs_context_current();
+        vnode_t installed = NULLVP, mounted = NULLVP;
+        uint8_t *metadata = NULL;
+        uint64_t metadata_bytes = 0;
+        struct vnode_attr attributes;
+        VATTR_INIT(&attributes);
+        VATTR_WANTED(&attributes, va_data_size);
+        VATTR_WANTED(&attributes, va_mode);
+        int view_status = vnode_open("/private/var/ngpu/wallpaper-variant/Wallpaper.plist",
+            FREAD | O_NOFOLLOW, 0, 0, &installed, ctx);
+        if (view_status) goto variant_view_done;
+        if (vnode_vtype(installed) != VREG) {
+            view_status = EFTYPE;
+            goto variant_view_done;
+        }
+        view_status = vnode_getattr(installed, &attributes, ctx);
+        if (view_status) goto variant_view_done;
+        metadata_bytes = attributes.va_data_size;
+        if (!metadata_bytes || metadata_bytes > 16384 || (attributes.va_mode & 07777) != 0644) {
+            view_status = EINVAL;
+            goto variant_view_done;
+        }
+        metadata = kalloc_data(metadata_bytes, Z_WAITOK);
+        if (!metadata) {
+            view_status = ENOMEM;
+            goto variant_view_done;
+        }
+        int resid = 0;
+        view_status = vn_rdwr(UIO_READ, installed, (caddr_t)metadata, (int)metadata_bytes, 0,
+            UIO_SYSSPACE, IO_NOAUTH, vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx));
+        if (!view_status && resid) view_status = EIO;
+        if (view_status) goto variant_view_done;
+        view_status = vnode_open("/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/7570.iPadOS_17-810w-1080h@2x~ipad.wallpaper/Wallpaper.plist",
+            FREAD | O_NOFOLLOW, 0, 0, &mounted, ctx);
+        if (view_status) goto variant_view_done;
+        if (vnode_vtype(mounted) != VREG) view_status = EFTYPE;
+        else if (!native_gpu_addon_equal(mounted, metadata, metadata_bytes, 0644, ctx)) view_status = EIO;
+variant_view_done:
+        if (mounted) {
+            int close_status = vnode_close(mounted, FREAD, ctx);
+            if (!view_status) view_status = close_status;
+        }
+        if (installed) {
+            int close_status = vnode_close(installed, FREAD, ctx);
+            if (!view_status) view_status = close_status;
+        }
+        if (metadata) kfree_data(metadata, metadata_bytes);
+        printf("NabuGPU: wallpaper variant_view_status=%d variant_view_bytes=%llu\n",
+            view_status, (unsigned long long)metadata_bytes);
+        /* NABU_GPU_WALLPAPER_VIEW_END_V1 */
     }
     static const char background[] = "/private/var/ngpu/wallpaper-background";
     static const char background_point[] = "/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/"
@@ -363,6 +416,10 @@ def ram_source(text):
 def data_source(text, restore=False):
     if DATA_MARKER in text:
         if text.count(DATA_EXTERNAL_HELPER) == 0:
+            start = DATA_EXTERNAL_HELPER.index('        /* NABU_GPU_WALLPAPER_VIEW_V1 */\n')
+            end_marker = '        /* NABU_GPU_WALLPAPER_VIEW_END_V1 */\n'
+            end = DATA_EXTERNAL_HELPER.index(end_marker, start) + len(end_marker)
+            metadata_v1 = DATA_EXTERNAL_HELPER[:start] + DATA_EXTERNAL_HELPER[end:]
             legacy = DATA_EXTERNAL_HELPER.replace('    if (files < 26 || files > 29) return;\n'
                 '    extern int nabu_gpu_userprobe_external_variant(const uint8_t *, uint64_t);\n'
                 '    const int variant = nabu_gpu_userprobe_external_variant(payload, bytes);\n'
@@ -370,8 +427,10 @@ def data_source(text, restore=False):
             start = legacy.index('    if (variant) {\n')
             end = legacy.index('    static const char background[]', start)
             legacy = legacy[:start] + legacy[end:]
-            if text.count(legacy) == 1:
-                text = text.replace(legacy, DATA_EXTERNAL_HELPER, 1)
+            for prior in (metadata_v1, legacy):
+                if text.count(prior) == 1:
+                    text = text.replace(prior, DATA_EXTERNAL_HELPER, 1)
+                    break
         if text.count(DATA_BRANCH) != 1:
             raise ValueError('GPU userprobe Data source changed after patching')
         if text.count(PARENTS_AFTER) != 1 or PARENTS_BEFORE in text:
