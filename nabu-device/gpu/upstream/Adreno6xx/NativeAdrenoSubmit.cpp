@@ -2,6 +2,7 @@
 #include "NativeAdrenoSubmit.h"
 #include "NativeAdrenoScheduler.h"
 #include "AdrenoPM4.h"
+#include "NabuPerfWindow.h"
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
 
@@ -1256,4 +1257,47 @@ IOReturn NativeAdrenoSubmit::releaseAfterDmaStopped()
         }
     }
     return kIOReturnSuccess;
+}
+
+/* nabu-perf window drain: copies the contiguous completed prefix of the
+ * profile ring (oldest first) for seq > *cursor under the profile spinlock.
+ * Returns emitted | stalled << 16; *lost counts overwritten seq values. */
+extern "C" unsigned native_adreno_profile_window(uint32_t *cursor,
+    NabuPerfWindowSample *out, unsigned capacity, uint32_t *lost)
+{
+    if (capacity > NabuPerfWindowCapacity) capacity = NabuPerfWindowCapacity;
+    if (!cursor || !out || !lost) return 0;
+    const uint64_t now = profileNow();
+    profileEnter();
+    const uint32_t total = profileSeq < ProfileSamples ? profileSeq : ProfileSamples;
+    const uint32_t oldest = (profileHead + ProfileSamples - total) % ProfileSamples;
+    auto at = [&](unsigned i) {
+        const ProfileSample &s = profileSamples[(oldest + i) % ProfileSamples];
+        NabuPerfWindowSample w = {};
+        w.seq = s.seq;
+        w.fence = s.fence;
+        w.complete = s.complete;
+        w.latencyUs = s.latencyUs;
+        w.submitCpuUs = s.submitCpuUs;
+        w.retireUs = s.retireUs;
+        w.tlbUs = s.tlbUs;
+        w.ringUs = s.ringUs;
+        w.cacheUs = s.cacheUs;
+        w.publishUs = s.publishUs;
+        w.submitUs = s.submitUs;
+        w.completeUs = s.completeUs;
+        w.mapUs = s.mapUs;
+        w.freeUs = s.freeUs;
+        w.allocUs = s.allocUs;
+        uint32_t hash = 2166136261u; // FNV-1a over client chars up to NUL
+        for (unsigned i = 0; i < ProfileClientChars && s.client[i]; ++i) {
+            hash ^= uint8_t(s.client[i]);
+            hash *= 16777619u;
+        }
+        w.clientHash = hash;
+        return w;
+    };
+    const unsigned packed = nabuPerfWindowCollect(cursor, out, capacity, lost, now, total, at);
+    profileLeave();
+    return packed;
 }

@@ -6,6 +6,7 @@
  * the SM7325 Adreno6xx power procedure.
  * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved. */
 #include "NativeAdrenoA6xxPower.h"
+#include "NabuPerfConfig.h"
 #include <IOKit/IOLib.h>
 
 namespace {
@@ -172,7 +173,7 @@ IOReturn NativeAdrenoA6xxPower::ring()
     return write(NativeAdrenoA6xxAopDoorbell, doorbellOffset_, doorbellValue_);
 }
 
-IOReturn NativeAdrenoA6xxPower::buildTables()
+IOReturn NativeAdrenoA6xxPower::buildTables(uint32_t requestedLevel)
 {
     constexpr unsigned ResourceCount = 10;
     static const char *const names[] = {
@@ -339,22 +340,54 @@ IOReturn NativeAdrenoA6xxPower::buildTables()
     tables_.gfxAddress = resources[0].address;
     tables_.xoAddress = resources[7].address;
     tables_.cxIndex = gmuVote & 0xff;
+
+    /* perf-levers: a requested level above 1 publishes every GPU level so the
+     * HFI table can vote them; any ARC miss falls back to the legacy table. */
+    uint32_t gpuVotes[7] = {};
+    gpuVotes[1] = gpuVote;
+    bool multi = requestedLevel > 1 && requestedLevel <= 6;
+    if (multi) {
+        for (unsigned level = 2; level <= 6; ++level) {
+            if (!arcVote(resources[0], resources[1], nabuPerfGpuLevels[level - 1].arcLevel,
+                         &gpuVotes[level])) {
+                IOLog("NativeAdrenoA6xx: NabuPerf gpu level %u ARC miss, legacy table\n", level);
+                multi = false;
+                break;
+            }
+        }
+    }
     tables_.gfxIndex = gpuVote & 0xff;
     tables_.mxIndex = (gpuVote >> 8) & 0xff;
     if (((gmuVote >> 8) & 0xff) > tables_.mxIndex) {
         tables_.mxIndex = (gmuVote >> 8) & 0xff;
     }
+    if (multi) {
+        for (unsigned level = 1; level <= 6; ++level) {
+            if ((gpuVotes[level] & 0xff) > tables_.gfxIndex) tables_.gfxIndex = gpuVotes[level] & 0xff;
+            if (((gpuVotes[level] >> 8) & 0xff) > tables_.mxIndex) tables_.mxIndex = (gpuVotes[level] >> 8) & 0xff;
+        }
+    }
     IOLog("NativeAdrenoA6xx: ARC votes gpu=%08x gmu=%08x gfx=%u mx=%u cx=%u\n",
         gpuVote, gmuVote, tables_.gfxIndex, tables_.mxIndex, tables_.cxIndex);
 
-    /* hfi_dcvstable_cmd: two GPU levels (off, 257 MHz) with the unused ACD
-     * threshold field at its kgsl_hfi.c value, then two GMU levels. */
-    tables_.performance[0] = 2;
+    /* hfi_dcvstable_cmd: GPU levels (off plus 257 MHz, or all six nabu OPPs
+     * when a higher static level was requested) with the unused ACD threshold
+     * field at its kgsl_hfi.c value, then two GMU levels. */
+    const unsigned gpuLevels = multi ? 7 : 2;
+    tables_.performance[0] = gpuLevels;
     tables_.performance[1] = 2;
     tables_.performance[3] = 0xffffffff;
-    tables_.performance[5] = gpuVote;
-    tables_.performance[6] = 0xffffffff;
-    tables_.performance[7] = 257000;
+    if (multi) {
+        for (unsigned level = 1; level <= 6; ++level) {
+            tables_.performance[2 + 3 * level] = gpuVotes[level];
+            tables_.performance[3 + 3 * level] = 0xffffffff;
+            tables_.performance[4 + 3 * level] = nabuPerfGpuLevels[level - 1].freqKHz;
+        }
+    } else {
+        tables_.performance[5] = gpuVote;
+        tables_.performance[6] = 0xffffffff;
+        tables_.performance[7] = 257000;
+    }
     tables_.performance[52] = gmuVote;
     tables_.performance[53] = 200000;
 
@@ -362,11 +395,12 @@ IOReturn NativeAdrenoA6xxPower::buildTables()
      * pwrlevel requests DDR usecase 3 (1799000 KB/s). Follow KGSL's live BCM
      * width/unit conversion and VCD grouping, instead of assuming CN0 alone
      * or leaving the GPU's DDR vote at the off entry. */
-    tables_.bandwidth[0] = 2; // off and the fixed 257 MHz bandwidth
+    tables_.bandwidth[0] = gpuLevels; // off plus one row per GPU level
     tables_.bandwidth[1] = 3;
     tables_.bandwidth[2] = 3;
     auto bandwidthGroup=[&](unsigned indices[3],const uint32_t busWidths[3],
-        uint32_t kbps,unsigned addressAt,unsigned dataAt,unsigned rowStride,unsigned waitAt) {
+        const uint32_t *kbps,unsigned rows,unsigned addressAt,unsigned dataAt,
+        unsigned rowStride,unsigned waitAt) {
         for(unsigned i=1;i<3;++i) {
             const unsigned selected=indices[i];unsigned j=i;
             while(j && resources[indices[j-1]].auxiliary[6]>resources[selected].auxiliary[6]) {
@@ -379,25 +413,30 @@ IOReturn NativeAdrenoA6xxPower::buildTables()
             const Resource &resource=resources[index];
             const bool commit=i==2 || resource.auxiliary[6]!=resources[indices[i+1]].auxiliary[6];
             const uint32_t commitBit=commit?Bit(30):0;
-            uint32_t vote=8; // ACV_APPS = BIT(3), KGSL bcm_update_acv_req.
-            if(index!=5) {
-                const unsigned slot=index==3?0:(index==4?1:(index==6?0:(index==8?1:2)));
-                uint64_t peak=uint64_t(kbps)*1000*little16(resource.auxiliary+4)/busWidths[slot];
-                peak=peak/little32(resource.auxiliary);
-                vote=peak>0x3fff?0x3fff:(peak?uint32_t(peak):1u);
-            }
             tables_.bandwidth[addressAt+i]=resource.address;
             tables_.bandwidth[dataAt+i]=commitBit;
-            tables_.bandwidth[dataAt+rowStride+i]=commitBit|Bit(29)|vote;
+            for(unsigned row=0;row<rows;++row) {
+                uint32_t vote=8; // ACV_APPS = BIT(3), KGSL bcm_update_acv_req.
+                if(index!=5) {
+                    const unsigned slot=index==3?0:(index==4?1:(index==6?0:(index==8?1:2)));
+                    uint64_t peak=uint64_t(kbps[row])*1000*little16(resource.auxiliary+4)/busWidths[slot];
+                    peak=peak/little32(resource.auxiliary);
+                    vote=peak>0x3fff?0x3fff:(peak?uint32_t(peak):1u);
+                }
+                tables_.bandwidth[dataAt+(row+1)*rowStride+i]=commitBit|Bit(29)|vote;
+                IOLog("NativeAdrenoA6xx: BCM=%s vcd=%u address=%05x vote=%08x\n",
+                    names[index],resource.auxiliary[6],resource.address,commitBit|Bit(29)|vote);
+            }
             if(commit)tables_.bandwidth[waitAt]|=Bit(i);
-            IOLog("NativeAdrenoA6xx: BCM=%s vcd=%u address=%05x vote=%08x\n",
-                names[index],resource.auxiliary[6],resource.address,commitBit|Bit(29)|vote);
         }
     };
     unsigned ddr[3]={3,4,5},cnoc[3]={6,8,9};
     const uint32_t ddrWidths[3]={16,4,4},cnocWidths[3]={8,8,8};
-    bandwidthGroup(ddr,ddrWidths,1799000,23,31,8,4);
-    bandwidthGroup(cnoc,cnocWidths,100,5,11,6,3);
+    uint32_t ddrKbps[6];
+    for(unsigned level=0;level<6;++level)ddrKbps[level]=nabuPerfGpuLevels[level].ddrKbps;
+    bandwidthGroup(ddr,ddrWidths,ddrKbps,multi?6:1,23,31,8,4);
+    const uint32_t cnocKbps[1]={100};
+    bandwidthGroup(cnoc,cnocWidths,cnocKbps,1,5,11,6,3);
 
     return kIOReturnSuccess;
 }
@@ -744,7 +783,7 @@ IOReturn NativeAdrenoA6xxPower::setSource(uint32_t command, uint32_t configurati
 }
 
 IOReturn NativeAdrenoA6xxPower::enableCx(const NativeAdrenoA6xxIo &io,
-    uint32_t doorbellOffset, uint32_t doorbellValue)
+    uint32_t doorbellOffset, uint32_t doorbellValue, uint32_t gpuLevel)
 {
     if (cxReady_ || !io.read32 || !io.write32 || !io.delayUs || (doorbellOffset & 3) ||
         !doorbellValue) {
@@ -755,7 +794,7 @@ IOReturn NativeAdrenoA6xxPower::enableCx(const NativeAdrenoA6xxIo &io,
     doorbellValue_ = doorbellValue;
     report_ = {};
     report_.phase = CommandDatabase;
-    IOReturn result = buildTables();
+    IOReturn result = buildTables(gpuLevel);
     if (result) {
         return result;
     }

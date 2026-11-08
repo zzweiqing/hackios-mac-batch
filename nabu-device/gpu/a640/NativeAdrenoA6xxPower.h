@@ -52,6 +52,7 @@ struct NativeAdrenoA6xxReport {
     uint32_t gmuInterrupts;
     uint32_t gmuAoInterrupts;
     uint32_t gmuFenceStatus;
+    uint32_t performanceVote;
 };
 
 /* NativeAdrenoA6xxTables contains the A6xx HFI v2 wire payloads (the vendor
@@ -103,7 +104,7 @@ class NativeAdrenoA6xxPower final {
     IOReturn update(uint32_t, uint32_t, uint32_t, uint32_t);
     IOReturn poll(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
     IOReturn ring();
-    IOReturn buildTables();
+    IOReturn buildTables(uint32_t requestedLevel);
     IOReturn openQmp();
     IOReturn sendQmp(const char *);
     IOReturn voteRails();
@@ -117,8 +118,11 @@ public:
         GmuClock, HubClock, GpuCcClocks, CxReady, GxDomain, GxReady, Stopped
     };
 
-    /* doorbell is the AOP IPC register (byte offset, value) in the doorbell window. */
-    IOReturn enableCx(const NativeAdrenoA6xxIo &, uint32_t doorbellOffset, uint32_t doorbellValue);
+    /* doorbell is the AOP IPC register (byte offset, value) in the doorbell window.
+     * gpuLevel is the requested static HFI GPU level (0/1 keep the legacy
+     * two-level table; 2..6 build the full seven-level table). */
+    IOReturn enableCx(const NativeAdrenoA6xxIo &, uint32_t doorbellOffset,
+                      uint32_t doorbellValue, uint32_t gpuLevel);
     IOReturn enableGx();
     IOReturn stop(bool dmaStopped);
     const NativeAdrenoA6xxTables &tables() const { return tables_; }
