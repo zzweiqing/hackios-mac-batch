@@ -67,6 +67,7 @@ def selected_files(upstream):
                           'pe_kprintf.o', 'pe_kprintf.o.json', 'bsd_init.o', 'bsd_init.o.json',
                           'kern_exec.o', 'kern_exec.o.json', 'kern_exit.o', 'kern_exit.o.json',
                           'kpi_vfs.o', 'kpi_vfs.o.json',
+                          'cpu.o', 'cpu.o.json',
                           'thread.o', 'thread.o.json',
                           'kern_mman.o', 'kern_mman.o.json',
                           'ubc_subr.o', 'ubc_subr.o.json',
@@ -154,6 +155,7 @@ def selected_files(upstream):
     add(work / '.config', Path('.config'))
     for relative in ('tree/build/nabu-log/source-report.json',
                      'tree/build/nabu-data-none/source-report.json',
+                     'tree/build/nabu-idle/source-report.json',
                      'tree/.cache/xnu-work/osfmk/console/serial_console.c',
                      'tree/.cache/xnu-work/osfmk/console/serial_general.c',
                      'tree/.cache/xnu-work/osfmk/console/NabuLogCore.h',
@@ -162,6 +164,7 @@ def selected_files(upstream):
                      'tree/.cache/xnu-work/bsd/kern/bsd_init.c',
                      'tree/.cache/xnu-work/bsd/kern/kern_exec.c',
                      'tree/.cache/xnu-work/bsd/vfs/kpi_vfs.c',
+                     'tree/.cache/xnu-work/osfmk/arm64/cpu.c',
                      'tree/.cache/xnu-work/bsd/kern/kern_mman.c',
                      'tree/.cache/xnu-work/bsd/kern/ubc_subr.c',
                      'tree/.cache/xnu-work/bsd/kern/kern_exit.c',
@@ -211,6 +214,7 @@ def selected_sources(device):
         (device / 'scripts/nabu_storage_media.py', 'device/scripts/nabu_storage_media.py'),
         (device / 'scripts/nabu_data_persist_source.py', 'device/scripts/nabu_data_persist_source.py'),
         (device / 'scripts/nabu_data_none_source.py', 'device/scripts/nabu_data_none_source.py'),
+        (device / 'scripts/nabu_idle_source.py', 'device/scripts/nabu_idle_source.py'),
         (device / 'platform/NabuGpuUserprobeAddon.h', 'device/platform/NabuGpuUserprobeAddon.h'),
         (device / 'userprobe/nabu_gpu_userprobe.cpp', 'device/userprobe/nabu_gpu_userprobe.cpp'),
         (device / 'LICENSE', 'device/LICENSE'),
@@ -252,6 +256,7 @@ def selected_sources(device):
         (source_dir / 'nabu_storage_media_qualification.py', 'source-ci/nabu_storage_media_qualification.py'),
         (source_dir / 'nabu_data_persist_qualification.py', 'source-ci/nabu_data_persist_qualification.py'),
         (source_dir / 'nabu_data_none_ci.py', 'source-ci/nabu_data_none_ci.py'),
+        (source_dir / 'nabu_idle_ci.py', 'source-ci/nabu_idle_ci.py'),
         (source_dir / 'nabu_graphics_startup.py', 'source-ci/nabu_graphics_startup.py'),
         (device / 'scripts/build-nabu-legacy-display.py', 'device/scripts/build-nabu-legacy-display.py'),
         (device / 'scripts/nabu_display_bindings.py', 'device/scripts/nabu_display_bindings.py'),
@@ -435,6 +440,11 @@ def main():
             manifest['data_none_qualification'] = qualify_data_none(
                 args.upstream, args.device, candidate, prepared)
             summary['data_none_qualified_statically'] = manifest['data_none_qualification']['compiled']
+            if prepared.get('nabu_idle') is not None:
+                from nabu_idle_ci import qualify_candidate as qualify_idle
+                manifest['nabu_idle_qualification'] = qualify_idle(
+                    args.upstream, args.device, candidate, prepared)
+                summary['nabu_idle_qualified_statically'] = manifest['nabu_idle_qualification']['compiled']
             manifest['signature_scan_qualification'] = qualify_signature_scan(
                 args.upstream, prepared.get('signature_scan_io'))
             summary['signature_scan_qualified_statically'] = bool(manifest['signature_scan_qualification'])

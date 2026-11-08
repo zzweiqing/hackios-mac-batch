@@ -785,6 +785,18 @@ def main():
     log_capture = enable_logging(args.upstream, args.device) if args.capture_logs else None
     data_none = (prepare_data_none(args.upstream, args.device)
                  if 'CONFIG_XNU_OWNER_DATA_MOUNT=y' in options else None)
+    nabu_idle = None
+    if args.profile == UFS_GPU_METAL_PROFILE:
+        from nabu_idle_ci import prepare as prepare_idle
+        nabu_idle = prepare_idle(args.upstream, args.device, enabled=True)
+    kernel = args.upstream / 'scripts/unixnu/kernel.py'
+    text = kernel.read_text(encoding='utf-8')
+    anchor = '    build_archives(ctx, env)\n'
+    if text.count(anchor) != 1:
+        raise ValueError('Expected one archive entry for nabu shallow idle')
+    idle_value = '1' if nabu_idle else '0'
+    kernel.write_text(text.replace(anchor,
+        f"    env['XNU_NABU_SHALLOW_IDLE'] = '{idle_value}'\n" + anchor, 1), encoding='utf-8')
     signature_scan = (prepare_signature_scan(args.upstream)
                       if 'CONFIG_XNU_NATIVE_CS_HASH_CACHE=y' in options else None)
     args.report.parent.mkdir(parents=True, exist_ok=True)
@@ -818,6 +830,7 @@ def main():
         'graphics_startup': graphics_startup,
         'data_skeleton': data_skeleton,
         'data_none': data_none,
+        'nabu_idle': nabu_idle,
         'signature_scan_io': signature_scan,
         'log_capture': log_capture,
         'vc_text_scale': {'argument': VC_TEXT_SCALE['argument'],
