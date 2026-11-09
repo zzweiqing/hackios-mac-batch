@@ -32,7 +32,7 @@
 +   ms(headWork[2]),ms(headWork[3]),(unsigned long long)headWork[4],(unsigned long long)headWork[7],
 +   (unsigned long long)headWork[8],(unsigned long long)headWork[9]);
 + else
-+  row("V pipe unreadable");
++  row("%s","V pipe unreadable");
 + row("J wait r%llu/%llums/%llums s%llu/%llums/%llums c%llu/%llums/%llums",
 +  (unsigned long long)gTimeResourceWait.count.load(),ms(gTimeResourceWait.total.load()),ms(gTimeResourceWait.slowest.load()),
 +  (unsigned long long)gTimeWaitScheduled.count.load(),ms(gTimeWaitScheduled.total.load()),ms(gTimeWaitScheduled.slowest.load()),
