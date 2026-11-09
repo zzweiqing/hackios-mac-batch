@@ -139,12 +139,6 @@ def main():
             report['turnip_inputs'] = {'smoke_header_sha256': sha((smoke / 'NativeTurnipSmoke.h').read_bytes()),
                                        'config_header_sha256': sha((smoke / 'NativeAdrenoMetalConfig.h').read_bytes()),
                                        'shaders': {s.name: sha(s.read_bytes()) for s in shaders}}
-            cache_helper = smoke / 'NabuPrivateShaderCache.h'
-            cache_expected = 'NabuPrivateShaderCache.h' in (smoke / 'NativeTurnipSmoke.h').read_text()
-            if cache_expected or cache_helper.exists() or cache_helper.is_symlink():
-                if not cache_helper.is_file() or cache_helper.is_symlink():
-                    raise ValueError('Private cache helper is not a regular input')
-                report['turnip_inputs']['cache_helper_sha256'] = sha(cache_helper.read_bytes())
             # A640: no recorded A740 replay; the smoke keeps its own TU_DEBUG default.
             turnip_options = ['-DNABU_USERPROBE_TURNIP=1', '-DNATIVE_ADRENO_A740_REPLAY=0', '-Wno-unused-function',
                               '-Wno-missing-field-initializers', '-I', smoke, '-I', args.turnip_headers.resolve(),
@@ -161,9 +155,6 @@ def main():
         actual = run(['codesign', '--display', '--entitlements', ':-', exe], 30).stdout
         if plistlib.loads(actual.encode()) != ENTITLEMENTS:
             raise ValueError('Signed probe entitlements differ from the requested set')
-        if turnip and 'cache_helper_sha256' in report['turnip_inputs']:
-            if sha(cache_helper.read_bytes()) != report['turnip_inputs']['cache_helper_sha256']:
-                raise ValueError('Private cache helper changed during probe build')
         binary = exe.read_bytes()
         validate_macho(binary)
         if abi.encode() not in binary:

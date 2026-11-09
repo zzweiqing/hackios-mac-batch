@@ -112,9 +112,12 @@ BOOT_INIT_OLD = '''  enableGic ();
 
 BOOT_INIT_NEW = '''  // The boot driver runs on a schedulable IOKit thread. Enabling Group 1
   // can deliver a pending timer before the GIC readback and timer/state setup
-  // finish. Keep just this non-blocking hardware handoff IRQ-masked; restore
-  // the caller's state, not unconditionally enabled. No allocation, service
+  // finish. Keep the local hardware handoff non-preemptible and IRQ-masked.
+  // Queue the self-IPI before restoring IRQs so its handler can clear
+  // SIGPdisabled before normal AST processing at _enable_preemption().
+  // Restore the caller's IRQ and preemption state. No allocation, service
   // publication, registration, or pending-CPU drain belongs in this interval.
+  _disable_preemption ();
   const boolean_t nabuSavedIrq = ml_set_interrupts_enabled (FALSE);
   armcpu_nabu_boot_phase = 20;
   enableGic ();
@@ -124,22 +127,30 @@ BOOT_INIT_NEW = '''  // The boot driver runs on a schedulable IOKit thread. Enab
   armcpu_nabu_boot_phase = 22;
   setCPUState (kIOCPUStateRunning);
   bootInitialized = true;
+  if (gSelfIpi) { signalCPU (this); }
   armcpu_nabu_boot_phase = 23;
   ml_set_interrupts_enabled (nabuSavedIrq);
   armcpu_nabu_boot_phase = 24;
-  if (gSelfIpi) { signalCPU (this); }
-  armcpu_nabu_boot_phase = 25;
+  _enable_preemption ();
+  armcpu_nabu_boot_phase = 26;
 }'''
 
 
 def patch_boot_handoff(text):
-    """Mask only boot initCPU's hardware handoff, with passive progress fields.
+    """Guard only boot initCPU's hardware handoff, with passive progress fields.
 
     These fields are last-reached milestones, not an atomic stack sample. The
     existing early ESP sampler emits them only under nabu-smp-watch=1. Secondary
     initCPU/PSCI/GIC register values and the scheduler algorithm are unchanged.
+    Phase 23 follows self-IPI queueing, 24 follows IRQ restoration, and 26
+    follows normal preemption restoration, including any pending urgent AST.
     """
     pairs = (
+        ('extern "C" kern_return_t processor_start (processor_t);\n',
+         '// Exact Darwin 23 preemption entry points; balance only the hardware handoff.\n'
+         'extern "C" void _disable_preemption (void);\n'
+         'extern "C" void _enable_preemption (void);\n'
+         'extern "C" kern_return_t processor_start (processor_t);\n'),
         ('volatile uint32_t armcpu_registered = 0;\n',
          'volatile uint32_t armcpu_registered = 0;\n'
          'volatile uint32_t armcpu_nabu_boot_phase = 0;\n'

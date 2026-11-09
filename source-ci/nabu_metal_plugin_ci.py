@@ -310,22 +310,6 @@ def collect_runtime_qos(root, device, output):
                 target='aarch64-apple-ios', runtime_qualified=False)
 
 
-def prepare_private_shader_cache(metal, device):
-    patch = device / 'patches/adrenometal-nabu-private-shader-cache.patch'
-    header = device / 'platform/NabuPrivateShaderCache.h'
-    target = metal / header.name
-    if target.exists() or target.is_symlink() or not header.is_file() or header.is_symlink():
-        raise ValueError('Private cache helper input or target differs')
-    run(['git', '-C', metal, 'apply', '--check', patch])
-    run(['git', '-C', metal, 'apply', patch])
-    shutil.copyfile(header, target)
-    return dict(patch_sha256=sha(patch), helper_sha256=sha(target),
-                frontend_sha256=sha(metal / 'NativeBridgeMetalFrontend.mm'),
-                smoke_sha256=sha(metal / 'NativeTurnipSmoke.h'),
-                policy='private cache root/ir3; owner probe caches only when ngpu owner matches its runtime UID',
-                shared_uid_cache=False, runtime_qualified=False)
-
-
 def prepare(root, device, fps_opt=False, async_fix=False, completion_fix=False, completion_observe=False, wallpaper_fix=False):
     for path, (url, commit) in SUBMODULES.items():
         entry = read(['git', '-C', root, 'ls-tree', 'HEAD', path]).split()
@@ -346,7 +330,6 @@ def prepare(root, device, fps_opt=False, async_fix=False, completion_fix=False, 
     if fps_opt:
         shutil.copyfile(device / 'platform/NabuScanoutSourceCache.h', metal / 'NabuScanoutSourceCache.h')
         prepare_runtime_qos(metal, device)
-        prepare_private_shader_cache(metal, device)
     pins = json.loads((root / 'scripts/data/gpu-metal-vulkan-inputs.json').read_text())
     translator = pins['translator']['commit']
     if pins['translator']['repository'].rstrip('/') + '.git' != METAL2VULKAN:
@@ -454,21 +437,6 @@ def build(root, device, output, env, fps_opt=False, async_fix=False, completion_
     if report['bundle_built']:
         if fps_opt:
             report['runtime_qos'] = collect_runtime_qos(root, device, output)
-            metal = root / 'drivers/AdrenoMetal'
-            helper = metal / 'NabuPrivateShaderCache.h'
-            if helper.read_bytes() != (device / 'platform/NabuPrivateShaderCache.h').read_bytes():
-                raise ValueError('Built private cache helper differs from its input')
-            report['private_shader_cache'] = dict(helper_sha256=sha(helper),
-                patch_sha256=sha(device / 'patches/adrenometal-nabu-private-shader-cache.patch'),
-                frontend_sha256=sha(metal / 'NativeBridgeMetalFrontend.mm'),
-                smoke_sha256=sha(metal / 'NativeTurnipSmoke.h'), shared_uid_cache=False,
-                runtime_qualified=False)
-            cache_source = output / 'cache-source'
-            cache_source.mkdir()
-            for name in ('NabuPrivateShaderCache.h', 'NativeBridgeMetalFrontend.mm',
-                         'NativeTurnipSmoke.h', 'NativeAdrenoMetalConfig.h'):
-                shutil.copyfile(metal / name, cache_source / name)
-            report['private_shader_cache']['config_sha256'] = sha(metal / 'NativeAdrenoMetalConfig.h')
         shutil.copytree(bundle, output / bundle.name, symlinks=True)
         shutil.copyfile(built / 'trust.json', output / 'trust.json')
         trust = json.loads((built / 'trust.json').read_text())

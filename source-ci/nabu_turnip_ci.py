@@ -26,7 +26,6 @@ ADRENOMETAL = 'https://github.com/RigoLigoRLC/unixnu-adrenometal.git'
 ADRENOMETAL_COMMIT = 'baad47ca22b181bf0ef0d08412d3ed1f96945e16'
 # nabu patches applied after UniXNU's recorded-series identity check (paths relative to the device tree).
 NABU_PATCHES = ('patches/mesa-turnip-a640-trace-guard.patch',)
-TURNIP_BUILDER_SHA256 = '16243c028683d3f7d1e654db7988d41d1651abe71b6525b127d27441912865ff'
 PYTHON_PACKAGES = ('meson==1.6.1', 'mako==1.3.8', 'pyyaml==6.0.2', 'packaging==24.2')
 
 
@@ -87,20 +86,6 @@ def mesa(root, pins):
     validate_recorded_patches(root, source, pins)
 
 
-def prepare_shader_cache_build(root, device):
-    builder = root / 'scripts/build-turnip-darwin.py'
-    require(sha(builder) == TURNIP_BUILDER_SHA256, 'Pinned Turnip builder differs before cache preparation')
-    patch = device / 'patches/turnip-cache-build-cd2.patch'
-    for path in (patch, device / 'patches/adrenometal-nabu-private-shader-cache.patch',
-                 device / 'platform/NabuPrivateShaderCache.h'):
-        require(path.is_file() and not path.is_symlink(), 'Missing or linked cache input: ' + str(path))
-    run(['git', '-C', root, 'apply', '--check', patch])
-    run(['git', '-C', root, 'apply', patch])
-    return dict(enabled=True, upstream_builder_sha256=TURNIP_BUILDER_SHA256,
-                builder_sha256=sha(builder), patch_sha256=sha(patch),
-                identity='source-derived TU_BUILD_ID_OVERRIDE', runtime_qualified=False)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--device', type=Path, required=True)
@@ -152,20 +137,12 @@ def main():
     run([root / '.cache/mesa-venv/bin/pip', 'install', '-q', *PYTHON_PACKAGES])
     bison(root, pins)
     mesa(root, pins)
-    disk_cache = prepare_shader_cache_build(root, device) if args.fps_opt else dict(enabled=False)
     env = dict(os.environ, PATH=str(root / '.cache/mesa-tools/bin') + ':' + os.environ['PATH'])
     require(shutil.which('glslangValidator', path=env['PATH']) and shutil.which('ninja', path=env['PATH']),
             'glslang and ninja are required')
     result = subprocess.run([sys.executable, root / 'scripts/build-turnip-darwin.py', '--target', 'ios',
                              '--abi-directory', abi], cwd=root, env=env)
     output.mkdir(parents=True)
-    if args.fps_opt:
-        cache_source = output / 'cache-source'
-        cache_source.mkdir()
-        for path in (root / 'scripts/build-turnip-darwin.py', device / 'platform/NabuPrivateShaderCache.h',
-                     device / 'patches/turnip-cache-build-cd2.patch'):
-            shutil.copyfile(path, cache_source / path.name)
-        disk_cache['source_files'] = {path.name: sha(path) for path in cache_source.iterdir()}
     for log in ('mesa-tu-ios-configure.log', 'mesa-tu-ios-build.log'):
         if (root / '.cache' / log).is_file():
             shutil.copyfile(root / '.cache' / log, output / log)
@@ -174,7 +151,7 @@ def main():
                   patches=pins['patches'], patch_sha256={p: sha(root / p) for p in pins['patches']},
                   nabu_patches={p: sha(device / p) for p in NABU_PATCHES},
                   upstream_pins_sha256=upstream_pins_sha256, recorded_pins_sha256=sha(pins_path),
-                  disk_cache=disk_cache, abi_header_sha256=sha(abi / 'NativeAdrenoABI.h'), build_returncode=result.returncode,
+                  abi_header_sha256=sha(abi / 'NativeAdrenoABI.h'), build_returncode=result.returncode,
                   library_built=library.is_file(), gpu_exercised=False, runtime_qualified=False)
     if library.is_file():
         shutil.copyfile(library, output / library.name)
@@ -190,15 +167,6 @@ def main():
         run(['git', '-C', smoke, 'remote', 'add', 'origin', ADRENOMETAL])
         run(['git', '-C', smoke, 'fetch', '-q', '--depth', '1', 'origin', ADRENOMETAL_COMMIT])
         run(['git', '-C', smoke, 'checkout', '-q', ADRENOMETAL_COMMIT])
-        if args.fps_opt:
-            sys.path.insert(0, str(Path(__file__).resolve().parent))
-            import nabu_metal_plugin_ci
-            report['probe_private_cache'] = nabu_metal_plugin_ci.prepare_private_shader_cache(smoke, device)
-            require((smoke / 'NabuPrivateShaderCache.h').read_bytes() ==
-                    (cache_source / 'NabuPrivateShaderCache.h').read_bytes(), 'Probe cache helper changed after Turnip build')
-            for name in ('NativeTurnipSmoke.h', 'NativeAdrenoMetalConfig.h'):
-                shutil.copyfile(smoke / name, cache_source / name)
-                disk_cache['source_files'][name] = sha(cache_source / name)
         probe = subprocess.run([sys.executable, device / 'scripts/build-nabu-gpu-userprobe.py',
                                 '--output', output / 'userprobe', '--turnip-library', library,
                                 '--turnip-headers', root / '.cache/mesa-work/include', '--adrenometal', smoke], env=env)

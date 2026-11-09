@@ -17,6 +17,7 @@ struct NativeAdrenoA6xxGmuConfig {
     NativeAdrenoA6xxGmuBuffer buffers[5]; /* icache, dummy, dcache, log, HFI */
     const NativeAdrenoA6xxTables *tables;
     uint32_t chipId; /* qcom,chipid, compressed for HFI_SFR_ADDR by start */
+    uint32_t startupLevel = 1; /* HFI perf/bw index of the startup vote */
 };
 
 /* NativeAdrenoA6xxGmu boots the A640 GMU firmware (a640_gmu.bin, HFI v2) on
@@ -72,6 +73,10 @@ public:
     IOReturn acquirePerformanceCounters();
     IOReturn releasePerformanceCounters();
     IOReturn poll();
+    /* Runtime HFI performance vote {1,level,level}; requires a running GMU and
+     * a published table with enough levels. Bad arguments return without
+     * touching report state. */
+    IOReturn setPerformance(uint32_t level);
     IOReturn stop();
     bool running() const { return running_; }
     const NativeAdrenoA6xxReport &report() const { return report_; }

@@ -672,10 +672,21 @@ IOReturn NativeAdrenoA6xxGmu::start(const NativeAdrenoA6xxGmuConfig &config)
             return kIOReturnBadArgument;
         }
     }
+    const uint32_t gpuLevels = config.tables->performance[0];
+    const uint32_t bwLevels = config.tables->bandwidth[0];
+    bool levelsOk = gpuLevels >= 2 && gpuLevels <= 16 && bwLevels == gpuLevels &&
+        config.startupLevel >= 1 && config.startupLevel <= gpuLevels;
+    if (levelsOk) {
+        uint32_t previous = 0;
+        for (uint32_t level = 1; level < gpuLevels && levelsOk; ++level) {
+            const uint32_t freq = config.tables->performance[4 + 3 * level];
+            if (freq <= previous) levelsOk = false; else previous = freq;
+        }
+    }
     if (config.buffers[4].bytes < HfiRequiredBytes || config.buffers[3].bytes > 0x100000 ||
-        config.tables->performance[0] != 2 || config.tables->performance[1] != 2 ||
-        config.tables->performance[7] != 257000 || config.tables->performance[53] != 200000 ||
-        config.tables->bandwidth[0] != 2 || (config.chipId >> 16) != 0x0604) {
+        config.tables->performance[1] != 2 || config.tables->performance[7] != 257000 ||
+        config.tables->performance[53] != 200000 || !levelsOk ||
+        (config.chipId >> 16) != 0x0604) {
         return kIOReturnBadArgument;
     }
 
@@ -795,10 +806,12 @@ IOReturn NativeAdrenoA6xxGmu::start(const NativeAdrenoA6xxGmuConfig &config)
         return result;
     }
 
-    /* hfi_gx_bw_perf_vote_cmd: ack type 1, GPU level 1 (257 MHz), bw level 1. */
+    /* hfi_gx_bw_perf_vote_cmd: ack type 1, then the configured static
+     * perf/bw index (level 1 = 257 MHz when no nabu-perf level was given). */
     report_.phase = PerformanceVote;
-    const uint32_t votePayload[] = {1, 1, 1};
+    const uint32_t votePayload[] = {1, config_.startupLevel, config_.startupLevel};
     result = exchange(30, votePayload, 3);
+    report_.performanceVote = uint32_t(result);
     if (result) {
         return result;
     }
@@ -952,6 +965,18 @@ IOReturn NativeAdrenoA6xxGmu::poll()
 
     report_.phase = Ready;
     return kIOReturnSuccess;
+}
+
+IOReturn NativeAdrenoA6xxGmu::setPerformance(uint32_t level)
+{
+    if (!running_ || report_.status != 0 ||
+        level < 1 || level >= config_.tables->performance[0]) {
+        return kIOReturnBadArgument;
+    }
+    const uint32_t payload[] = {1, level, level};
+    const IOReturn result = exchange(30, payload, 3);
+    report_.runtimeVote = uint32_t(result);
+    return result;
 }
 
 IOReturn NativeAdrenoA6xxGmu::stop()

@@ -28,6 +28,9 @@ extern volatile uint64_t armcpu_irq_long_drains;
 extern volatile uint32_t armcpu_irq_phase,armcpu_irq_id,armcpu_irq_drain_most;
 extern unsigned int real_ncpus;
 extern uint32_t processor_avail_count;
+#if defined(XNU_NABU_SHALLOW_IDLE) && XNU_NABU_SHALLOW_IDLE
+unsigned nabu_idle_snapshot(unsigned slot, uint64_t *output, unsigned words);
+#endif
 }
 static void nabuLogEarlySmpPoll(void)
 {
@@ -78,6 +81,15 @@ static void nabuLogEarlySmpPoll(void)
         armcpu_smp_fail[slot],armcpu_smp_psci_rc[slot],armcpu_smp_sys[slot][0],
         armcpu_smp_sys[slot][1],armcpu_core_timer[slot],armcpu_core_sgi[slot],
         armcpu_nabu_register_phase[slot],armcpu_nabu_register_rc[slot]);
+#if defined(XNU_NABU_SHALLOW_IDLE) && XNU_NABU_SHALLOW_IDLE
+  for(unsigned slot=0;slot<8;++slot) {
+    uint64_t idle[5]={};
+    if(nabu_idle_snapshot(slot,idle,5))
+      NABU_SMP_EMIT("NabuIdle: sample=%u slot=%u cache_before=%llu cache_after=%llu wfi_before=%llu wfi_after=%llu stage=%llu snapshot=non-atomic\n",
+          sample,slot,(unsigned long long)idle[0],(unsigned long long)idle[1],
+          (unsigned long long)idle[2],(unsigned long long)idle[3],(unsigned long long)idle[4]);
+  }
+#endif
 #undef NABU_SMP_EMIT
 }
 #endif

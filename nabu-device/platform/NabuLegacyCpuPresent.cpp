@@ -57,6 +57,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     IOMemoryMap *bootMapping = nullptr;
     uint64_t bootStride = 0;
     bool primary = false, enabled = false, consoleOwned = false, logicalPM = false;
+    bool fixedRefresh60 = false;
     NabuDisplayQueuePump queuePump;
     void *shadow = nullptr;
     size_t shadowBytes = 0;
@@ -276,6 +277,10 @@ public:
         value = 1;
         PE_parse_boot_argn("nabu-cpu-diff", &value, sizeof(value));
         diffEnabled = value == 1;
+        value = 0;
+        PE_parse_boot_argn("nabu-refresh-fixed60", &value, sizeof(value));
+        fixedRefresh60 = value == 1;
+        IOLog("NABU DISPLAY refresh-fixed60=%u\n", unsigned(fixedRefresh60));
         if (!IOMobileFramebufferLegacy::start(provider)) return false;
         if (enabled && primary && bootMapping) {
             // As UniXNU's logical PM plus announcePoweredByFirmware: request the
@@ -362,6 +367,9 @@ public:
         native_legacy_registration_observed(this);
     }
     bool isMainDisplay() override { return primary; }
+    bool getRefreshAttributes(uint64_t *attributes, bool fixed) override {
+        return IOMobileFramebufferLegacy::getRefreshAttributes(attributes, fixedRefresh60 || fixed);
+    }
     void kickLocked() {
         queuePump.drain([this] { kickOnce(); });
     }

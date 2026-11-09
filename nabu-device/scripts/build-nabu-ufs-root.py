@@ -374,6 +374,8 @@ def main():
                 '-DNATIVE_VERIFIED_BLOCK=1',
                 '-DNATIVE_VERIFIED_BLOCK_MULTI_POLICY=1',
                 '-DXNU_NATIVE_UFS=1']
+    if logging and os.environ.get('XNU_NABU_SHALLOW_IDLE') == '1':
+        command.append('-DXNU_NABU_SHALLOW_IDLE=1')
     (out / 'compile-command.json').write_text(json.dumps(command, indent=2) + '\n', encoding='utf-8')
     result = subprocess.run(command, cwd=record['directory'], capture_output=True)
     (out / 'compile.log').write_bytes(result.stdout + result.stderr)

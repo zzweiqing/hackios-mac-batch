@@ -235,6 +235,7 @@ def qualify_userprobe_boot(read, candidate):
             'GPU userprobe boot input identity mismatch')
     constants = {}
     cache_entries = None
+    variant_version = None
     process_constants = {}
     exec_trace_constants = {}
     for item in ast.parse(generator.decode('utf-8')).body:
@@ -244,6 +245,8 @@ def qualify_userprobe_boot(read, candidate):
                 constants[item.targets[0].id] = ast.literal_eval(item.value).encode()
             elif item.targets[0].id == 'CACHE_ENTRY_COUNT':
                 cache_entries = ast.literal_eval(item.value)
+            elif item.targets[0].id == 'WALLPAPER_VARIANT_VERSION':
+                variant_version = ast.literal_eval(item.value)
             elif item.targets[0].id in ('EXEC_HELPER', 'EXEC_LOCAL', 'EXEC_ENTER', 'EXEC_RETURN', 'EXIT_HOOK'):
                 process_constants[item.targets[0].id] = ast.literal_eval(item.value).encode()
             elif item.targets[0].id in ('EXEC_TRACE_HELPER', 'EXEC_TRACE_DECL', 'EXEC_TRACE_PAIRS'):
@@ -266,6 +269,23 @@ def qualify_userprobe_boot(read, candidate):
                 b'#define NABU_GPU_USERPROBE_EXTERNAL_MAX 67108864u' in header and
                 b'#define NABU_GPU_USERPROBE_SET_WALLPAPER 0x1ffff000u' in header,
                 'External wallpaper addon identity or closed range gate changed')
+        if variant_version is not None:
+            require(variant_version in (1, 2) and
+                    b'#define NABU_GPU_USERPROBE_WALLPAPER_VARIANT_MAX 16384u' in header and
+                    b'#define NABU_GPU_USERPROBE_SET_VARIANT_BIT 0x20000000u' in header and
+                    b'wallpaper-variant/Wallpaper.plist' in header and
+                    b'nabu_gpu_userprobe_external_has_variant(data, bytes)' in constants['RAM_HELPER'] and
+                    b'nabu_gpu_userprobe_external_variant(payload, bytes)' in constants['DATA_EXTERNAL_HELPER'] and
+                    b'files < 26 || files > 29' in constants['DATA_EXTERNAL_HELPER'] and
+                    constants['DATA_EXTERNAL_HELPER'].index(b'variant_point, sizeof(variant_point)') <
+                    constants['DATA_EXTERNAL_HELPER'].index(b'background_point, sizeof(background_point)'),
+                    'External wallpaper variant kind, presence gate or mount order changed')
+            if variant_version == 2:
+                require(b'/* NABU_GPU_WALLPAPER_VIEW_V1 */' in constants['DATA_EXTERNAL_HELPER'] and
+                        b'metadata_bytes > 16384' in constants['DATA_EXTERNAL_HELPER'] and
+                        b'native_gpu_addon_equal(mounted, metadata, metadata_bytes, 0644, ctx)' in constants['DATA_EXTERNAL_HELPER'] and
+                        b'variant_view_status=' in constants['DATA_EXTERNAL_HELPER'],
+                        'External wallpaper metadata view lacks the bounded byte comparison')
     obj = read(prefix + 'NativeRamBlock.o')
     archive = read(prefix + 'libNativeRamBlock.a')
     members = archive_members(archive)
@@ -284,6 +304,12 @@ def qualify_userprobe_boot(read, candidate):
                 data.index(constants['DATA_EXTERNAL_BRANCH']) < data.index(constants['DATA_BRANCH']) and
                 b'NabuGPU: wallpaper floating_stage=' in candidate,
                 'Actual kernel lacks the external wallpaper validation or both union mounts')
+        if variant_version is not None:
+            require(b'NabuGPU: wallpaper variant_stage=' in candidate,
+                    'Final kernel lacks the optional wallpaper metadata mount record')
+            if variant_version == 2:
+                require(b'NabuGPU: wallpaper variant_view_status=' in candidate,
+                        'Final kernel lacks the metadata view result')
     parents_fixed = 'PARENTS_AFTER' in constants
     if parents_fixed:
         require(data.count(constants['PARENTS_AFTER']) == 1 and constants['PARENTS_BEFORE'] not in data,
@@ -342,6 +368,8 @@ def qualify_userprobe_boot(read, candidate):
     extra_required = {'_native_ram_block_gpu_addon'}
     if external_bound:
         extra_required.add('_nabu_gpu_userprobe_external_selected')
+        if variant_version is not None:
+            extra_required.add('_nabu_gpu_userprobe_external_variant')
     if process_bound:
         extra_required |= {'_nabu_gpu_userprobe_exit_note', '_nabu_gpu_userprobe_exec_snapshot',
                            '_nabu_log_probe_poll', '_nabu_log_probe_process_snapshot'}
@@ -364,9 +392,16 @@ def qualify_userprobe_boot(read, candidate):
                 'pipeline_pack_max': 8388608} if pack_bound else {}),
             **({'plugin_clients_transport': True, 'plugin_clients_addon_files': [10, 11],
                 'plugin_clients_max': 256} if clients_bound else {}),
-            **({'external_wallpaper_transport': True, 'external_wallpaper_addon_files': [26, 27, 28],
+            **({'external_wallpaper_transport': True,
+                'external_wallpaper_addon_files': [26, 27, 28, 29] if variant_version is not None else [26, 27, 28],
                 'external_wallpaper_max': 67108864, 'external_payload_sha256_required': True,
                 'external_precedes_inline': True} if external_bound else {}),
+            **({'external_wallpaper_variant_transport': True, 'external_wallpaper_variant_version': variant_version,
+                'external_wallpaper_variant_path': 'wallpaper-variant/Wallpaper.plist',
+                'external_wallpaper_variant_max': 16384} if external_bound and variant_version is not None else {}),
+            **({'external_wallpaper_variant_view_compiled': True,
+                'external_wallpaper_variant_view_runtime_verified': False}
+               if external_bound and variant_version == 2 else {}),
             **({'exec_stage_observer': True, 'exec_stage_records_maximum': 32} if exec_trace_constants else {}),
             **({'process_observer': True, 'exit_source_sha256': sha(exit_source),
                 'process_symbols': {name: definitions[name] for name in sorted(extra_required)}} if process_bound else {}),
