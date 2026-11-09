@@ -1,0 +1,43 @@
+--- a/NativeBridgeMetalFrontend.mm
++++ b/NativeBridgeMetalFrontend.mm
+@@ -24,7 +24,8 @@
+ #include <unordered_map>
+ #include <vector>
+ #include <sys/mman.h>
+ #include <unistd.h>
++#include <stdlib.h>
+ #include <CommonCrypto/CommonDigest.h>
+ #include <dlfcn.h>
+ #include <execinfo.h>
+@@ -1958,14 +1960,27 @@
+  auto row=[&](const char *format,auto... args){
+   char text[200];int n=snprintf(text,sizeof text,format,args...);if(n<=0)return;if(n>90)n=90;
+   if(at+(size_t)n+2>=size)return;memcpy(out+at,text,(size_t)n);at+=(size_t)n;out[at++]='\n';out[at]=0;};
+  auto ms=[](uint64_t us){return (unsigned long long)(us/1000);};
++ uint64_t headWork[10]={};
++ const bool headWorkReadable=gDevice && nmb_device_work_stats(gDevice,headWork);
++ const unsigned loweringStatus=getenv("NABU_METAL_LOWERING_STATUS")?std::min(99u,(unsigned)strtoul(getenv("NABU_METAL_LOWERING_STATUS"),nullptr,10)):0;
++ const unsigned loweringEnabled=getenv("NABU_METAL_LOWERING_WORKER") && !strcmp(getenv("NABU_METAL_LOWERING_WORKER"),"1");
+- {std::lock_guard<std::mutex> lock(gBenchLock);for(unsigned r=0;r<4;r++)if(gBench[r][0])row("%.90s",gBench[r]);}
+- row("S c%llu/%llu d%llu p%llu x%llu R%llu D%llu F%llu M%lluk C%llu B%llu",(unsigned long long)gCommits.load(),(unsigned long long)gCommitFailures.load(),
++ row("S pid%ld wl%u/we%u c%llu/%llu d%llu p%llu x%llu R%llu D%llu F%llu M%lluk C%llu B%llu",(long)getpid(),loweringStatus,loweringEnabled,
++  (unsigned long long)gCommits.load(),(unsigned long long)gCommitFailures.load(),
+   (unsigned long long)gCompleted.load(),(unsigned long long)gPipelines.load(),(unsigned long long)gProblems.load(),(unsigned long long)gPasses.load(),
+   (unsigned long long)gDraws.load(),(unsigned long long)gFullScreenPasses.load(),(unsigned long long)(gBiggestPass.load()>>10),
+   (unsigned long long)gDispatches.load(),(unsigned long long)gBlits.load());
+- row("T pipeline n=%llu total=%llums max=%llums",(unsigned long long)gTimePipeline.count.load(),ms(gTimePipeline.total.load()),ms(gTimePipeline.slowest.load()));
+- row("T library n=%llu total=%llums max=%llums",(unsigned long long)gTimeLibrary.count.load(),ms(gTimeLibrary.total.load()),ms(gTimeLibrary.slowest.load()));
++ if(headWorkReadable)
++  row("V pipe n%llu work%llums max%llums wait%llums fail%llu h%llu m%llu wr%llu",(unsigned long long)headWork[0],ms(headWork[1]),
++   ms(headWork[2]),ms(headWork[3]),(unsigned long long)headWork[4],(unsigned long long)headWork[7],
++   (unsigned long long)headWork[8],(unsigned long long)headWork[9]);
++ else
++  row("V pipe unreadable");
++ row("J wait r%llu/%llums/%llums s%llu/%llums/%llums c%llu/%llums/%llums",
++  (unsigned long long)gTimeResourceWait.count.load(),ms(gTimeResourceWait.total.load()),ms(gTimeResourceWait.slowest.load()),
++  (unsigned long long)gTimeWaitScheduled.count.load(),ms(gTimeWaitScheduled.total.load()),ms(gTimeWaitScheduled.slowest.load()),
++  (unsigned long long)gTimeWaitCompleted.count.load(),ms(gTimeWaitCompleted.total.load()),ms(gTimeWaitCompleted.slowest.load()));
++ {std::lock_guard<std::mutex> lock(gBenchLock);for(unsigned r=0;r<4;r++)if(gBench[r][0])row("%.90s",gBench[r]);}
+  row("T function n=%llu total=%llums max=%llums",
+   (unsigned long long)gTimeFunction.count.load(),ms(gTimeFunction.total.load()),ms(gTimeFunction.slowest.load()));
+  row("G commit-to-complete n=%llu total=%llums max=%llums mean=%lluus",(unsigned long long)gTimeEncodeToCommit.count.load(),ms(gTimeEncodeToCommit.total.load()),

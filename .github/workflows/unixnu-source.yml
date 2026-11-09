@@ -38,6 +38,10 @@ on:
         description: Turnip-only CoreImage library and stitching support; requires fps_opt; no device installation
         type: boolean
         default: false
+      worker_opt:
+        description: Build opt-in render lowering worker and runtime telemetry on the deployed wallpaper baseline
+        type: boolean
+        default: false
       async_fix:
         description: Turnip-only async Metal creation fix and bounded callback regression; no device installation
         type: boolean
@@ -238,6 +242,7 @@ jobs:
         env:
           FPS_OPT: ${{ inputs.fps_opt }}
           WALLPAPER_FIX: ${{ inputs.wallpaper_fix }}
+          WORKER_OPT: ${{ inputs.worker_opt }}
           ASYNC_FIX: ${{ inputs.async_fix }}
           COMPLETION_FIX: ${{ inputs.completion_fix }}
           COMPLETION_OBSERVE: ${{ inputs.completion_observe }}
@@ -247,6 +252,10 @@ jobs:
           if [ "$WALLPAPER_FIX" = true ]; then
             test "$FPS_OPT" = true
             fps_args+=(--wallpaper-fix)
+          fi
+          if [ "$WORKER_OPT" = true ]; then
+            test "$FPS_OPT" = true && test "$WALLPAPER_FIX" = true
+            fps_args+=(--worker-opt)
           fi
           if [ "$ASYNC_FIX" = true ]; then
             test "$FPS_OPT" != true

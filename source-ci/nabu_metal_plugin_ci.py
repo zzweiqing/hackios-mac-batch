@@ -5,6 +5,10 @@ Called by nabu_turnip_ci.py after Turnip is built in the pinned UniXNU checkout.
 submodules the plugin build reads at their pinned gitlinks, fetches the pinned metal2vulkan translator, then
 runs UniXNU's own scripts/build-adreno-metal-plugin.py with the A640 board options. A build only proves
 compilation, linking and signing: no GPU is exercised and nothing is installed.
+
+worker_opt starts from the Actions 423593 nine-patch wallpaper baseline and adds only the
+lowering-worker and fixed-head telemetry patches. It keeps the runtime QoS patch and deliberately
+does not compile the separately tested, undeployed private shader-cache changes.
 """
 import hashlib
 import json
@@ -35,7 +39,24 @@ MPS_CONTRACT_PATCH = 'patches/adrenometal-nabu-mps-contract.patch'
 MPS_CONTRACT_UPSTREAM = '6d7f73437087c57ee54a41adceb1735daaea405e'
 GPU_CORE_COUNT_PATCH = 'patches/adrenometal-nabu-gpu-core-count.patch'
 WALLPAPER_PATCHES = FPS_PATCHES + (ADRENOMETAL_PATCHES[-1], 'patches/adrenometal-nabu-ci-function-identity.patch',
-                                 MPS_CONTRACT_PATCH, GPU_CORE_COUNT_PATCH)
+                                  MPS_CONTRACT_PATCH, GPU_CORE_COUNT_PATCH)
+LOWERING_WORKER_PATCH = 'patches/adrenometal-nabu-lowering-worker.patch'
+RUNTIME_TELEMETRY_PATCH = 'patches/adrenometal-nabu-runtime-telemetry.patch'
+WORKER_OBSERVATION_PATCHES = WALLPAPER_PATCHES + (LOWERING_WORKER_PATCH, RUNTIME_TELEMETRY_PATCH)
+WORKER_RUNTIME_UPSTREAM = '624bab3918de5b978e1101517abca2b4fa426565'
+BASELINE_423593_SOURCE_SHA256 = {
+    'NativeAdrenoMetalPlugin.mm': '538d662c52309be575c13f8df1ffa4e68ce9e13f3a03555a3be4337bdd558f3d',
+    'bridge/NativeMetalObjects.rs': '2814eb99b0179461676715656ff2a33aaa90357825c7497925e4923d1f3278ed',
+    'NativeBridgeMetalFrontend.mm': '0dac90bab205e74dcc07ff186995d037148384c3e59f88cea286c93b68886814',
+}
+WORKER_RUNTIME_SOURCES = {
+    'crates/metal2vulkan/src/device/policy.rs':
+        '1e07afdb2952046d13f593922fae6a27b6f26939912b6abf542645c60653a5e6',
+    'crates/metal2vulkan-runtime/src/render/lowering_worker.rs':
+        '7e7708155146b4d1d9d787e83aa47c86c04ef1f3ddd2362b66d945df2ba05a4e',
+    'crates/metal2vulkan-runtime/src/render/deferral.rs':
+        'ad0bffb3ffcba81f80d60b42a4e763d3f043c832c794c1c56a3ec4cc313a53d8',
+}
 ASYNC_PATCH = 'patches/adrenometal-nabu-async-creation.patch'
 ASYNC_PATCHES = ADRENOMETAL_PATCHES[:4] + (ASYNC_PATCH,)
 COMPLETION_PATCH = 'patches/adrenometal-nabu-completion-wait.patch'
@@ -73,9 +94,16 @@ def fetch(path, url, commit, *, blob_filter=False):
         raise SystemExit('Pinned checkout differs: ' + str(path))
 
 
-def plugin_patches(fps_opt=False, async_fix=False, completion_fix=False, completion_observe=False, wallpaper_fix=False):
+def plugin_patches(fps_opt=False, async_fix=False, completion_fix=False, completion_observe=False,
+                   wallpaper_fix=False, worker_opt=False):
     if sum((fps_opt, async_fix, completion_fix, completion_observe)) > 1:
         raise ValueError('Keep the async creation, FPS, completion-wait and completion-observation experiments separate')
+    if worker_opt:
+        if not fps_opt or not wallpaper_fix:
+            raise ValueError('The lowering-worker experiment requires the FPS/QoS wallpaper source recipe')
+        if async_fix or completion_fix or completion_observe:
+            raise ValueError('Keep the lowering-worker experiment separate from async and completion modes')
+        return WORKER_OBSERVATION_PATCHES
     if wallpaper_fix:
         if not fps_opt:
             raise ValueError('Wallpaper CoreImage support requires the FPS/QoS profile')
@@ -310,7 +338,62 @@ def collect_runtime_qos(root, device, output):
                 target='aarch64-apple-ios', runtime_qualified=False)
 
 
-def prepare(root, device, fps_opt=False, async_fix=False, completion_fix=False, completion_observe=False, wallpaper_fix=False):
+def verify_lowering_worker_runtime(source):
+    source = Path(source)
+    observed = {}
+    for relative, expected in WORKER_RUNTIME_SOURCES.items():
+        path = source / relative
+        if not path.is_file():
+            raise ValueError('Lowering-worker runtime source is missing: ' + relative)
+        digest = sha(path)
+        if digest != expected:
+            raise ValueError('Lowering-worker runtime source differs from pin: ' + relative)
+        observed[relative] = digest
+    policy = (source / 'crates/metal2vulkan/src/device/policy.rs').read_text()
+    worker = (source / 'crates/metal2vulkan-runtime/src/render/lowering_worker.rs').read_text()
+    deferral = (source / 'crates/metal2vulkan-runtime/src/render/deferral.rs').read_text()
+    if 'pub render_lowering: RenderLoweringPolicy' not in policy or '    Worker,' not in policy:
+        raise ValueError('Pinned runtime does not expose RenderLoweringPolicy::Worker')
+    if 'struct LoweringWorker' not in worker or 'ENDS_IN_FLIGHT' not in worker:
+        raise ValueError('Pinned runtime lowering worker implementation differs')
+    if 'RenderLoweringPolicy::Worker' not in deferral:
+        raise ValueError('Pinned runtime deferral path does not select Worker')
+    return observed
+
+
+def verify_423593_source(metal):
+    metal = Path(metal)
+    observed = {}
+    for relative, expected in BASELINE_423593_SOURCE_SHA256.items():
+        path = metal / relative
+        if not path.is_file():
+            raise ValueError('423593 source baseline file is missing: ' + relative)
+        digest = sha(path)
+        if digest != expected:
+            raise ValueError('Source differs from the 423593 nine-patch baseline: ' + relative)
+        observed[relative] = digest
+    return observed
+
+
+def prepare_private_shader_cache(metal, device):
+    patch = device / 'patches/adrenometal-nabu-private-shader-cache.patch'
+    header = device / 'platform/NabuPrivateShaderCache.h'
+    target = metal / header.name
+    if target.exists() or target.is_symlink() or not header.is_file() or header.is_symlink():
+        raise ValueError('Private cache helper input or target differs')
+    run(['git', '-C', metal, 'apply', '--check', patch])
+    run(['git', '-C', metal, 'apply', patch])
+    shutil.copyfile(header, target)
+    return dict(patch_sha256=sha(patch), helper_sha256=sha(target),
+                frontend_sha256=sha(metal / 'NativeBridgeMetalFrontend.mm'),
+                smoke_sha256=sha(metal / 'NativeTurnipSmoke.h'),
+                policy='private cache root/ir3; owner probe caches only when ngpu owner matches its runtime UID',
+                shared_uid_cache=False, runtime_qualified=False)
+
+
+def prepare(root, device, fps_opt=False, async_fix=False, completion_fix=False, completion_observe=False,
+            wallpaper_fix=False, worker_opt=False):
+    selected = plugin_patches(fps_opt, async_fix, completion_fix, completion_observe, wallpaper_fix, worker_opt)
     for path, (url, commit) in SUBMODULES.items():
         entry = read(['git', '-C', root, 'ls-tree', 'HEAD', path]).split()
         if entry[:3] != ['160000', 'commit', commit]:
@@ -320,7 +403,9 @@ def prepare(root, device, fps_opt=False, async_fix=False, completion_fix=False, 
             raise SystemExit('Submodule path is not empty: ' + path)
         fetch(target, url, commit)
     metal = root / 'drivers/AdrenoMetal'
-    for patch in plugin_patches(fps_opt, async_fix, completion_fix, completion_observe, wallpaper_fix):
+    for patch in selected:
+        if worker_opt and patch == LOWERING_WORKER_PATCH:
+            verify_423593_source(metal)
         if patch == ASYNC_PATCH:
             shutil.copyfile(metal / 'NativeBridgeMetalFrontend.mm', metal / 'NabuAsyncCreation.baseline.mm')
         run(['git', '-C', metal, 'apply', '--check', device / patch])
@@ -330,6 +415,8 @@ def prepare(root, device, fps_opt=False, async_fix=False, completion_fix=False, 
     if fps_opt:
         shutil.copyfile(device / 'platform/NabuScanoutSourceCache.h', metal / 'NabuScanoutSourceCache.h')
         prepare_runtime_qos(metal, device)
+        if not worker_opt:
+            prepare_private_shader_cache(metal, device)
     pins = json.loads((root / 'scripts/data/gpu-metal-vulkan-inputs.json').read_text())
     translator = pins['translator']['commit']
     if pins['translator']['repository'].rstrip('/') + '.git' != METAL2VULKAN:
@@ -337,6 +424,10 @@ def prepare(root, device, fps_opt=False, async_fix=False, completion_fix=False, 
     source = root / '.cache/gpu-reference/metal2vulkan'
     source.parent.mkdir(parents=True, exist_ok=True)
     fetch(source, METAL2VULKAN, translator, blob_filter=True)
+    if worker_opt:
+        if translator != WORKER_RUNTIME_UPSTREAM:
+            raise SystemExit('Lowering-worker runtime pin differs: ' + translator)
+        verify_lowering_worker_runtime(source)
     return translator
 
 
@@ -351,7 +442,8 @@ def bundle_files(bundle):
     return files
 
 
-def build(root, device, output, env, fps_opt=False, async_fix=False, completion_fix=False, completion_observe=False, wallpaper_fix=False):
+def build(root, device, output, env, fps_opt=False, async_fix=False, completion_fix=False, completion_observe=False,
+          wallpaper_fix=False, worker_opt=False):
     """Returns the report's plugin section; the build's own return code is plugin['plugin_returncode']."""
     root, device, output = Path(root), Path(device).resolve(), Path(output)
     abi = device / 'gpu/upstream/Adreno6xx'
@@ -359,14 +451,58 @@ def build(root, device, output, env, fps_opt=False, async_fix=False, completion_
     report = {'adrenometal_commit': SUBMODULES['drivers/AdrenoMetal'][1],
               'adrenopm4_commit': SUBMODULES['kits/AdrenoPM4'][1], 'rust_toolchain': RUST,
               'abi_header_sha256': sha(abi / 'NativeAdrenoABI.h'), 'gpu_exercised': False, 'runtime_qualified': False}
-    report['metal2vulkan_commit'] = prepare(root, device, fps_opt, async_fix, completion_fix, completion_observe, wallpaper_fix)
+    selected = plugin_patches(fps_opt, async_fix, completion_fix, completion_observe, wallpaper_fix, worker_opt)
+    report['metal2vulkan_commit'] = prepare(root, device, fps_opt, async_fix, completion_fix, completion_observe,
+                                            wallpaper_fix, worker_opt)
     report['adrenometal_patches'] = {patch: sha(device / patch)
-                                   for patch in plugin_patches(fps_opt, async_fix, completion_fix, completion_observe, wallpaper_fix)}
+                                   for patch in selected}
     report['fps_opt'] = fps_opt
     report['async_fix'] = async_fix
     report['completion_fix'] = completion_fix
     report['completion_observe'] = completion_observe
     report['wallpaper_fix'] = wallpaper_fix
+    report['worker_opt'] = worker_opt
+    report['baseline_recipe'] = ('423593-adrenometal-nine-patch-no-private-cache' if worker_opt else
+                                 'wallpaper-current' if wallpaper_fix else 'default-mode')
+    report['runtime_telemetry'] = {
+        'compiled': RUNTIME_TELEMETRY_PATCH in selected,
+        'patch_sha256': sha(device / RUNTIME_TELEMETRY_PATCH),
+        'head_rows': ['S-pid', 'V-pipeline', 'J-waits'], 'runtime_qualified': False,
+    }
+    report['lowering_worker'] = {
+        'compiled': LOWERING_WORKER_PATCH in selected,
+        'default_enabled': False,
+        'gate': 'readable kern.bootargs + exact nabu-metal-worker=1 + process backboardd',
+        'status_codes': {'1': 'other-process', '2': 'bootargs-read-failed', '3': 'bootargs-too-large',
+                         '4': 'bootarg-disabled', '5': 'enabled'},
+        'patch_sha256': sha(device / LOWERING_WORKER_PATCH),
+        'runtime_pin': WORKER_RUNTIME_UPSTREAM,
+        'baseline_sources_sha256': BASELINE_423593_SOURCE_SHA256,
+        'baseline_reference': {
+            'run_id': 42359337632,
+            'head_sha': 'ac643d4c2396dfd24cf4c7d3e4848c04a44ffa09',
+            'addon_sha256': '2b42f3051d4b1415a7ab28038bb2d0ba3ab9874cef1ec0f8b3f2ab467fa71359',
+            'plugin_sha256': 'f3c57031f4a724c73a3b5618a133c4f395853b309ddab64206291ac2d34fa1b3',
+            'turnip_sha256': '202e425a68e625de63a0e096c81e4d006eed8aaa7529dbfc93bc4f02d16180ab',
+            'byte_identity_expected': False,
+        },
+        'private_shader_cache_compiled': False,
+        'runtime_qualified': False,
+    }
+    report['runtime_qos_compiled'] = fps_opt
+    report['private_shader_cache'] = {
+        'compiled': fps_opt and not worker_opt,
+        'excluded_by_worker_opt': worker_opt,
+        'runtime_qualified': False,
+    }
+    if worker_opt:
+        metal = root / 'drivers/AdrenoMetal'
+        report['lowering_worker']['sources_sha256'] = {
+            relative: sha(metal / relative)
+            for relative in BASELINE_423593_SOURCE_SHA256
+        }
+        report['lowering_worker']['runtime_sources_sha256'] = verify_lowering_worker_runtime(
+            root / '.cache/gpu-reference/metal2vulkan')
     if completion_observe:
         from nabu_metal_completion_observation import qualify
         source_output = output / 'completion-observe-source'
@@ -437,6 +573,22 @@ def build(root, device, output, env, fps_opt=False, async_fix=False, completion_
     if report['bundle_built']:
         if fps_opt:
             report['runtime_qos'] = collect_runtime_qos(root, device, output)
+        if fps_opt and not worker_opt:
+            metal = root / 'drivers/AdrenoMetal'
+            helper = metal / 'NabuPrivateShaderCache.h'
+            if helper.read_bytes() != (device / 'platform/NabuPrivateShaderCache.h').read_bytes():
+                raise ValueError('Built private cache helper differs from its input')
+            report['private_shader_cache'] = dict(helper_sha256=sha(helper),
+                patch_sha256=sha(device / 'patches/adrenometal-nabu-private-shader-cache.patch'),
+                frontend_sha256=sha(metal / 'NativeBridgeMetalFrontend.mm'),
+                smoke_sha256=sha(metal / 'NativeTurnipSmoke.h'), compiled=True, shared_uid_cache=False,
+                runtime_qualified=False)
+            cache_source = output / 'cache-source'
+            cache_source.mkdir()
+            for name in ('NabuPrivateShaderCache.h', 'NativeBridgeMetalFrontend.mm',
+                         'NativeTurnipSmoke.h', 'NativeAdrenoMetalConfig.h'):
+                shutil.copyfile(metal / name, cache_source / name)
+            report['private_shader_cache']['config_sha256'] = sha(metal / 'NativeAdrenoMetalConfig.h')
         shutil.copytree(bundle, output / bundle.name, symlinks=True)
         shutil.copyfile(built / 'trust.json', output / 'trust.json')
         trust = json.loads((built / 'trust.json').read_text())

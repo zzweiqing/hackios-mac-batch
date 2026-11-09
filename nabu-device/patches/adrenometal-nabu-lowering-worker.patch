@@ -1,0 +1,88 @@
+--- a/NativeAdrenoMetalPlugin.mm
++++ b/NativeAdrenoMetalPlugin.mm
+@@ -13,5 +13,6 @@
+ #include <unistd.h>
+ #include <pwd.h>
++#include <sys/sysctl.h>
+ #include <mach/mach.h>
+ #include <objc/message.h>
+ #include "NativeAdrenoUserTest.h"
+@@ -35,4 +36,40 @@
+ namespace publish {
++// Lowering Worker is an experiment: only the render server may opt in, and only
++// when the boot argument can actually be read and contains the exact token
++// "nabu-metal-worker=1". The child processes inherit this environment from
++// launchd, so forcing it to 1/0 here for every process is part of the contract.
++enum LoweringGate : unsigned {
++    LoweringGateUnset = 0,
++    LoweringGateOtherProcess = 1,
++    LoweringGateReadFailed = 2,
++    LoweringGateTooLarge = 3,
++    LoweringGateDisabled = 4,
++    LoweringGateEnabled = 5,
++};
++static unsigned loweringBootArg() {
++    constexpr size_t capacity = 4096;
++    size_t size = 0;
++    if (sysctlbyname("kern.bootargs", nullptr, &size, nullptr, 0) || !size)
++        return LoweringGateReadFailed;
++    if (size > capacity)
++        return LoweringGateTooLarge;
++    char text[capacity] = {};
++    if (sysctlbyname("kern.bootargs", text, &size, nullptr, 0))
++        return LoweringGateReadFailed;
++    text[capacity - 1] = 0;
++    for (char *save = nullptr, *token = strtok_r(text, " \t\r\n", &save);
++         token; token = strtok_r(nullptr, " \t\r\n", &save))
++        if (!strcmp(token, "nabu-metal-worker=1"))
++            return LoweringGateEnabled;
++    return LoweringGateDisabled;
++}
++static void selectLoweringWorker() {
++    const unsigned status = strcmp(getprogname(), "backboardd") == 0 ?
++        loweringBootArg() : LoweringGateOtherProcess;
++    setenv("NABU_METAL_LOWERING_STATUS", status == 5 ? "5" :
++           status == 4 ? "4" : status == 3 ? "3" : status == 2 ? "2" : "1", 1);
++    setenv("NABU_METAL_LOWERING_WORKER", status == 5 ? "1" : "0", 1);
++}
+ // The image's marker: a file beside the bundle in the union view of /System/Library/Extensions (the bundle's own seal stays untouched).
+ // A file beside the bundle: its path in path, true when it is readable.
+ static bool requestedPath(const char *name, char *path, size_t size) {
+@@ -49,5 +86,6 @@
+ }
+ static id deviceForPort(unsigned port) {
++    selectLoweringWorker();
+     char policyPath[1024];
+     if (requestedPath("NativeAdrenoMetal.display-policy", policyPath, sizeof(policyPath))) {
+         systemformatpolicy::start(policyPath);
+--- a/bridge/NativeMetalObjects.rs
++++ b/bridge/NativeMetalObjects.rs
+@@ -120,4 +120,20 @@
+ /// # Safety
+ /// `loader` and `cache` are C strings.
++unsafe extern "C" {
++    fn getprogname() -> *const c_char;
++}
++fn lowering_worker_enabled() -> bool {
++    fn is(name: &str, value: &str) -> bool {
++        std::env::var_os(name).is_some_and(|v| v == std::ffi::OsStr::new(value))
++    }
++    if !is("NABU_METAL_LOWERING_WORKER", "1") || !is("NABU_METAL_LOWERING_STATUS", "5") {
++        return false;
++    }
++    // Defense in depth if this environment is ever supplied outside the plugin:
++    // only the render server may select Worker.
++    let name = unsafe { getprogname() };
++    !name.is_null() && unsafe { CStr::from_ptr(name) }.to_bytes() == b"backboardd"
++}
++
+ #[unsafe(no_mangle)]
+ pub unsafe extern "C" fn nmb_device_open(loader: *const c_char, cache: *const c_char) -> *mut NmbDevice {
+@@ -169,4 +185,7 @@
+         options.policy.host_page_textures = metal2vulkan::device::HostPageTexturePolicy::InPlaceWrites;
+         options.policy.pipeline_waits = metal2vulkan::device::PipelineWaitPolicy::Exact;
++        if lowering_worker_enabled() {
++            options.policy.render_lowering = metal2vulkan::device::RenderLoweringPolicy::Worker;
++        }
+ 
+         let device = Device::system_default_with(&options).map_err(e("device"))?;
