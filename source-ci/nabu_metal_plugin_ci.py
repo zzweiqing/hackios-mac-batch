@@ -467,7 +467,12 @@ def build(root, device, output, env, fps_opt=False, async_fix=False, completion_
     report['runtime_telemetry'] = {
         'compiled': RUNTIME_TELEMETRY_PATCH in selected,
         'patch_sha256': sha(device / RUNTIME_TELEMETRY_PATCH),
-        'head_rows': ['S-pid', 'V-pipeline', 'J-waits'], 'runtime_qualified': False,
+        'head_rows': ['S-pid', 'V-pipeline', 'J-split-waits'],
+        'wait_stages': {'runtime': 'runtime wait call including queued lowering settlement',
+                        'handlers': 'frontend dispatch group wait',
+                        'original_wait_totals_retained': True,
+                        'counter_reads': 'independent cumulative values'},
+        'runtime_qualified': False,
     }
     report['lowering_worker'] = {
         'compiled': LOWERING_WORKER_PATCH in selected,
