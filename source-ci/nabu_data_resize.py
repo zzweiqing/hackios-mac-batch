@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import ctypes
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -330,10 +331,55 @@ def verify_identity(original, candidate):
             'APFS identity changed')
 
 
+@lru_cache(maxsize=1)
+def darwin_library():
+    library = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+    library.listxattr.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    library.listxattr.restype = ctypes.c_ssize_t
+    library.getxattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p,
+                                ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+    library.getxattr.restype = ctypes.c_ssize_t
+    return library
+
+
+def attribute_names(path):
+    if sys.platform != 'darwin':
+        return os.listxattr(path, follow_symlinks=False)
+    library = darwin_library()
+    size = library.listxattr(os.fsencode(path), None, 0, 1)  # XATTR_NOFOLLOW
+    if size < 0:
+        raise OSError(ctypes.get_errno(), 'Cannot list Darwin extended attributes')
+    require(size <= 1 << 20, 'Extended attribute names exceed bounded buffer')
+    if not size:
+        return []
+    buffer = ctypes.create_string_buffer(size)
+    require(library.listxattr(os.fsencode(path), buffer, size, 1) == size,
+            'Extended attribute names changed while reading')
+    data = buffer.raw
+    require(data.endswith(b'\0'), 'Invalid extended attribute names')
+    names = data[:-1].split(b'\0')
+    require(all(names) and len(set(names)) == len(names), 'Ambiguous extended attribute names')
+    return [os.fsdecode(name) for name in names]
+
+
+def attribute_value(path, name):
+    if sys.platform != 'darwin':
+        return os.getxattr(path, name, follow_symlinks=False)
+    library = darwin_library()
+    size = library.getxattr(os.fsencode(path), os.fsencode(name), None, 0, 0, 1)
+    if size < 0:
+        raise OSError(ctypes.get_errno(), 'Cannot read Darwin extended attribute')
+    require(size <= 16 << 20, 'Extended attribute value exceeds bounded buffer')
+    buffer = ctypes.create_string_buffer(max(size, 1))
+    require(library.getxattr(os.fsencode(path), os.fsencode(name), buffer, size, 0, 1) == size,
+            'Extended attribute value changed while reading')
+    return buffer.raw[:size]
+
+
 def darwin_acl(path):
     if sys.platform != 'darwin':
         return {'available': False}
-    library = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+    library = darwin_library()
     library.acl_get_link_np.argtypes = [ctypes.c_char_p, ctypes.c_int]
     library.acl_get_link_np.restype = ctypes.c_void_p
     library.acl_to_text.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ssize_t)]
@@ -397,8 +443,8 @@ def build_manifest(mountpoint):
                     'Unsupported filesystem entry')
             record['rdev'] = before.st_rdev
         attributes = {}
-        for name in sorted(os.listxattr(path, follow_symlinks=False)):
-            value = os.getxattr(path, name, follow_symlinks=False)
+        for name in sorted(attribute_names(path)):
+            value = attribute_value(path, name)
             attributes[name] = {'bytes': len(value), 'sha256': hashlib.sha256(value).hexdigest()}
         record['xattrs'] = attributes
         record['acl'] = darwin_acl(path)
