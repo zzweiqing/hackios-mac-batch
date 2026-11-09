@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import ctypes
+import errno
 from functools import lru_cache
 import hashlib
 import json
@@ -33,6 +34,7 @@ HDIUTIL = '/usr/bin/hdiutil'
 DISKUTIL = '/usr/sbin/diskutil'
 MOUNT_APFS = '/sbin/mount_apfs'
 FSCK_APFS = '/sbin/fsck_apfs'
+XATTR_OPTIONS = 0x21  # XATTR_NOFOLLOW | XATTR_SHOWCOMPRESSION
 
 
 def require(condition, message):
@@ -346,14 +348,14 @@ def attribute_names(path):
     if sys.platform != 'darwin':
         return os.listxattr(path, follow_symlinks=False)
     library = darwin_library()
-    size = library.listxattr(os.fsencode(path), None, 0, 1)  # XATTR_NOFOLLOW
+    size = library.listxattr(os.fsencode(path), None, 0, XATTR_OPTIONS)
     if size < 0:
         raise OSError(ctypes.get_errno(), 'Cannot list Darwin extended attributes')
     require(size <= 1 << 20, 'Extended attribute names exceed bounded buffer')
     if not size:
         return []
     buffer = ctypes.create_string_buffer(size)
-    require(library.listxattr(os.fsencode(path), buffer, size, 1) == size,
+    require(library.listxattr(os.fsencode(path), buffer, size, XATTR_OPTIONS) == size,
             'Extended attribute names changed while reading')
     data = buffer.raw
     require(data.endswith(b'\0'), 'Invalid extended attribute names')
@@ -366,12 +368,12 @@ def attribute_value(path, name):
     if sys.platform != 'darwin':
         return os.getxattr(path, name, follow_symlinks=False)
     library = darwin_library()
-    size = library.getxattr(os.fsencode(path), os.fsencode(name), None, 0, 0, 1)
+    size = library.getxattr(os.fsencode(path), os.fsencode(name), None, 0, 0, XATTR_OPTIONS)
     if size < 0:
         raise OSError(ctypes.get_errno(), 'Cannot read Darwin extended attribute')
     require(size <= 16 << 20, 'Extended attribute value exceeds bounded buffer')
     buffer = ctypes.create_string_buffer(max(size, 1))
-    require(library.getxattr(os.fsencode(path), os.fsencode(name), buffer, size, 0, 1) == size,
+    require(library.getxattr(os.fsencode(path), os.fsencode(name), buffer, size, 0, XATTR_OPTIONS) == size,
             'Extended attribute value changed while reading')
     return buffer.raw[:size]
 
@@ -386,10 +388,21 @@ def darwin_acl(path):
     library.acl_to_text.restype = ctypes.c_void_p
     library.acl_free.argtypes = [ctypes.c_void_p]
     library.acl_free.restype = ctypes.c_int
+    before = os.lstat(path)
     ctypes.set_errno(0)
     acl = library.acl_get_link_np(os.fsencode(path), 0x100)  # ACL_TYPE_EXTENDED, no symlink following.
     if not acl:
-        raise OSError(ctypes.get_errno(), 'Cannot read Darwin ACL')
+        error = ctypes.get_errno()
+        # Darwin filesec_get_property(FILESEC_ACL) returns ENOENT when that
+        # property is absent. Distinguish it from a vanished pathname using
+        # no-follow identity checks before and after acl_get_link_np.
+        # apple-oss-distributions/Libc: posix1e/acl_file.c, gen/filesec.c.
+        if error == errno.ENOENT:
+            after = os.lstat(path)
+            require((before.st_dev, before.st_ino, before.st_mode) ==
+                    (after.st_dev, after.st_ino, after.st_mode), 'ACL path changed')
+            return {'available': True, 'present': False}
+        raise OSError(error, 'Cannot read Darwin ACL')
     text = None
     try:
         size = ctypes.c_ssize_t()
@@ -397,7 +410,8 @@ def darwin_acl(path):
         if not text or size.value < 0:
             raise OSError(ctypes.get_errno(), 'Cannot serialize Darwin ACL')
         value = ctypes.string_at(text, size.value)
-        return {'available': True, 'bytes': len(value), 'sha256': hashlib.sha256(value).hexdigest()}
+        return {'available': True, 'present': True, 'bytes': len(value),
+                'sha256': hashlib.sha256(value).hexdigest()}
     finally:
         if text:
             library.acl_free(text)
