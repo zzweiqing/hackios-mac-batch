@@ -62,6 +62,7 @@ jobs:
               with path.open('rb') as stream: assert hashlib.file_digest(stream,'sha256').hexdigest()==row['sha256']
               path.chmod(0o444)
           binding=dict(run_id=os.environ['GITHUB_RUN_ID'],attempt=os.environ['GITHUB_RUN_ATTEMPT'],head_sha=os.environ['GITHUB_SHA'],input_release=os.environ['INPUT_RELEASE'],input_archive_sha256=expected,input_manifest=manifest,device_writes=False)
+          binding['resize_script_sha256']=hashlib.sha256(Path('source-ci/nabu_data_resize.py').read_bytes()).hexdigest()
           (root/'data-evidence/binding.json').write_text(json.dumps(binding,indent=2)+'\n')
           PY
       - name: Resize copies and verify preserved files
@@ -72,7 +73,7 @@ jobs:
           root=Path(os.environ['RUNNER_TEMP']).resolve(); manifest=json.loads((root/'data-input/input.json').read_text())
           for name in ('data','seed'):
               source=root/'data-input'/(name+'.apfs')
-              command=['sudo',os.environ['pythonLocation']+'/bin/python3','source-ci/nabu_data_resize.py','--input',str(source),'--input-sha256',manifest['inputs'][name+'.apfs']['sha256'],'--output-dir',str(root/'data-evidence'/name),'--target-bytes',str(manifest['target_bytes'])]
+              command=['sudo','/usr/bin/env','GITHUB_RUN_ID='+os.environ['GITHUB_RUN_ID'],'GITHUB_SHA='+os.environ['GITHUB_SHA'],os.environ['pythonLocation']+'/bin/python3','source-ci/nabu_data_resize.py','--input',str(source),'--input-sha256',manifest['inputs'][name+'.apfs']['sha256'],'--output-dir',str(root/'data-evidence'/name),'--target-bytes',str(manifest['target_bytes'])]
               with (root/'data-evidence'/(name+'-driver.log')).open('wb') as log:
                   result=subprocess.run(command,stdout=log,stderr=subprocess.STDOUT)
               if result.returncode: raise SystemExit('APFS copy resize failed; details retained privately')

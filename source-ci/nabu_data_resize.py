@@ -242,6 +242,28 @@ def normalized_uuid(value):
     return str(parsed)
 
 
+def read_only(info, kind):
+    values = []
+    for key, invert in (('ReadOnly' + kind, False), ('Writable' + kind, True)):
+        if key in info:
+            require(type(info[key]) is bool, 'Invalid media access flag')
+            values.append(not info[key] if invert else info[key])
+    require(values and len(set(values)) == 1, 'Missing or conflicting media access flags')
+    return values[0]
+
+
+def is_mounted(info):
+    values = []
+    if 'Mounted' in info:
+        require(type(info['Mounted']) is bool, 'Invalid mounted flag')
+        values.append(info['Mounted'])
+    if 'MountPoint' in info:
+        require(isinstance(info['MountPoint'], str), 'Invalid mount path')
+        values.append(bool(info['MountPoint']))
+    require(values and len(set(values)) == 1, 'Missing or conflicting mount state')
+    return values[0]
+
+
 def parse_topology(payload, infos, owned, expected_bytes, *, wrapper, readonly):
     containers = payload.get('Containers') if isinstance(payload, dict) else None
     require(isinstance(containers, list) and len(containers) == 1, 'Expected one APFS container')
@@ -265,13 +287,13 @@ def parse_topology(payload, infos, owned, expected_bytes, *, wrapper, readonly):
             DEVICE_PATTERN.fullmatch(volume_device).group(2) is not None and
             set(owned) == {root, store_device, container_device, volume_device},
             'Unexpected APFS device family')
-    require(container.get('Fusion') is False and container.get('CapacityCeiling') == expected_bytes and
+    require(container.get('Fusion', False) is False and container.get('CapacityCeiling') == expected_bytes and
             store.get('Size') == expected_bytes and type(container.get('CapacityFree')) is int and
             0 <= container['CapacityFree'] <= expected_bytes, 'APFS store/container geometry differs')
     store_info, volume_info = infos[store_device], infos[volume_device]
     require(store_info.get('TotalSize') == expected_bytes and
             store_info.get('DeviceBlockSize') == SECTOR and
-            store_info.get('ReadOnlyMedia') is readonly,
+            read_only(store_info, 'Media') is readonly,
             'Backing store size, sector size or access mode differs')
     for info in (store_info, volume_info):
         require(device_node(info.get('APFSContainerReference')) == container_device,
@@ -282,8 +304,8 @@ def parse_topology(payload, infos, owned, expected_bytes, *, wrapper, readonly):
     for key in ('Encrypted', 'APFSEncrypted', 'Locked'):
         require(key not in volume_info or volume_info[key] is False, 'Encrypted/locked volume refused')
         require(key not in volume or volume[key] is False, 'Encrypted/locked volume refused')
-    require(volume_info.get('Mounted') is False and not volume_info.get('MountPoint') and
-            all(not info.get('Mounted') and not info.get('MountPoint') for info in infos.values()),
+    require(not is_mounted(volume_info) and
+            all(not is_mounted(info) for info in infos.values()),
             'An attached filesystem is unexpectedly mounted')
     require(volume.get('CapacityQuota', 0) == 0, 'A volume quota would prevent expansion')
     volume_uuid = normalized_uuid(volume.get('APFSVolumeUUID'))
@@ -473,8 +495,8 @@ class Attachment:
         self.mountpoint = mountpoint
         self.commands.run([MOUNT_APFS, '-o', 'rdonly,nobrowse,owners,noatime', volume, str(mountpoint)])
         info = self.info(volume)
-        require(info.get('Mounted') is True and info.get('MountPoint') == str(mountpoint) and
-                info.get('ReadOnlyVolume') is True and
+        require(is_mounted(info) and info.get('MountPoint') == str(mountpoint) and
+                read_only(info, 'Volume') and info.get('GlobalPermissionsEnabled') is True and
                 os.statvfs(mountpoint).f_flag & os.ST_RDONLY and
                 normalized_uuid(info.get('VolumeUUID')) == self.topology['volume_uuid'],
                 'Read-only mount identity was not verified')
@@ -488,11 +510,11 @@ class Attachment:
         volume = self.topology['volume_device']
         require(volume in self.devices, 'Volume is outside this attachment')
         info = self.info(volume)
-        if info.get('Mounted'):
+        if is_mounted(info):
             require(info.get('MountPoint') == str(self.mountpoint), 'Mount moved to an unexpected path')
             self.commands.run([DISKUTIL, 'unmount', volume])
         info = self.info(volume)
-        require(info.get('Mounted') is False and not info.get('MountPoint'), 'Volume remains mounted')
+        require(not is_mounted(info), 'Volume remains mounted')
         self.mountpoint.rmdir()
         self.mountpoint = None
 
