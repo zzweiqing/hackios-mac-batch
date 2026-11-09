@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+import ctypes
 import hashlib
 import json
 import os
@@ -307,6 +308,34 @@ def verify_identity(original, candidate):
             'APFS identity changed')
 
 
+def darwin_acl(path):
+    if sys.platform != 'darwin':
+        return {'available': False}
+    library = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+    library.acl_get_link_np.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    library.acl_get_link_np.restype = ctypes.c_void_p
+    library.acl_to_text.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ssize_t)]
+    library.acl_to_text.restype = ctypes.c_void_p
+    library.acl_free.argtypes = [ctypes.c_void_p]
+    library.acl_free.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    acl = library.acl_get_link_np(os.fsencode(path), 0x100)  # ACL_TYPE_EXTENDED, no symlink following.
+    if not acl:
+        raise OSError(ctypes.get_errno(), 'Cannot read Darwin ACL')
+    text = None
+    try:
+        size = ctypes.c_ssize_t()
+        text = library.acl_to_text(acl, ctypes.byref(size))
+        if not text or size.value < 0:
+            raise OSError(ctypes.get_errno(), 'Cannot serialize Darwin ACL')
+        value = ctypes.string_at(text, size.value)
+        return {'available': True, 'bytes': len(value), 'sha256': hashlib.sha256(value).hexdigest()}
+    finally:
+        if text:
+            library.acl_free(text)
+        library.acl_free(acl)
+
+
 def build_manifest(mountpoint):
     root = os.fsencode(mountpoint)
     root_device = os.lstat(root).st_dev
@@ -350,6 +379,7 @@ def build_manifest(mountpoint):
             value = os.getxattr(path, name, follow_symlinks=False)
             attributes[name] = {'bytes': len(value), 'sha256': hashlib.sha256(value).hexdigest()}
         record['xattrs'] = attributes
+        record['acl'] = darwin_acl(path)
         after = os.lstat(path)
         require((before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_gid,
                  before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
