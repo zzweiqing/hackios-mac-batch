@@ -1,0 +1,88 @@
+name: nabu Data copy resize
+on:
+  workflow_dispatch:
+    inputs:
+      input_release:
+        description: Private release containing input.tar.gz
+        required: true
+      input_sha256:
+        description: SHA256 of the private input archive
+        required: true
+      target_bytes:
+        description: Requested logical APFS bytes
+        required: true
+        default: '1879048192'
+permissions:
+  contents: read
+concurrency:
+  group: nabu-data-resize
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  resize:
+    runs-on: macos-26
+    timeout-minutes: 35
+    env:
+      GH_TOKEN: ${{ secrets.PRIVATE_INPUTS_TOKEN }}
+      PRIVATE_INPUTS_REPO: ${{ vars.PRIVATE_INPUTS_REPO }}
+      INPUT_RELEASE: ${{ inputs.input_release }}
+      INPUT_SHA256: ${{ inputs.input_sha256 }}
+      TARGET_BYTES: ${{ inputs.target_bytes }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Fetch and validate private input
+        run: |
+          test "$(gh api "repos/$PRIVATE_INPUTS_REPO" --jq .private)" = true
+          mkdir -p "$RUNNER_TEMP/data-input" "$RUNNER_TEMP/data-evidence"
+          gh release download "$INPUT_RELEASE" --repo "$PRIVATE_INPUTS_REPO" --pattern input.tar.gz --dir "$RUNNER_TEMP/data-input"
+          python3 - <<'PY'
+          import hashlib,json,os,re,tarfile
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP']).resolve()
+          archive=root/'data-input/input.tar.gz'
+          expected=os.environ['INPUT_SHA256']
+          assert re.fullmatch('[0-9a-f]{64}',expected)
+          with archive.open('rb') as stream: assert hashlib.file_digest(stream,'sha256').hexdigest()==expected
+          with tarfile.open(archive,'r:gz') as tf:
+              members=tf.getmembers()
+              assert len(members)==3 and {m.name for m in members}=={'input.json','data.apfs','seed.apfs'}
+              assert all(m.isfile() and (0<m.size<=4096 if m.name=='input.json' else m.size==1073741824) for m in members)
+              tf.extractall(root/'data-input',filter='data')
+          manifest=json.loads((root/'data-input/input.json').read_text())
+          assert manifest['target_bytes']==int(os.environ['TARGET_BYTES'])==1879048192
+          assert set(manifest['inputs'])=={'data.apfs','seed.apfs'}
+          for name,row in manifest['inputs'].items():
+              path=root/'data-input'/name
+              assert path.stat().st_size==row['bytes']==1073741824
+              with path.open('rb') as stream: assert hashlib.file_digest(stream,'sha256').hexdigest()==row['sha256']
+              path.chmod(0o444)
+          binding=dict(run_id=os.environ['GITHUB_RUN_ID'],attempt=os.environ['GITHUB_RUN_ATTEMPT'],head_sha=os.environ['GITHUB_SHA'],input_release=os.environ['INPUT_RELEASE'],input_archive_sha256=expected,input_manifest=manifest,device_writes=False)
+          (root/'data-evidence/binding.json').write_text(json.dumps(binding,indent=2)+'\n')
+          PY
+      - name: Resize copies and verify preserved files
+        run: |
+          python3 - <<'PY'
+          import json,os,subprocess
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP']).resolve(); manifest=json.loads((root/'data-input/input.json').read_text())
+          for name in ('data','seed'):
+              source=root/'data-input'/(name+'.apfs')
+              command=['sudo',os.environ['pythonLocation']+'/bin/python3','source-ci/nabu_data_resize.py','--input',str(source),'--input-sha256',manifest['inputs'][name+'.apfs']['sha256'],'--output-dir',str(root/'data-evidence'/name),'--target-bytes',str(manifest['target_bytes'])]
+              with (root/'data-evidence'/(name+'-driver.log')).open('wb') as log:
+                  result=subprocess.run(command,stdout=log,stderr=subprocess.STDOUT)
+              if result.returncode: raise SystemExit('APFS copy resize failed; details retained privately')
+          PY
+      - name: Preserve output privately
+        if: always()
+        run: |
+          test -d "$RUNNER_TEMP/data-evidence" || exit 0
+          test "$(gh api "repos/$PRIVATE_INPUTS_REPO" --jq .private)" = true
+          TAG="data-resize-$GITHUB_RUN_ID-attempt-$GITHUB_RUN_ATTEMPT"
+          sudo tar -czf "$RUNNER_TEMP/$TAG.tar.gz" -C "$RUNNER_TEMP" data-evidence
+          sudo chmod 644 "$RUNNER_TEMP/$TAG.tar.gz"
+          gh release create "$TAG" "$RUNNER_TEMP/$TAG.tar.gz" --repo "$PRIVATE_INPUTS_REPO" --title "$TAG" --notes "Private APFS copy resize evidence; no tablet writes or runtime qualification."
