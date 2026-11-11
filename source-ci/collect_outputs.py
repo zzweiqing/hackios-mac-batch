@@ -125,7 +125,8 @@ def selected_files(upstream):
             elif relative == 'armdt-platform' and path.name in ('NabuHeartbeat.o', 'heartbeat-compile.log'):
                 add(path, path.relative_to(work))
             elif relative == 'native-ufs' and (path.suffix in ('.cpp', '.h') or
-                                               path.name in ('NativeUfs.o', 'compile.log')):
+                                               path.name in ('NativeUfs.o', 'compile.log') or
+                                               path.name.startswith('NabuWifi') and path.suffix in ('.o', '.log', '.json')):
                 add(path, path.relative_to(work))
             elif relative == 'native-ram-block' and path.name in (
                     'NativeRamBlock.o', 'NativeRamBlock.cpp', 'compile.log', 'NabuGpuUserprobeAddon.h', 'PersistOverlay.h', 'DirectDisk.h'):
@@ -275,6 +276,10 @@ def selected_sources(device):
     ]
     root = root.resolve()
     sources += [(p, 'device/ufs/' + p.name) for p in sorted((device / 'ufs').glob('NabuLog*.h'))]
+    sources += [(p, 'device/' + p.relative_to(device).as_posix())
+                for directory in ('platform', 'ufs')
+                for p in sorted((device / directory).glob('NabuWifi*')) if p.suffix in ('.h', '.cpp')]
+    sources += [(source_dir / 'nabu_wifi_ci.py', 'source-ci/nabu_wifi_ci.py')]
     sources += [(device / 'scripts/nabu_capture_source.py', 'device/scripts/nabu_capture_source.py'),
                 (device / 'platform/NabuUsbProbe.cpp', 'device/platform/NabuUsbProbe.cpp'),
                 (device / 'platform/NabuHeartbeat.cpp', 'device/platform/NabuHeartbeat.cpp'),
@@ -432,6 +437,10 @@ def main():
                 manifest['logging_qualification'] = qualify_logging_candidate(
                     args.upstream, candidate, identity['log_capture'].get('source_identity'))
                 summary['logging_qualified_statically'] = True
+            if prepared.get('wifi_control') is not None:
+                from nabu_wifi_ci import qualify_candidate as qualify_wifi
+                manifest['wifi_qualification'] = qualify_wifi(args.upstream, candidate, prepared)
+                summary['wifi_qualified_statically'] = manifest['wifi_qualification']['compiled']
             manifest['data_skeleton_qualification'] = qualify_data_skeleton(
                 args.upstream, prepared.get('data_skeleton'), capture_logs=bool(identity['log_capture']))
             summary['data_skeleton_qualified_statically'] = bool(

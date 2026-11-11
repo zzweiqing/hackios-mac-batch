@@ -11,6 +11,7 @@ from nabu_graphics_startup import LEGACY_PATCH, retime_graphics_patches
 from nabu_data_skeleton import prepare_data_skeleton
 from nabu_data_none_ci import prepare as prepare_data_none
 from nabu_logging_build import enable_logging
+from nabu_wifi_ci import enable_wifi
 from nabu_cs_stream import prepare_signature_scan
 from nabu_display_ci import (PROFILE as QEMU_LEGACY_PROFILE, CPU_PROFILE as QEMU_CPU_PRESENT_PROFILE,
                              HARDWARE_CPU_PROFILE as UFS_CPU_PRESENT_PROFILE,
@@ -695,7 +696,10 @@ def main():
     p.add_argument('--capture-logs', action='store_true', help='Build the explicit RAM/ESP logging capability; writes remain opt-in')
     p.add_argument('--gpu-userprobe', action='store_true', help='Enable the closed ABI1 probe addon boot transport')
     p.add_argument('--ui-watch', action='store_true', help='Compile opt-in bounded UI exec/main-thread observations')
+    p.add_argument('--wifi-control', action='store_true', help='Build the independent firmware loader and MPSS control executor')
     args = p.parse_args()
+    if args.wifi_control and (args.profile not in UFS_OWNER_PROFILES or not args.capture_logs):
+        raise SystemExit('The first Wi-Fi control candidate requires a captured hardware UFS owner profile')
     if args.ui_watch and (args.profile != UFS_GPU_METAL_PROFILE or not args.capture_logs or not args.gpu_userprobe):
         raise SystemExit('UI watch requires the explicit captured Metal profile and GPU userprobe')
     if args.capture_logs and args.profile not in UFS_OWNER_PROFILES:
@@ -783,6 +787,7 @@ def main():
     if 'CONFIG_XNU_OWNER_DATA_MOUNT=y' in options:
         data_skeleton = prepare_data_skeleton(args.upstream)
     log_capture = enable_logging(args.upstream, args.device) if args.capture_logs else None
+    wifi_control = enable_wifi(args.upstream, args.device) if args.wifi_control else None
     data_none = (prepare_data_none(args.upstream, args.device)
                  if 'CONFIG_XNU_OWNER_DATA_MOUNT=y' in options else None)
     nabu_idle = None
@@ -833,6 +838,7 @@ def main():
         'nabu_idle': nabu_idle,
         'signature_scan_io': signature_scan,
         'log_capture': log_capture,
+        'wifi_control': wifi_control,
         'vc_text_scale': {'argument': VC_TEXT_SCALE['argument'],
                           'default': VC_TEXT_SCALE['default'],
                           'maximum': VC_TEXT_SCALE['maximum'],

@@ -1,6 +1,10 @@
 --- a/NativeBridgeMetalFrontend.mm
 +++ b/NativeBridgeMetalFrontend.mm
-@@ -24,7 +24,8 @@
+@@ -18,16 +18,17 @@
+ #include <map>
+ #include <pthread.h>
+ #include <string>
+ #include <tuple>
  #include <unordered_map>
  #include <vector>
  #include <sys/mman.h>
@@ -9,14 +13,35 @@
  #include <CommonCrypto/CommonDigest.h>
  #include <dlfcn.h>
  #include <execinfo.h>
-@@ -55,4 +56,6 @@
+ #include <mach/mach.h>
+ #include "bridge/NativeMetalObjects.h"
+ #include "NativeBridgeMetalFrontend.h"
+ 
+ extern "C" void sys_dcache_flush(void *start, size_t length);
+@@ -48,16 +49,18 @@
+ // Where the time goes on the CPU side of the bridge: pipeline, library and function creation (count, total and slowest, in microseconds), and the
+ // last commits with what each held and how long the GPU took (commit to completion).
+ static uint64_t nowUs() {return clock_gettime_nsec_np(CLOCK_UPTIME_RAW)/1000;}
+ struct Timed {std::atomic<uint64_t> count{0},total{0},slowest{0};
+  void add(uint64_t began){const uint64_t took=nowUs()-began;count++;total+=took;uint64_t seen=slowest.load();while(took>seen && !slowest.compare_exchange_weak(seen,took)){}}};
+ static Timed gTimePipeline,gTimeLibrary,gTimeFunction,gTimeEncodeToCommit;
  static Timed gTimeWaitScheduled,gTimeWaitCompleted;
  static Timed gTimeResourceWait;
 +static Timed gTimeRuntimeWaitScheduled,gTimeHandlerWaitScheduled;
 +static Timed gTimeRuntimeWaitCompleted,gTimeHandlerWaitCompleted;
  static std::atomic<uint64_t> gResourceChecks,gResourceSkipped;
  static Timed gTimeSurfaceFlush;
-@@ -1371,7 +1374,10 @@
+ static std::atomic<uint64_t> gSurfaceFlushBytes,gSurfaceFlushDuplicates;
+ struct EncodedWork {uint32_t passes,draws,dispatches,blits;uint64_t pixels;};
+ struct CommitRecord {uint64_t committedUs=0,callbackUs=0,ageUs=0;int64_t scheduledUs=-1;uint32_t index=0;EncodedWork work={};};
+ static CommitRecord gCommitRing[32];
+ static std::mutex gCommitLock;
+ static std::mutex gProblemLock;
+@@ -1367,26 +1370,32 @@
+  }
+  self.failedLocally=YES;gCommitFailures++;
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),^{[self finish];});
+ }
  - (void)waitUntilCompleted {
   if(!self.committed)return;
   const uint64_t began=nowUs();
@@ -27,7 +52,6 @@
 + gTimeHandlerWaitCompleted.add(handlersBegan);
   gTimeWaitCompleted.add(began);
  }
-@@ -1378,9 +1384,12 @@
  - (void)waitUntilScheduled {
   if(!self.committed)return;
   const uint64_t began=nowUs();
@@ -40,17 +64,29 @@
 + gTimeHandlerWaitScheduled.add(handlersBegan);
   gTimeWaitScheduled.add(began);
  }
-@@ -1958,14 +1967,26 @@
+ @end
+ static void scheduled(void *context) {[(__bridge NBCommandBuffer *)context didSchedule];}
+ // The runtime's completion: the command buffer's own reference, taken at commit, is given back here.
+ static void completed(void *context) {
+  gCompleted++;
+  NBCommandBuffer *commandBuffer=(__bridge_transfer NBCommandBuffer *)context;
+@@ -2243,29 +2252,51 @@
+ }
+ // The telemetry table the plugin streams to the kernel's log: newline-separated rows of at most 90 characters.
+ extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
+  size_t at=0;out[0]=0;
   auto row=[&](const char *format,auto... args){
    char text[200];int n=snprintf(text,sizeof text,format,args...);if(n<=0)return;if(n>90)n=90;
    if(at+(size_t)n+2>=size)return;memcpy(out+at,text,(size_t)n);at+=(size_t)n;out[at++]='\n';out[at]=0;};
   auto ms=[](uint64_t us){return (unsigned long long)(us/1000);};
+- {std::lock_guard<std::mutex> lock(gBenchLock);for(unsigned r=0;r<4;r++)if(gBench[r][0])row("%.90s",gBench[r]);}
+- row("S c%llu/%llu d%llu p%llu x%llu R%llu D%llu F%llu M%lluk C%llu B%llu",(unsigned long long)gCommits.load(),(unsigned long long)gCommitFailures.load(),
++ uint64_t headPhases[6]={};
++ const bool headPhasesReadable=nmb_runtime_wait_phase_stats(headPhases);
 + uint64_t headWork[10]={};
 + const bool headWorkReadable=gDevice && nmb_device_work_stats(gDevice,headWork);
 + const unsigned loweringStatus=getenv("NABU_METAL_LOWERING_STATUS")?std::min(99u,(unsigned)strtoul(getenv("NABU_METAL_LOWERING_STATUS"),nullptr,10)):0;
 + const unsigned loweringEnabled=getenv("NABU_METAL_LOWERING_WORKER") && !strcmp(getenv("NABU_METAL_LOWERING_WORKER"),"1");
-- {std::lock_guard<std::mutex> lock(gBenchLock);for(unsigned r=0;r<4;r++)if(gBench[r][0])row("%.90s",gBench[r]);}
-- row("S c%llu/%llu d%llu p%llu x%llu R%llu D%llu F%llu M%lluk C%llu B%llu",(unsigned long long)gCommits.load(),(unsigned long long)gCommitFailures.load(),
 + row("S pid%ld wl%u/we%u c%llu/%llu d%llu p%llu x%llu R%llu D%llu F%llu M%lluk C%llu B%llu",(long)getpid(),loweringStatus,loweringEnabled,
 +  (unsigned long long)gCommits.load(),(unsigned long long)gCommitFailures.load(),
    (unsigned long long)gCompleted.load(),(unsigned long long)gPipelines.load(),(unsigned long long)gProblems.load(),(unsigned long long)gPasses.load(),
@@ -64,18 +100,87 @@
 +   (unsigned long long)headWork[8],(unsigned long long)headWork[9]);
 + else
 +  row("%s","V pipe unreadable");
-+ row("J split s%llu r%llums h%llums c%llu r%llums h%llums",
-+  (unsigned long long)gTimeWaitScheduled.count.load(),ms(gTimeRuntimeWaitScheduled.total.load()),ms(gTimeHandlerWaitScheduled.total.load()),
-+  (unsigned long long)gTimeWaitCompleted.count.load(),ms(gTimeRuntimeWaitCompleted.total.load()),ms(gTimeHandlerWaitCompleted.total.load()));
++ if(headPhasesReadable)
++  row("J phase-us s%llu settle%llu post%llu c%llu settle%llu post%llu",
++   (unsigned long long)headPhases[0],(unsigned long long)headPhases[1],(unsigned long long)headPhases[2],
++   (unsigned long long)headPhases[3],(unsigned long long)headPhases[4],(unsigned long long)headPhases[5]);
++ else
++  row("%s","J phase unreadable");
 + {std::lock_guard<std::mutex> lock(gBenchLock);for(unsigned r=0;r<4;r++)if(gBench[r][0])row("%.90s",gBench[r]);}
   row("T function n=%llu total=%llums max=%llums",
    (unsigned long long)gTimeFunction.count.load(),ms(gTimeFunction.total.load()),ms(gTimeFunction.slowest.load()));
   row("G commit-to-complete n=%llu total=%llums max=%llums mean=%lluus",(unsigned long long)gTimeEncodeToCommit.count.load(),ms(gTimeEncodeToCommit.total.load()),
-@@ -1973,3 +1994,6 @@
    ms(gTimeEncodeToCommit.slowest.load()),(unsigned long long)(gTimeEncodeToCommit.count.load()?gTimeEncodeToCommit.total.load()/gTimeEncodeToCommit.count.load():0));
 - row("J scheduled wait n=%llu total=%llums max=%llums",(unsigned long long)gTimeWaitScheduled.count.load(),ms(gTimeWaitScheduled.total.load()),ms(gTimeWaitScheduled.slowest.load()));
+- row("J completed wait n=%llu total=%llums max=%llums",(unsigned long long)gTimeWaitCompleted.count.load(),ms(gTimeWaitCompleted.total.load()),ms(gTimeWaitCompleted.slowest.load()));
 + row("J wait r%llu/%llums/%llums s%llu/%llums/%llums c%llu/%llums/%llums",
 +  (unsigned long long)gTimeResourceWait.count.load(),ms(gTimeResourceWait.total.load()),ms(gTimeResourceWait.slowest.load()),
 +  (unsigned long long)gTimeWaitScheduled.count.load(),ms(gTimeWaitScheduled.total.load()),ms(gTimeWaitScheduled.slowest.load()),
 +  (unsigned long long)gTimeWaitCompleted.count.load(),ms(gTimeWaitCompleted.total.load()),ms(gTimeWaitCompleted.slowest.load()));
-  row("J completed wait n=%llu total=%llums max=%llums",(unsigned long long)gTimeWaitCompleted.count.load(),ms(gTimeWaitCompleted.total.load()),ms(gTimeWaitCompleted.slowest.load()));
++ row("J split s%llu r%llums h%llums c%llu r%llums h%llums",
++  (unsigned long long)gTimeWaitScheduled.count.load(),ms(gTimeRuntimeWaitScheduled.total.load()),ms(gTimeHandlerWaitScheduled.total.load()),
++  (unsigned long long)gTimeWaitCompleted.count.load(),ms(gTimeRuntimeWaitCompleted.total.load()),ms(gTimeHandlerWaitCompleted.total.load()));
+  row("J resource wait n=%llu total=%llums max=%llums",(unsigned long long)gTimeResourceWait.count.load(),ms(gTimeResourceWait.total.load()),ms(gTimeResourceWait.slowest.load()));
+  row("J resource checks=%llu skipped=%llu",(unsigned long long)gResourceChecks.load(),(unsigned long long)gResourceSkipped.load());
+  uint64_t synchronization[16]={};
+  if(native_bridge_metal_synchronization_stats(synchronization)) {
+   auto total=[&](size_t index){return (unsigned long long)synchronization[index];};
+   row("J resources=%llu scope=%llu resourcebarrier=%llu serialskip=%llu",total(0),total(1),total(2),total(3));
+   row("J fence update=%llu wait=%llu summaries=%llu acquire=%llu",total(4),total(5),total(6),total(7));
+   row("J hostbarrier=%llu hostskip=%llu hostwrites=%llu privatewrites=%llu",total(8),total(9),total(10),total(11));
+--- a/bridge/NativeMetalObjects.rs
++++ b/bridge/NativeMetalObjects.rs
+@@ -275,16 +275,31 @@
+             out[i] = v.load(Relaxed);
+         }
+         out[5] = OTHER_MESSAGES[0].load(Relaxed);
+         out[6] = OTHER_MESSAGES[1].load(Relaxed);
+         let cache = get(device)?.0.shader_cache_statistics();
+         out[7] = cache.hits;
+         out[8] = cache.misses;
+         out[9] = cache.writes;
++        Ok(true)
++    })
++}
++
++/// Six process-wide words, scheduled then completed, each count, settle us and post-settlement us.
++/// This reads the runtime's atomic counters without forcing lowering or taking a device lock.
++#[unsafe(no_mangle)]
++pub extern "C" fn nmb_runtime_wait_phase_stats(out: *mut u64) -> bool {
++    guard(false, || {
++        if out.is_null() {
++            return Err("null runtime wait phase stats".into());
++        }
++        let counts = CommandBuffer::wait_phase_counts();
++        // SAFETY: the header requires six writable words.
++        unsafe { std::slice::from_raw_parts_mut(out, counts.len()) }.copy_from_slice(&counts);
+         Ok(true)
+     })
+ }
+ 
+ #[unsafe(no_mangle)]
+ pub extern "C" fn nmb_device_synchronization_stats(device: *const NmbDevice, out: *mut u64) -> bool {
+     guard(false, || {
+         if out.is_null() {
+--- a/bridge/NativeMetalObjects.h
++++ b/bridge/NativeMetalObjects.h
+@@ -37,16 +37,19 @@
+ void nmb_device_release(NmbDevice *);
+ /* True when submission and completion make imported CPU pages visible through
+  * hardware coherence or cache operations owned by the kernel. */
+ bool nmb_device_host_coherent(const NmbDevice *);
+ size_t nmb_device_name(const NmbDevice *, char *out, size_t size);
+ uint64_t nmb_device_max_buffer_length(const NmbDevice *);
+ // Pipeline makings (count, total us, longest us, waited us, failed), sink messages (info, warning+), shader cache hits/misses/writes.
+ bool nmb_device_work_stats(const NmbDevice *, uint64_t out[10]);
++// Process-wide scheduled/completed triples of count, settle us and post-settlement us.
++// The six words are independent atomic snapshots. This call executes no runtime work.
++bool nmb_runtime_wait_phase_stats(uint64_t out[6]);
+ /* Artifact lookups and driver pipeline records are separate cache layers. */
+ struct NmbShaderCacheStats {
+     uint64_t hits, misses, rejected, read_failures, writes, write_failures, evictions;
+     uint64_t driver_loads, driver_hits, driver_misses, driver_saves, driver_truncated, driver_mismatched, driver_unchanged;
+ };
+ bool nmb_device_shader_cache_stats(const NmbDevice *, struct NmbShaderCacheStats *);
+ size_t nmb_last_warning(char *out, size_t size);
+ bool nmb_device_max_threads_per_threadgroup(const NmbDevice *, uint64_t out[3]);

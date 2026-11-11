@@ -339,6 +339,7 @@ def main():
     root_layout = source / 'RootLayout.h'
     root_layout.write_text(store_partition_parser(root_layout.read_text(encoding='utf-8')), encoding='utf-8')
     logging = os.environ.get('NABU_CAPTURE_LOG') == '1'
+    wifi = os.environ.get('NABU_WIFI_CONTROL') == '1'
     logging_identity = None
     if logging:
         text = cpp.read_text(encoding='utf-8')
@@ -366,6 +367,40 @@ def main():
         (source / 'NabuLogBuild.h').write_text(
             'static const unsigned char nabu_log_build_id[32] = {' +
             ','.join(str(b) for b in identity.digest()) + '};\n', encoding='utf-8')
+    wifi_sources = {}
+    if wifi:
+        text = cpp.read_text(encoding='utf-8')
+        anchors = [
+            ('struct UfsHost {\n', 'static uint64_t nabu_wifi_lun_blocks;\n\nstruct UfsHost {\n'),
+            ('      gHost.ready = true;\n',
+             '      nabu_wifi_lun_blocks = uint64_t(loadBe32(gHost.virt + kDataOffset)) + 1;\n'
+             '      gHost.ready = true;\n'),
+            (START_ROOT, '#include "NabuWifiUfs.h"\n\n' + START_ROOT),
+            ('  native_ufs_root_step = 2;\n', '  nabu_wifi_start();\n  native_ufs_root_step = 2;\n'),
+        ]
+        for old, new in anchors:
+            if text.count(old) != 1:
+                raise ValueError('Unexpected Wi-Fi integration anchor: ' + old)
+            text = text.replace(old, new, 1)
+        cpp.write_text(text, encoding='utf-8')
+        for path in sorted((device / 'ufs').glob('NabuWifi*.h')):
+            (source / path.name).write_bytes(path.read_bytes())
+        # Preserve relative include paths and bind the exact compiled copies.
+        for path in sorted((device / 'platform').glob('NabuWifi*')):
+            if path.suffix not in ('.h', '.cpp'):
+                continue
+            target = source / 'platform' / path.name
+            target.parent.mkdir(exist_ok=True)
+            target.write_bytes(path.read_bytes())
+        scm = source / 'gpu/a640/NabuScmCall.h'
+        scm.parent.mkdir(parents=True, exist_ok=True)
+        scm.write_bytes((device / 'gpu/a640/NabuScmCall.h').read_bytes())
+        if not logging:
+            for path in sorted((device / 'ufs').glob('NabuLog*.h')):
+                (source / path.name).write_bytes(path.read_bytes())
+        wifi_sources = {p.relative_to(source).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                        for p in sorted(source.rglob('*')) if p.is_file() and
+                        (p.name.startswith('NabuWifi') or p == scm)}
     obj = out / 'NativeUfs.o'
     command = platform.compile_command(record, cpp, obj)
     command += ['-I', str(headers), '-I', str(root / '.cache/xnu-work/osfmk'),
@@ -374,6 +409,8 @@ def main():
                 '-DNATIVE_VERIFIED_BLOCK=1',
                 '-DNATIVE_VERIFIED_BLOCK_MULTI_POLICY=1',
                 '-DXNU_NATIVE_UFS=1']
+    if wifi:
+        command += ['-I', str(source / 'platform')]
     if logging and os.environ.get('XNU_NABU_SHALLOW_IDLE') == '1':
         command.append('-DXNU_NABU_SHALLOW_IDLE=1')
     (out / 'compile-command.json').write_text(json.dumps(command, indent=2) + '\n', encoding='utf-8')
@@ -385,6 +422,23 @@ def main():
         raise SystemExit(result.stderr.decode('utf-8', errors='replace')[-4000:])
     platform.check_object(obj.read_bytes())
     bindings.qualify_object(bindings.MachO(obj))
+    wifi_objects = []
+    wifi_build = {}
+    if wifi:
+        for path in sorted((source / 'platform').glob('NabuWifi*.cpp')):
+            wifi_obj = out / (path.stem + '.o')
+            wifi_command = platform.compile_command(record, path, wifi_obj)
+            wifi_command += ['-I', str(root / '.cache/xnu-work/osfmk')]
+            (out / (path.stem + '-compile-command.json')).write_text(
+                json.dumps(wifi_command, indent=2) + '\n', encoding='utf-8')
+            result = subprocess.run(wifi_command, cwd=record['directory'], capture_output=True)
+            (out / (path.stem + '-compile.log')).write_bytes(result.stdout + result.stderr)
+            if result.returncode:
+                raise SystemExit(result.stderr.decode('utf-8', errors='replace')[-6000:])
+            platform.check_object(wifi_obj.read_bytes())
+            wifi_objects.append(wifi_obj)
+            wifi_build[path.name] = {'source_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                                     'object_sha256': hashlib.sha256(wifi_obj.read_bytes()).hexdigest()}
 
     # VirtIO's original-bindings.o is the single provider of the absolute
     # IOBlockStorageDevice aliases in this combined profile. Keep the UFS
@@ -406,7 +460,8 @@ def main():
     platform.check_object(compat_obj.read_bytes())
 
     archive = out / 'libNativeUfs.a'
-    subprocess.run(['xcrun', 'ar', 'rcs', str(archive), str(obj), str(compat_obj)], check=True)
+    subprocess.run(['xcrun', 'ar', 'rcs', str(archive), str(obj), str(compat_obj),
+                    *map(str, wifi_objects)], check=True)
     (out / 'build-report.json').write_text(json.dumps({
         'source_commit': prepare.PINNED_COMMIT,
         'source_files': {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
@@ -422,6 +477,9 @@ def main():
         'readonly_service': False, 'compiled': True, 'linked': False,
         'log_capture': logging, 'log_persistence_default': 'off',
         'logging_source_identity': logging_identity,
+        'wifi_control': {'enabled': wifi, 'sources': wifi_sources, 'objects': wifi_build,
+                         'default': 'off', 'input_only_mode': 1, 'cold_start_mode': 2,
+                         'runtime_qualified': False},
         'solid_state_media': nabu_storage_media.metadata('ufs', cpp.read_text(encoding='utf-8')),
         'hardware_tested': False, 'runtime_qualified': False,
     }, indent=2) + '\n', encoding='utf-8')

@@ -42,8 +42,13 @@ WALLPAPER_PATCHES = FPS_PATCHES + (ADRENOMETAL_PATCHES[-1], 'patches/adrenometal
                                   MPS_CONTRACT_PATCH, GPU_CORE_COUNT_PATCH)
 LOWERING_WORKER_PATCH = 'patches/adrenometal-nabu-lowering-worker.patch'
 RUNTIME_TELEMETRY_PATCH = 'patches/adrenometal-nabu-runtime-telemetry.patch'
+RUNTIME_WAIT_PHASES_PATCH = 'patches/metal2vulkan-nabu-wait-phases.patch'
 WORKER_OBSERVATION_PATCHES = WALLPAPER_PATCHES + (LOWERING_WORKER_PATCH, RUNTIME_TELEMETRY_PATCH)
 WORKER_RUNTIME_UPSTREAM = '624bab3918de5b978e1101517abca2b4fa426565'
+WAIT_PHASES_SOURCE = 'crates/metal2vulkan-runtime/src/command_buffer/mod.rs'
+WAIT_PHASES_UPSTREAM_SOURCE_SHA256 = 'bbddb227a0a7cbbc450e5d2b200a9bd61ff841482bd6e64ba6c6ef9d737182bc'
+WAIT_PHASES_BASELINE_SOURCE_SHA256 = '8518a82419d7b216085cb5fa216fe34b5835e5e3496eb10dd1fbdca2d79a4303'
+WAIT_PHASES_SOURCE_SHA256 = 'e34bcb0749e6966fce29d843b4260f13b62ad416c4d1f463396077374be02e2e'
 BASELINE_423593_SOURCE_SHA256 = {
     'NativeAdrenoMetalPlugin.mm': '538d662c52309be575c13f8df1ffa4e68ce9e13f3a03555a3be4337bdd558f3d',
     'bridge/NativeMetalObjects.rs': '2814eb99b0179461676715656ff2a33aaa90357825c7497925e4923d1f3278ed',
@@ -56,6 +61,7 @@ WORKER_RUNTIME_SOURCES = {
         '7e7708155146b4d1d9d787e83aa47c86c04ef1f3ddd2362b66d945df2ba05a4e',
     'crates/metal2vulkan-runtime/src/render/deferral.rs':
         'ad0bffb3ffcba81f80d60b42a4e763d3f043c832c794c1c56a3ec4cc313a53d8',
+    WAIT_PHASES_SOURCE: WAIT_PHASES_UPSTREAM_SOURCE_SHA256,
 }
 ASYNC_PATCH = 'patches/adrenometal-nabu-async-creation.patch'
 ASYNC_PATCHES = ADRENOMETAL_PATCHES[:4] + (ASYNC_PATCH,)
@@ -300,25 +306,37 @@ def qualify_gpu_core_count(bridge, output, env):
                 reported_answer_has_priority=True, gpu_exercised=False, runtime_qualified=False)
 
 
-def prepare_runtime_qos(metal, device):
+def prepare_runtime_qos(metal, device, *, wait_phases=False):
     directory = metal / 'bridge/patches'
     series = directory / 'series'
     patch = directory / Path(RUNTIME_QOS_PATCH).name
     if sha(series) != RUNTIME_SERIES_SHA256 or patch.exists():
         raise SystemExit('Runtime patch series differs from the pinned baseline')
     original = series.read_bytes()
+    if wait_phases:
+        phases = directory / Path(RUNTIME_WAIT_PHASES_PATCH).name
+        if phases.exists():
+            raise SystemExit('Runtime wait-phase patch already exists in the baseline')
+        shutil.copyfile(device / RUNTIME_WAIT_PHASES_PATCH, phases)
+        original += phases.name.encode() + b'\n'
     shutil.copyfile(device / RUNTIME_QOS_PATCH, patch)
     series.write_bytes(original + patch.name.encode() + b'\n')
 
 
-def collect_runtime_qos(root, device, output):
+def collect_runtime_qos(root, device, output, *, wait_phases=False):
     directory = root / 'drivers/AdrenoMetal/bridge/patches'
     series = directory / 'series'
     patch = directory / Path(RUNTIME_QOS_PATCH).name
     expected = (device / RUNTIME_QOS_PATCH).read_bytes()
     lines = series.read_bytes().splitlines(keepends=True)
-    if (not lines or lines[-1] != patch.name.encode() + b'\n' or
-            hashlib.sha256(b''.join(lines[:-1])).hexdigest() != RUNTIME_SERIES_SHA256 or
+    tail = [patch.name.encode() + b'\n']
+    if wait_phases:
+        phases = directory / Path(RUNTIME_WAIT_PHASES_PATCH).name
+        if phases.read_bytes() != (device / RUNTIME_WAIT_PHASES_PATCH).read_bytes():
+            raise SystemExit('Compiled runtime wait-phase patch differs from its input')
+        tail.insert(0, phases.name.encode() + b'\n')
+    if (lines[-len(tail):] != tail or
+            hashlib.sha256(b''.join(lines[:-len(tail)])).hexdigest() != RUNTIME_SERIES_SHA256 or
             patch.read_bytes() != expected):
         raise SystemExit('Compiled runtime patch series differs from the nabu QoS input')
     source = root / '.cache/gpu-reference/metal2vulkan/crates/metal2vulkan-runtime/src/exit_guard.rs'
@@ -336,6 +354,31 @@ def collect_runtime_qos(root, device, output):
                 patch_sha256=sha(patch), baseline_series_sha256=RUNTIME_SERIES_SHA256,
                 series_sha256=sha(series), source_sha256=sha(source),
                 target='aarch64-apple-ios', runtime_qualified=False)
+
+
+def collect_runtime_wait_phases(root, device, output):
+    runtime = root / '.cache/gpu-reference/metal2vulkan'
+    source = runtime / WAIT_PHASES_SOURCE
+    patch = root / 'drivers/AdrenoMetal/bridge/patches' / Path(RUNTIME_WAIT_PHASES_PATCH).name
+    if patch.read_bytes() != (device / RUNTIME_WAIT_PHASES_PATCH).read_bytes():
+        raise SystemExit('Compiled runtime wait-phase patch differs from its input')
+    if sha(source) != WAIT_PHASES_SOURCE_SHA256:
+        raise SystemExit('Compiled runtime wait-phase source differs from the exact replay')
+    run(['git', '-C', runtime, 'apply', '--reverse', '--check', patch])
+    archive = output / 'runtime-wait-phases-source'
+    archive.mkdir()
+    shutil.copyfile(source, archive / 'command_buffer-mod.rs')
+    shutil.copyfile(patch, archive / patch.name)
+    return dict(compiled=True, patch_sha256=sha(patch),
+                upstream_source_sha256=WAIT_PHASES_UPSTREAM_SOURCE_SHA256,
+                baseline_source_sha256=WAIT_PHASES_BASELINE_SOURCE_SHA256,
+                source_sha256=sha(source), source_path=WAIT_PHASES_SOURCE,
+                unit='us', head_row='J phase-us s<count> settle<us> post<us> c<count> settle<us> post<us>',
+                counter_reads='independent process-wide cumulative values',
+                samples='accepted untimed calls including post-entry errors and repeated calls',
+                excluded='refusals before phase entry and timed completion waits',
+                post='original submission progress, scheduled handlers or completion gate, and completion trails',
+                runtime_qualified=False)
 
 
 def verify_lowering_worker_runtime(source):
@@ -414,7 +457,7 @@ def prepare(root, device, fps_opt=False, async_fix=False, completion_fix=False, 
     shutil.copyfile(device / 'platform/NabuGpuProblemStream.h', metal / 'NabuGpuProblemStream.h')
     if fps_opt:
         shutil.copyfile(device / 'platform/NabuScanoutSourceCache.h', metal / 'NabuScanoutSourceCache.h')
-        prepare_runtime_qos(metal, device)
+        prepare_runtime_qos(metal, device, wait_phases=worker_opt)
         if not worker_opt:
             prepare_private_shader_cache(metal, device)
     pins = json.loads((root / 'scripts/data/gpu-metal-vulkan-inputs.json').read_text())
@@ -467,10 +510,11 @@ def build(root, device, output, env, fps_opt=False, async_fix=False, completion_
     report['runtime_telemetry'] = {
         'compiled': RUNTIME_TELEMETRY_PATCH in selected,
         'patch_sha256': sha(device / RUNTIME_TELEMETRY_PATCH),
-        'head_rows': ['S-pid', 'V-pipeline', 'J-split-waits'],
+        'head_rows': ['S-pid', 'V-pipeline', 'J-runtime-phases'],
         'wait_stages': {'runtime': 'runtime wait call including queued lowering settlement',
                         'handlers': 'frontend dispatch group wait',
                         'original_wait_totals_retained': True,
+                         'original_split_row': 'replaces the later redundant completed-wait row',
                         'counter_reads': 'independent cumulative values'},
         'runtime_qualified': False,
     }
@@ -501,6 +545,11 @@ def build(root, device, output, env, fps_opt=False, async_fix=False, completion_
         'runtime_qualified': False,
     }
     if worker_opt:
+        report['runtime_wait_phases'] = dict(compiled=False,
+            patch_sha256=sha(device / RUNTIME_WAIT_PHASES_PATCH),
+            upstream_source_sha256=WAIT_PHASES_UPSTREAM_SOURCE_SHA256,
+            baseline_source_sha256=WAIT_PHASES_BASELINE_SOURCE_SHA256,
+            source_sha256=None, runtime_qualified=False)
         metal = root / 'drivers/AdrenoMetal'
         report['lowering_worker']['sources_sha256'] = {
             relative: sha(metal / relative)
@@ -577,7 +626,9 @@ def build(root, device, output, env, fps_opt=False, async_fix=False, completion_
     report['bundle_built'] = result.returncode == 0 and (bundle / 'NativeAdrenoMetal').is_file()
     if report['bundle_built']:
         if fps_opt:
-            report['runtime_qos'] = collect_runtime_qos(root, device, output)
+            report['runtime_qos'] = collect_runtime_qos(root, device, output, wait_phases=worker_opt)
+        if worker_opt:
+            report['runtime_wait_phases'] = collect_runtime_wait_phases(root, device, output)
         if fps_opt and not worker_opt:
             metal = root / 'drivers/AdrenoMetal'
             helper = metal / 'NabuPrivateShaderCache.h'

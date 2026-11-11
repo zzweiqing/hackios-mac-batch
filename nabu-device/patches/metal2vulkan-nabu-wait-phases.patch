@@ -1,0 +1,322 @@
+--- a/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
++++ b/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
+@@ -103,60 +103,115 @@
+ use super::tracker::{Footprint, Use};
+ use super::unique_identifier::ScheduledWork;
+ use super::upload::{Upload, Uploads};
+ use super::used_resources::{names_any, EncoderKind, EncoderRecord, Reached, ReadRecord};
+ use super::values::CommandBufferStatus;
+ use super::{Buffer, CommandQueue, Device};
+ use crate::release;
+ use ash::vk;
+ use batches::Batches;
+ use checks::{Checks, SubmissionCheck};
+ use completion::Submitted;
+ use first_submission::{Listing, Live};
+ use gate::{Gate, Hold};
+ use hang::{Hang, Held, Later};
+ use metal2vulkan::bind::{
+     ExecutionStatus, IndexBoundsPass, ReplayFaults, ResidentRange, ResidentSet, RootTable,
+     StatusReport,
+ };
+ use metal2vulkan::device::PipelineWaitPolicy;
+ use metal2vulkan::error::{Feature, Unsupported};
+ use metal2vulkan::metal::DispatchType;
+ use own::{
+     completed_wait, running, scheduled_wait, Answer, Context, Marker, Running, Step, Target,
+ };
+ use std::any::Any;
+ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+ use std::ops::Range;
+ use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+ use std::time::{Duration, Instant};
++
++// nabu observes the two untimed waits without changing their decisions or work.
++// Counters are process-wide. Samples publish at return or unwind after phase entry.
++struct WaitPhaseCounters {
++    count: AtomicU64,
++    settle_nanos: AtomicU64,
++    post_nanos: AtomicU64,
++}
++
++impl WaitPhaseCounters {
++    const fn new() -> Self {
++        Self {
++            count: AtomicU64::new(0),
++            settle_nanos: AtomicU64::new(0),
++            post_nanos: AtomicU64::new(0),
++        }
++    }
++
++    fn snapshot(&self) -> [u64; 3] {
++        [
++            self.count.load(Ordering::Relaxed),
++            self.settle_nanos.load(Ordering::Relaxed) / 1000,
++            self.post_nanos.load(Ordering::Relaxed) / 1000,
++        ]
++    }
++}
++
++static SCHEDULED_WAIT_PHASES: WaitPhaseCounters = WaitPhaseCounters::new();
++static COMPLETED_WAIT_PHASES: WaitPhaseCounters = WaitPhaseCounters::new();
++
++struct WaitPhaseTimer {
++    counters: &'static WaitPhaseCounters,
++    settle: Duration,
++    post_began: Instant,
++}
++
++impl WaitPhaseTimer {
++    fn new(counters: &'static WaitPhaseCounters, settle: Duration) -> Self {
++        Self {
++            counters,
++            settle,
++            post_began: Instant::now(),
++        }
++    }
++}
++
++impl Drop for WaitPhaseTimer {
++    fn drop(&mut self) {
++        let post_nanos = u64::try_from(self.post_began.elapsed().as_nanos()).unwrap_or(u64::MAX);
++        let settle_nanos = u64::try_from(self.settle.as_nanos()).unwrap_or(u64::MAX);
++        self.counters.settle_nanos.fetch_add(settle_nanos, Ordering::Relaxed);
++        self.counters.post_nanos.fetch_add(post_nanos, Ordering::Relaxed);
++        self.counters.count.fetch_add(1, Ordering::Relaxed);
++    }
++}
+ 
+ /// A scheduled or completed handler (`MTLCommandBufferHandler`): called once with the command buffer, on one of the
+ /// device's handler threads, in its queue's order. A panic inside it is caught. A submission
+ /// handler ([`CommandBuffer::add_submission_handler`]) is one too, called on the thread that
+ /// submits the command buffer's last batch.
+ ///
+ /// - **macOS.** The handler threads run at the user-interactive quality of service, whatever the
+ ///   class of the thread that committed, as Metal runs its handlers. A thread a handler starts
+ ///   starts at the default class, as a new thread does (`<sys/qos.h>`).
+ /// - **Linux**, which Metal does not run on. Each handler thread asks the kernel to treat it as
+ ///   fully busy, as the user-interactive class does on macOS: a utilization floor of 1024
+ ///   (`sched_setattr(2)`), its policy and nice value as they were. A kernel built without the
+ ///   clamps refuses it, and the thread runs as before. The thread also has
+ ///   `SCHED_FLAG_RESET_ON_FORK`, so a thread a handler starts begins with no floor, and at
+ ///   `SCHED_OTHER` and nice 0 where the handler thread runs at a real-time policy or a negative
+ ///   nice value; a handler cannot clear the setting without `CAP_SYS_NICE`. The first such floor
+ ///   since the host booted turns the kernel's clamp accounting on for every task until it
+ ///   reboots.
+ pub type Handler = Box<dyn FnOnce(&CommandBuffer) + Send + 'static>;
+ 
+ /// A Metal command buffer (`MTLCommandBuffer`). Cheap to clone (a retain); `Send + Sync`.
+ #[derive(Clone)]
+ pub struct CommandBuffer(Arc<CommandBufferShared>);
+ 
+ impl std::fmt::Debug for CommandBuffer {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         f.debug_struct("CommandBuffer")
+             .field("status", &self.status())
+             .finish()
+     }
+@@ -1752,60 +1807,71 @@
+         self.mesh_draws = number.saturating_add(1);
+         number
+     }
+ }
+ 
+ impl Drop for CommandBufferShared {
+     fn drop(&mut self) {
+         // A command buffer that still holds its pool was never submitted, or ended before its
+         // completion gave the pool back: a committed command buffer is held by the scheduler until
+         // its batches were submitted, and by its queue's waiter until they completed, so
+         // nothing of its pool is pending. The device's spares retain it within their iOS
+         // limits (`spares.rs`). A timestamp slot it still holds goes back with its state.
+         let pool = lock(&self.state).pool.take();
+         if let Some(pool) = pool {
+             let shared = self.device.shared();
+             shared.spares.give_command_pool(shared, pool, false);
+         }
+     }
+ }
+ 
+ /// Point the root table at `table` (`upload`) at `count` entries of a resident set at `set`.
+ fn write_fields(upload: &Upload, table: u64, set: u64, count: u64) -> Result<(), Error> {
+     let fields = RootTable::resident_fields(table, set, count).ok_or_else(|| {
+         internal("a root table not a whole number of entries from its resident set")
+     })?;
+     upload.write_at(u64::from(RootTable::RESIDENT_FIELDS_OFFSET), &fields);
+     Ok(())
+ }
+ 
+ impl CommandBuffer {
++
++    /// Process-wide samples of the untimed scheduled and completed waits.
++    /// Each triple holds count, settle microseconds and post-settlement microseconds.
++    /// Refusals before phase entry are excluded. A release's immediate return records
++    /// zero settlement and its original trail path. Repeated waits count separately.
++    /// Each word is an independent atomic snapshot, with no lowering or other work.
++    pub fn wait_phase_counts() -> [u64; 6] {
++        let scheduled = SCHEDULED_WAIT_PHASES.snapshot();
++        let completed = COMPLETED_WAIT_PHASES.snapshot();
++        [scheduled[0], scheduled[1], scheduled[2], completed[0], completed[1], completed[2]]
++    }
+     /// A new command buffer of `queue`, holding `slot` of it.
+     pub(super) fn new(queue: &CommandQueue, slot: Slot) -> CommandBuffer {
+         CommandBuffer(Arc::new(CommandBufferShared {
+             trace_id: crate::resource::ObjectId::new(),
+             device: queue.device().clone(),
+             queue: queue.clone(),
+             state: Mutex::new(State {
+                 status: CommandBufferStatus::NotEnqueued,
+                 error: None,
+                 encoder_open: false,
+                 abandoned: false,
+                 ending: None,
+                 end_lowered: false,
+                 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+                 failures_injected: 0,
+                 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+                 making_failure_injected: None,
+                 queued_commit: false,
+                 called_over_mutable_map: false,
+                 committing: false,
+                 pool: None,
+                 rerun_pool: None,
+                 recorded: Vec::new(),
+                 tail: None,
+                 folds: Vec::new(),
+                 prefix: None,
+                 batches: Batches::default(),
+                 scheduled_signals: Vec::new(),
+                 scheduled: VecDeque::new(),
+                 submission: VecDeque::new(),
+@@ -3330,126 +3396,131 @@
+     }
+ 
+     /// `waitUntilScheduled`: block until the command buffer's scheduled handlers ran, or it
+     /// failed. As Metal's (measured on an M4, macOS 27.0.1), it returns only
+     /// once every scheduled handler returned, though [`status`](Self::status) reads `Scheduled`
+     /// just before they start.
+     ///
+     /// As [`wait_until_completed`](Self::wait_until_completed) does, it submits for itself what
+     /// still waits in the scheduler's inbox before it sleeps, where no handler of the program's
+     /// would run on this thread for it (`Scheduler::submit_before_waiting`). It sends no group
+     /// held: a batch held for one kernel submission makes its command buffer `Scheduled` as it is
+     /// held, so this wait is already answered by the hold.
+     ///
+     /// From a handler or a release on the device's handler threads it answers as Metal's does
+     /// where measured: once the command buffer's transition to `Scheduled` ran, it returns. Its own
+     /// scheduled handlers' wait, and a wait for a later command buffer of the handler's queue, are
+     /// refused (`WaitWouldDeadlock` of [`DeadlockCause::OwnQueue`]): that transition comes after
+     /// the handler in the queue's order, and Metal's never returns there. A wait for another
+     /// queue's command buffer waits, unless it would deadlock (as
+     /// [`CommandBuffer::wait_until_completed`] says). From a submission handler
+     /// ([`add_submission_handler`](Self::add_submission_handler)), a wait for one not yet scheduled
+     /// is refused ([`DeadlockCause::SubmissionHandler`]). Once the process is exiting, it answers
+     /// as that one does.
+     pub fn wait_until_scheduled(&self) -> Result<(), Error> {
+         let scheduled_now = scheduled(&self.state());
+         let _blocked = match scheduled_wait(running(), self.0.target(), scheduled_now) {
+             Answer::Refuse(cause) => return Err(cause.into()),
+             Answer::Return | Answer::Wait => None,
+             Answer::Block(from) => Some(contexts::block(from, self.0.context())?),
+         };
++        let settle_began = Instant::now();
+         self.settle_commit();
++        let _phases = WaitPhaseTimer::new(&SCHEDULED_WAIT_PHASES, settle_began.elapsed());
+         self.0.waits_for_scheduling();
+         let mut state = self.state();
+         while !scheduled(&state) {
+             if exit_guard::closed() {
+                 return Err(DeadlockCause::Exiting.into());
+             }
+             state.parked += 1;
+             state = self
+                 .0
+                 .changed
+                 .wait_timeout(state, exit_guard::WAKE)
+                 .unwrap_or_else(std::sync::PoisonError::into_inner)
+                 .0;
+             state.parked -= 1;
+         }
+         Ok(())
+     }
+ 
+     /// `waitUntilCompleted`: block until the command buffer completed or failed and its
+     /// completed handlers ran. It returns on device loss (the status is then `Error`). Where a
+     /// batch of it is held for one kernel submission with later ones while its queue's earlier
+     /// work runs (`CompletionPolicy::Grouped`), the wait sends it at once.
+     ///
+     /// It returns only once the runtime's threads let go of the command buffer, and of what they
+     /// held to make what its work waited for (a pipeline made on the device's pool, a texture's
+     /// CPU decode, `trails.rs`), so dropping the last handles after it destroys the device on the
+     /// dropping thread, before the drop returns. Such a thread lets go a few drops after its
+     /// signal, so this adds to the wait only where it lost its CPU in between; the completion,
+     /// the status and the completed handlers do not wait for it. A program that learns of the
+     /// completion otherwise (a completed handler, an event the command buffer signals, its
+     /// status) may drop them while a runtime thread still holds the command buffer; the device
+     /// then goes on that thread. An exit meanwhile waits for that teardown, or leaves the device
+     /// to the process's end.
+     ///
+     /// Once the process is exiting (its exit handlers run), the runtime's threads that finish
+     /// command buffers have ended, and no Vulkan call is made: a wait for a command buffer that
+     /// did not finish answers `WaitWouldDeadlock` of [`DeadlockCause::Exiting`] at once, on any
+     /// thread, and one already blocked within 50 ms, so that nothing the exit runs waits for
+     /// those threads ([`process_exiting`](crate::process_exiting) answers whether it is so).
+     ///
+     /// From a handler or a release on the device's handler threads it answers as Metal's does
+     /// where measured:
+     /// - a deallocator that runs as this command buffer releases what it retained gets `Ok` at
+     ///   once (the status is `Completed` or `Error`);
+     /// - a handler's wait for its own command buffer, or for a later one of its queue, is
+     ///   refused (`WaitWouldDeadlock` of [`DeadlockCause::OwnQueue`]): that transition comes
+     ///   after the handler in the queue's order, and Metal's never returns there;
+     /// - a wait for another queue's command buffer blocks the handler's thread until it
+     ///   completed, as Metal's does. It is refused (`WaitWouldDeadlock`) only where it would
+     ///   deadlock: when that queue's handlers wait, through the queues they wait for, for this
+     ///   one ([`DeadlockCause::Cycle`]), or when it would leave the device's handler threads
+     ///   with none that is not blocked so ([`DeadlockCause::HandlerThreadCap`]: the 512th, where
+     ///   Metal's handler threads run out and it hangs).
+     pub fn wait_until_completed(&self) -> Result<(), Error> {
+         let _blocked = match self.completed_wait() {
+             Answer::Return => {
++                let _phases = WaitPhaseTimer::new(&COMPLETED_WAIT_PHASES, Duration::ZERO);
+                 return self
+                     .trailed(None)
+                     .map_err(|_| DeadlockCause::Exiting.into())
+             }
+             Answer::Refuse(cause) => return Err(cause.into()),
+             Answer::Wait => None,
+             Answer::Block(from) => Some(contexts::block(from, self.0.context())?),
+         };
++        let settle_began = Instant::now();
+         self.settle_commit();
++        let _phases = WaitPhaseTimer::new(&COMPLETED_WAIT_PHASES, settle_began.elapsed());
+         self.0.waits_for_completion();
+         let waited = self.0.gate.wait()?;
+         self.0.device.shared().counts.gate_waited(waited);
+         self.trailed(None)
+             .map_err(|_| DeadlockCause::Exiting.into())
+     }
+ 
+     /// [`CommandBuffer::wait_until_completed`] for at most `timeout`, which bounds the whole call;
+     /// a timeout past what the host's clock holds waits until the completion comes. Where that is
+     /// refused, it ends at once with `TimedOut`, as it does once the process is exiting.
+     pub fn wait_until_completed_for(&self, timeout: Duration) -> Result<(), TimedOut> {
+         let deadline = Instant::now().checked_add(timeout);
+         let _blocked = match self.completed_wait() {
+             Answer::Return => return self.trailed(deadline).map_err(|_| TimedOut),
+             Answer::Refuse(_) => return Err(TimedOut),
+             Answer::Wait => None,
+             Answer::Block(from) => {
+                 Some(contexts::block(from, self.0.context()).map_err(|_| TimedOut)?)
+             }
+         };
+         self.settle_commit();
+         self.0.waits_for_completion();
+         let waited = match deadline {
+             Some(deadline) => self.0.gate.wait_until(deadline)?,
+             // Only an exiting process ends a wait with no deadline: that wait's `TimedOut`.
+             None => self.0.gate.wait().map_err(|_| TimedOut)?,
+         };
+         self.0.device.shared().counts.gate_waited(waited);
+         self.trailed(deadline).map_err(|_| TimedOut)
+     }

@@ -22,6 +22,10 @@ on:
         description: Build a signed standalone A640 owned-BO probe (Metal profile only; not installed)
         type: boolean
         default: false
+      wifi_control:
+        description: Build the independent ESP firmware loader and one-shot MPSS control chain
+        type: boolean
+        default: false
       ui_watch:
         description: Build opt-in bounded UI exec and first main-thread observation (no device installation)
         type: boolean
@@ -86,6 +90,7 @@ jobs:
           CAPTURE_LOGS: ${{ inputs.capture_logs }}
           GPU_USERPROBE: ${{ inputs.gpu_userprobe }}
           UI_WATCH: ${{ inputs.ui_watch }}
+          WIFI_CONTROL: ${{ inputs.wifi_control }}
           FPS_OPT: ${{ inputs.fps_opt }}
           WALLPAPER_FIX: ${{ inputs.wallpaper_fix }}
           ASYNC_FIX: ${{ inputs.async_fix }}
@@ -105,6 +110,7 @@ jobs:
           git -C unixnu checkout --quiet --detach "$REQUESTED_REF"
           log_args=()
           if [ "$CAPTURE_LOGS" = true ]; then log_args+=(--capture-logs); fi
+          if [ "$WIFI_CONTROL" = true ]; then log_args+=(--wifi-control); fi
           if [ "$GPU_USERPROBE" = true ]; then log_args+=(--gpu-userprobe); fi
           if [ "$UI_WATCH" = true ]; then
             test "$GPU_USERPROBE" = true && test "$CAPTURE_LOGS" = true
