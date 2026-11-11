@@ -143,7 +143,7 @@ def _function(image, name):
     require(offset + length <= len(image['content']), 'Idle function unbacked')
     end = min([value for label, value, kind in image['symbols']
                if not kind & 0xe0 and kind & 0xe == 0xe and
-               start < value < address + length and not re.fullmatch(r'_ltmp\d+', label)] +
+               start < value < address + length and not re.fullmatch(r'_?ltmp\d+', label)] +
               [address + length])
     require(start % 4 == 0 and (end - start) % 4 == 0 and end > start, 'Idle function alignment')
     raw = image['content'][offset + start - address:offset + end - address]

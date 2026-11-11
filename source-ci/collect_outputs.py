@@ -439,7 +439,7 @@ def main():
                 summary['logging_qualified_statically'] = True
             if prepared.get('wifi_control') is not None:
                 from nabu_wifi_ci import qualify_candidate as qualify_wifi
-                manifest['wifi_qualification'] = qualify_wifi(args.upstream, candidate, prepared)
+                manifest['wifi_qualification'] = qualify_wifi(args.upstream, args.device, candidate, prepared)
                 summary['wifi_qualified_statically'] = manifest['wifi_qualification']['compiled']
             manifest['data_skeleton_qualification'] = qualify_data_skeleton(
                 args.upstream, prepared.get('data_skeleton'), capture_logs=bool(identity['log_capture']))

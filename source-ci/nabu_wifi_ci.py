@@ -22,7 +22,7 @@ def enable_wifi(upstream, device):
 
 def qualify(read, candidate, intent):
     """Replay exact sources, compilation objects, and the linked entry point."""
-    from nabu_idle_ci import _image, _branches, _function, require
+    from nabu_idle_ci import _image, _function, require
     base = 'outputs/tree/build/native-ufs/'
     report = json.loads(read(base + 'build-report.json'))
     built = report.get('wifi_control', {})
@@ -55,10 +55,19 @@ def qualify(read, candidate, intent):
         command = json.loads(read(base + name.removesuffix('.cpp') + '-compile-command.json'))
         require(any(value.endswith('/source/platform/' + name) for value in command),
                 'Wi-Fi compile command does not consume the bound source')
-    roots = [name for name in image['names'] if 'NativeUfs9startRoot' in name]
-    require(len(roots) == 1, 'Wi-Fi UFS root entry is ambiguous')
-    _, _, branches = _branches(image, roots[0])
-    require(any(target == '_nabu_wifi_start' for _, target in branches), 'Linked UFS entry does not start the Wi-Fi executor')
+    root_entry = '__ZN9NativeUfs9startRootEP9IOService'
+    require(root_entry in image['names'], 'Wi-Fi UFS root entry is missing')
+    start, words, _ = _function(image, root_entry)
+    target = image['names']['_nabu_wifi_start']
+    calls = []
+    for index, word in enumerate(words):
+        if word & 0xfc000000 != 0x94000000:
+            continue
+        displacement = word & 0x3ffffff
+        if displacement & 0x2000000:
+            displacement -= 0x4000000
+        calls.append((start + index * 4 + displacement * 4) & 0xffffffffffffffff)
+    require(target in calls, 'Linked UFS entry does not start the Wi-Fi executor')
     smc = {}
     for name in image['names']:
         if 'NabuWifiMpss' in name and 'nativeSmc' in name:
@@ -68,11 +77,16 @@ def qualify(read, candidate, intent):
     require(smc, 'Native Wi-Fi SMC adapter was not linked')
     return dict(compiled=True, sources=built['sources'], objects=built['objects'],
                 final_definitions={name: hex(image['names'][name]) for name in sorted(required)},
-                ufs_entry=roots[0], smc_functions=smc,
+                ufs_entry=root_entry, smc_functions=smc,
                 candidate_sha256=hashlib.sha256(candidate).hexdigest(), runtime_qualified=False)
 
 
-def qualify_candidate(upstream, candidate, prepared):
+def qualify_candidate(upstream, device, candidate, prepared):
     tree = Path(upstream) / 'out/nabu'
-    return qualify(lambda name: (tree / name.removeprefix('outputs/')).read_bytes(),
-                   Path(candidate).read_bytes(), prepared.get('wifi_control'))
+    def read(name):
+        if name.startswith('outputs/'):
+            return (tree / name.removeprefix('outputs/')).read_bytes()
+        if name.startswith('device/'):
+            return (Path(device) / name.removeprefix('device/')).read_bytes()
+        raise ValueError('Unsupported Wi-Fi qualification member prefix')
+    return qualify(read, Path(candidate).read_bytes(), prepared.get('wifi_control'))
