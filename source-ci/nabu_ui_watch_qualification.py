@@ -151,6 +151,33 @@ def object_symbols(data, prefix='_nabu_ui_watch_'):
     return found
 
 
+def smp_configuration_trigger(read, candidate):
+    """Recognize the bound SMP configuration logger's UI flag string."""
+    from nabu_gpu_ci import json_object
+    base = 'outputs/tree/build/native-ufs/'
+    try:
+        original = read('device/ufs/NabuLogEarlySmp.h')
+        compiled = read(base + 'source/NabuLogEarlySmp.h')
+        source = read(base + 'source/NativeUfs.cpp')
+        writer = read(base + 'source/NabuLogUfs.h')
+        obj = read(base + 'NativeUfs.o')
+        report = json_object(read(base + 'build-report.json'))
+    except (KeyError, OSError):
+        return False
+    identity = report.get('source_files', {})
+    trigger = b'nabu-ui-watch\0'
+    return (original == compiled and sha(compiled) == identity.get('NabuLogEarlySmp.h') and
+            sha(source) == identity.get('NativeUfs.cpp') and sha(writer) == identity.get('NabuLogUfs.h') and
+            sha(obj) == report.get('object_sha256') and
+            b'#include "NabuLogUfs.h"' in source and b'#include "NabuLogEarlySmp.h"' in writer and
+            b'nabuLogEarlySmpPoll();' in writer and
+            b'enabled=PE_parse_boot_argn("nabu-smp-watch",&flag,sizeof(flag)) && flag==1;' in compiled and
+            b'if(!enabled) return;' in compiled and
+            b'PE_parse_boot_argn("nabu-ui-watch",&ui_watch,4);' in compiled and
+            compiled.count(b'"nabu-ui-watch"') == 1 and
+            obj.count(trigger) == candidate.count(trigger) == 1)
+
+
 def qualify(read, candidate):
     from nabu_gpu_ci import candidate_definitions, json_object, METAL_PROFILE
     capture = json_object(read('outputs/tree/build/nabu-log/source-report.json'))
@@ -168,7 +195,8 @@ def qualify(read, candidate):
             thread_source = b''
         require(b'NABU_UI_WATCH' not in exec_source and b'NABU_UI_WATCH' not in exit_source and
                 b'NABU_UI_WATCH' not in thread_source and
-                b'nabu-ui-watch' not in candidate and b'_nabu_ui_watch_' not in candidate and
+                (b'nabu-ui-watch' not in candidate or smp_configuration_trigger(read, candidate)) and
+                b'_nabu_ui_watch_' not in candidate and
                 b'nabu-ui-wait-owner' not in candidate and b'NabuUIWait' not in candidate and
                 b'NabuUIOwner' not in candidate,
                 'Disabled kernel retains UI observer definitions or dependencies')
