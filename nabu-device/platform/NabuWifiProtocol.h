@@ -120,17 +120,27 @@ public:
 struct Capability {
     bool valid;
     uint32_t chip_id, chip_family, board_id, soc_id, firmware_version;
-    bool soc_valid, firmware_valid;
+    bool soc_valid, firmware_valid, chip_valid, board_valid;
 };
 inline bool capability(const QmiMessage &m, Capability &out) {
     uint16_t error;
     size_t n;
     if (m.type != kQmiResponse || m.id != 0x24 || !m.result(error)) return false;
     const uint8_t *chip = m.get(0x10, n);
-    if (!chip || n != 8) return false;
+    if (chip && n != 8) return false;
     Capability value{};
-    value.chip_id = le32(chip); value.chip_family = le32(chip + 4);
-    if (!m.u32(0x11, value.board_id)) return false;
+    // ath10k uses 0xff IDs when these optional fields are absent.
+    value.chip_id = 0xff;
+    value.board_id = 0xff;
+    value.chip_valid = chip != nullptr;
+    if (chip) {
+        value.chip_id = le32(chip);
+        value.chip_family = le32(chip + 4);
+    }
+    const uint8_t *board = m.get(0x11, n);
+    if (board && n != 4) return false;
+    value.board_valid = board != nullptr;
+    if (board) value.board_id = le32(board);
     const uint8_t *soc = m.get(0x12, n);
     if (soc && n != 4) return false;
     value.soc_valid = soc != nullptr;

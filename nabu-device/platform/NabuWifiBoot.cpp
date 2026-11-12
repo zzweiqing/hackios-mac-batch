@@ -135,10 +135,10 @@ void coldStart() {
     if (status.stage != nabu_wifi::Control::Stage::Complete ||
         status.error != nabu_wifi::Control::Error::None || !status.capability.valid ||
         status.capability_generation != status.generation) return;
-    IOLog("NABU WIFI WLFW capability generation=%u node=%u port=%u chip_id=%u chip_family=%u board_id=%u "
+    IOLog("NABU WIFI WLFW capability generation=%u node=%u port=%u chip_valid=%u chip_id=%u chip_family=%u board_valid=%u board_id=%u "
           "soc_valid=%u soc_id=%u firmware_valid=%u firmware_version=%u rmtfs=%llu pd=%llu tftp=%llu\n",
-          status.generation, status.server_node, status.server_port, status.capability.chip_id,
-          status.capability.chip_family, status.capability.board_id, status.capability.soc_valid,
+          status.generation, status.server_node, status.server_port, status.capability.chip_valid, status.capability.chip_id,
+          status.capability.chip_family, status.capability.board_valid, status.capability.board_id, status.capability.soc_valid,
           status.capability.soc_id, status.capability.firmware_valid, status.capability.firmware_version,
           (unsigned long long)status.rmtfs_requests, (unsigned long long)status.pd_requests,
           (unsigned long long)status.tftp_requests);
