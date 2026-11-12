@@ -379,29 +379,39 @@ bool Control::receiveOne() {
             unsigned new_items = 0;
             for (uint32_t i = 0; i < value; ++i) {
                 uint8_t intent[8]; peek(8 + i * 8, intent, 8);
-                if (!le32(intent) || !le32(intent + 4)) return fail(Error::Protocol, "glink-invalid-intent");
+                const uint32_t intent_bytes = le32(intent), iid = le32(intent + 4);
+                if (!intent_bytes) {
+                    event("glink-intent-rejected", intent_bytes, iid);
+                    return fail(Error::Protocol, "glink-invalid-intent");
+                }
                 for (unsigned j = 0; j < kRemoteIntents; ++j)
-                    if (remote_intents_[j].iid == le32(intent + 4)) return fail(Error::Protocol, "glink-duplicate-intent");
+                    if (remote_intents_[j].bytes && remote_intents_[j].iid == iid)
+                        return fail(Error::Protocol, "glink-duplicate-intent");
                 for (uint32_t j = 0; j < i; ++j) {
                     uint8_t previous[8]; peek(8 + j * 8, previous, 8);
-                    if (le32(previous + 4) == le32(intent + 4)) return fail(Error::Protocol, "glink-duplicate-intent");
+                    if (le32(previous + 4) == iid) return fail(Error::Protocol, "glink-duplicate-intent");
                 }
                 ++new_items;
             }
-            unsigned free = 0; for (const Intent &intent : remote_intents_) if (!intent.iid) ++free;
+            unsigned free = 0; for (const Intent &intent : remote_intents_) if (!intent.bytes) ++free;
             if (new_items > free) return fail(Error::Protocol, "glink-intent-capacity");
             for (uint32_t i = 0; i < value; ++i) {
                 uint8_t intent[8]; peek(8 + i * 8, intent, 8);
-                for (Intent &slot : remote_intents_) if (!slot.iid) { slot = Intent{le32(intent + 4), le32(intent), false, 0}; break; }
+                for (Intent &slot : remote_intents_) if (!slot.bytes) {
+                    slot = Intent{le32(intent + 4), le32(intent), false, 0};
+                    event("glink-intent", slot.bytes, slot.iid);
+                    break;
+                }
             }
         }
         break;
     case RxDone: case RxDoneReuse:
         if (channel == remote_channel_) {
             bool found = false;
-            for (Intent &intent : remote_intents_) if (intent.iid == value) {
+            for (Intent &intent : remote_intents_) if (intent.bytes && intent.iid == value) {
                 if (!intent.busy) return fail(Error::Protocol, "glink-unowned-rx-done");
-                if (queue_count_ && queue_[queue_head_].iid == value && queue_[queue_head_].offset < queue_[queue_head_].bytes)
+                if (queue_count_ && queue_[queue_head_].intent_assigned && queue_[queue_head_].iid == value &&
+                    queue_[queue_head_].offset < queue_[queue_head_].bytes)
                     return fail(Error::Protocol, "glink-early-rx-done");
                 if (cmd == RxDoneReuse && !(features_ & 1)) return fail(Error::Protocol, "glink-unnegotiated-reuse");
                 if (cmd == RxDone) intent = Intent{};
@@ -474,7 +484,8 @@ bool Control::send(uint32_t type, uint32_t source_port, uint32_t node, uint32_t 
     if (bytes) memcpy(packet.data + 32, data, bytes);
     memset(packet.data + 32 + bytes, 0, padded - bytes);
     packet.bytes = uint32_t(32 + padded); packet.offset = 0; packet.iid = 0;
-    packet.generation = status_.generation; packet.deadline = now_ + 3000; packet.intent_requested = false;
+    packet.generation = status_.generation; packet.deadline = now_ + 3000;
+    packet.intent_requested = false; packet.intent_assigned = false;
     ++queue_count_; return true;
 }
 bool Control::flush(bool transmit) {
@@ -484,15 +495,16 @@ bool Control::flush(bool transmit) {
         if (packet.generation != status_.generation) return fail(Error::Restart, "queued-generation");
         if (now_ >= packet.deadline) return fail(Error::IntentTimeout, "glink-send-timeout");
         if (!transmit) return true;
-        if (!packet.iid) {
+        if (!packet.intent_assigned) {
             Intent *selected = nullptr;
             for (Intent &intent : remote_intents_)
-                if (intent.iid && !intent.busy && intent.bytes >= packet.bytes && (!selected || intent.bytes < selected->bytes)) selected = &intent;
+                if (!intent.busy && intent.bytes >= packet.bytes && (!selected || intent.bytes < selected->bytes)) selected = &intent;
             if (!selected) {
                 if (!packet.intent_requested && command(IntentRequest, 1, packet.bytes)) packet.intent_requested = true;
                 return status_.stage != Stage::Failed;
             }
             selected->busy = true; selected->deadline = now_ + 10000; packet.iid = selected->iid;
+            packet.intent_assigned = true;
         }
         const uint32_t remaining = packet.bytes - packet.offset, chunk = remaining > 8192 ? 8192 : remaining;
         put32(scratch_, chunk); put32(scratch_ + 4, remaining - chunk);

@@ -99,8 +99,9 @@ private:
         uint8_t data[wire::kPacketBytes];
         uint32_t bytes, offset, iid, generation;
         uint64_t deadline;
-        bool intent_requested;
+        bool intent_requested, intent_assigned;
     };
+    // Remote IID zero is valid. A nonzero byte capacity marks a populated slot.
     struct Intent { uint32_t iid, bytes; bool busy; uint64_t deadline; };
     struct Receive { uint8_t data[wire::kPacketBytes]; uint32_t bytes, remaining, iid; bool active, advertised; uint64_t deadline; };
     struct Registry { char service[80], domain[80]; uint32_t instance, data; bool valid; };
