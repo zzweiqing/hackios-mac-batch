@@ -916,6 +916,140 @@ Result RmtfsShared::initialize(const Ops &ops)
     return finish();
 }
 
+Result MsaAssignment::assign(const Ops &ops, uint64_t address, uint32_t bytes, bool secure)
+{
+    for (uint32_t index = 0; index < count_; ++index) {
+        const Record &record = records_[index];
+        if (record.address == address && record.bytes == bytes && record.secure == secure) {
+            return record.result;
+        }
+    }
+    Result result;
+    if (count_ == 2) {
+        result.error = Error::AlreadyAttempted;
+        return result;
+    }
+    const Platform &platform = ops.platform ? *ops.platform : nativePlatform();
+    Region parameters;
+    auto finish = [&]() -> Result {
+        if (!result.assignmentSubmitted && parameters.handle) {
+            platform.release(platform.ctx, &parameters);
+        }
+        log(ops, result);
+        if (result.assignmentSubmitted) {
+            records_[count_].address = address;
+            records_[count_].bytes = bytes;
+            records_[count_].secure = secure;
+            records_[count_].result = result;
+            parameters_[count_] = parameters;
+            ++count_;
+        }
+        return result;
+    };
+    advance(ops, result, Stage::ValidateOps);
+    if (!platform.managedWindow || !platform.allocate || !platform.release || !platform.publish ||
+        !platform.scm.invoke || !platform.scm.now_us || !platform.scm.wait_us) {
+        fail(result, Error::MissingOps);
+        return finish();
+    }
+    advance(ops, result, Stage::ValidateResources);
+    int status = platform.managedWindow(platform.ctx, &result.managedBase, &result.managedBytes);
+    if (status || !managedWindowValid(result.managedBase, result.managedBytes) ||
+        !inside(address, bytes, MsaBase, MsaBytes) || (address & 4095) || (bytes & 4095) ||
+        overlap(address, bytes, result.managedBase, result.managedBytes)) {
+        fail(result, Error::InvalidResources, status);
+        return finish();
+    }
+    result.sharedPhysical = address;
+    result.sharedBytes = bytes;
+    uint32_t function = 0x42000c16;
+    if (callScm(ops, platform, result, Stage::ProbeScm64,
+        0xc2000601, 1, 0x02000601, 0, 0, 1)) {
+        result.scmConvention = 64;
+    } else {
+        if (result.scm.stop != NabuScmStop::Complete) return finish();
+        if (!callScm(ops, platform, result, Stage::ProbeScm32,
+            0x82000601, 1, 0x02000601, 0, 0, 1)) {
+            if (result.scm.stop == NabuScmStop::Complete) result.error = Error::ScmConvention;
+            return finish();
+        }
+        result.scmConvention = 32;
+        function = 0x02000c16;
+    }
+    advance(ops, result, Stage::AllocateMetadata);
+    status = platform.allocate(platform.ctx, 4096, result.scmConvention, &parameters);
+    if (status || !parameters.handle || !parameters.data || parameters.bytes < 4096 ||
+        parameters.bytes > MaxMetadataBytes || (parameters.bytes & 4095) ||
+        (parameters.physical & 4095) || (uintptr_t(parameters.data) & 4095) ||
+        !inside(parameters.physical, parameters.bytes, result.managedBase, result.managedBytes) ||
+        !range(uintptr_t(parameters.data), parameters.bytes) ||
+        (result.scmConvention == 32 &&
+            !inside(parameters.physical, parameters.bytes, 0, UINT64_C(0x100000000)))) {
+        fail(result, Error::Allocation, status);
+        return finish();
+    }
+    writeMemory(parameters.data, nullptr, parameters.bytes);
+    uint8_t arguments[544]{};
+    auto put32 = [&](size_t offset, uint32_t value) {
+        for (unsigned byte = 0; byte < 4; ++byte) {
+            arguments[offset + byte] = uint8_t(value >> (byte * 8));
+        }
+    };
+    auto put64 = [&](size_t offset, uint64_t value) {
+        for (unsigned byte = 0; byte < 8; ++byte) {
+            arguments[offset + byte] = uint8_t(value >> (byte * 8));
+        }
+    };
+    static const uint32_t destinations[3] = {15, 24, 25};
+    const unsigned count = secure ? 2 : 3;
+    put64(0, address);
+    put64(8, bytes);
+    put32(64, 3); // Source HLOS VMID. HLOS is deliberately not a destination.
+    for (unsigned index = 0; index < count; ++index) {
+        put32(128 + 24 * index, destinations[index]);
+        put32(132 + 24 * index, 6); // RW.
+    }
+    if (result.scmConvention == 64) {
+        put64(512, 4); put64(520, parameters.physical + 128);
+        put64(528, 24 * count); put64(536, 0);
+    } else {
+        put32(512, 4); put32(516, uint32_t(parameters.physical + 128));
+        put32(520, 24 * count); put32(524, 0);
+    }
+    writeMemory(parameters.data, arguments, sizeof(arguments));
+    result.metadataPhysical = parameters.physical;
+    result.metadataBytes = sizeof(arguments);
+    advance(ops, result, Stage::PublishShared);
+    status = platform.publish(platform.ctx, &parameters, 0, parameters.bytes);
+    if (status) {
+        fail(result, Error::Cache, status);
+        return finish();
+    }
+    result.scmFunction = function;
+    result.scmArgInfo = 0x1117;
+    result.scmArgs[0] = parameters.physical;
+    result.scmArgs[1] = 16;
+    result.scmArgs[2] = parameters.physical + 64;
+    result.scmArgs[3] = parameters.physical + 512;
+    result.scm = NabuScmReply{};
+    result.assignmentSubmitted = true;
+    result.metadataRetained = true;
+    advance(ops, result, Stage::AssignMsa);
+    result.scm = NabuWifiPas::assign(platform.scm, function, parameters.physical,
+        parameters.physical + 64, parameters.physical + 512);
+    if (result.scm.stop != NabuScmStop::Complete) {
+        fail(result, Error::ScmIncomplete, int(result.scm.stop));
+    } else if (result.scm.transport) {
+        fail(result, Error::ScmTransport, int(result.scm.transport));
+    } else if (result.scm.result) {
+        fail(result, Error::ScmSecure, int(result.scm.result));
+    } else {
+        result.msaAssigned = true;
+        advance(ops, result, Stage::MsaAssigned);
+    }
+    return finish();
+}
+
 bool RmtfsShared::region(Region *out) const
 {
     if (!out) return false;
@@ -935,7 +1069,8 @@ const char *stageName(Stage stage)
         "enable-xo", "probe-scm64", "probe-scm32", "allocate-metadata",
         "publish-metadata", "pas-init-image", "pas-mem-setup", "map-mpss",
         "load-segments", "publish-segments", "signal-aop", "pas-auth-and-reset",
-        "wait-ready", "ready", "allocate-shared", "publish-shared", "assign-shared", "shared-ready"
+        "wait-ready", "ready", "allocate-shared", "publish-shared", "assign-shared", "shared-ready",
+        "assign-msa", "msa-assigned"
     };
     const uint32_t index = uint32_t(stage);
     return index < sizeof(names) / sizeof(names[0]) ? names[index] : "invalid-stage";
@@ -967,6 +1102,13 @@ const Platform &nativePlatform()
 
 namespace {
 RmtfsShared nativeShared;
+MsaAssignment nativeMsa;
+}
+
+Result nativeAssignMsaRegion(uint64_t address, uint32_t bytes, bool secure)
+{
+    const Ops ops{};
+    return nativeMsa.assign(ops, address, bytes, secure);
 }
 
 Result nativeRmtfsSharedRegion(Region *out)

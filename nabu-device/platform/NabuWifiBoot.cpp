@@ -42,6 +42,11 @@ void logControl(void *, const nabu_wifi::Control::Event *event) {
           event->generation, event->operation, (unsigned long long)event->a,
           (unsigned long long)event->b, event->status);
 }
+int assignMsa(void *, uint64_t address, uint32_t bytes, bool secure) {
+    const NabuWifiMpss::Result result = NabuWifiMpss::nativeAssignMsaRegion(address, bytes, secure);
+    if (result.msaAssigned) return 0;
+    return result.error == NabuWifiMpss::Error::None ? -1 : int(result.error) << 16 | (result.status & 0xffff);
+}
 int prepareSmp2p(void *, const NabuWifiMpss::Region *region, NabuWifiMpss::Smp2pObservation *out) {
     if (!control || region->physical != NabuWifiMpss::SmemBase || region->bytes != NabuWifiMpss::SmemBytes)
         return int(kIOReturnBadArgument);
@@ -109,6 +114,9 @@ void coldStart() {
     resources.shared_phys = shared.physical;
     resources.shared_bytes = shared.bytes;
     resources.sync = NabuWifiMpss::nativeRmtfsSharedSync;
+    resources.msa_phys = NabuWifiMpss::MsaBase;
+    resources.msa_bytes = 0x100000;
+    resources.assignMsa = assignMsa;
     const nabu_wifi::FileProvider provider{nullptr, getFile};
     if (!control->initialize(resources, provider)) return;
     const int power = NabuWifiPower::beginBeforeGpu();

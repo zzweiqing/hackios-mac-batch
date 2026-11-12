@@ -22,13 +22,17 @@ constexpr uint32_t ReadyBit = 1u << 1;
 constexpr uint32_t FatalBit = 1u;
 constexpr uint64_t ReadyTimeoutUs = UINT64_C(30000000);
 constexpr size_t RmtfsSharedBytes = 0x200000;
+/* /reserved-memory/pil_wlan_fw_region@8bc00000 in this board's live FDT. */
+constexpr uint64_t MsaBase = UINT64_C(0x8bc00000);
+constexpr uint64_t MsaBytes = UINT64_C(0x180000);
 
 enum class Stage : uint32_t {
     Idle, ValidateOps, ValidateResources, ReadMdt, ValidateMdt, ReadSegments,
     MapSmem, PrepareSmp2p, VoteCx, VoteMss, EnableXo, ProbeScm64, ProbeScm32,
     AllocateMetadata, PublishMetadata, PasInitImage, PasMemSetup,
     MapMpss, LoadSegments, PublishSegments, SignalAop, PasAuthAndReset,
-    WaitReady, Ready, AllocateShared, PublishShared, AssignShared, SharedReady
+    WaitReady, Ready, AllocateShared, PublishShared, AssignShared, SharedReady,
+    AssignMsa, MsaAssigned
 };
 
 enum class Error : uint32_t {
@@ -59,6 +63,7 @@ struct Result {
     bool metadataRetained = false;
     bool assignmentSubmitted = false;
     bool sharedAssigned = false;
+    bool msaAssigned = false;
     uint64_t sharedPhysical = 0;
     size_t sharedBytes = 0;
     uint64_t managedBase = 0;
@@ -151,6 +156,27 @@ private:
     Region storage_, parameters_, shared_;
     Result result_;
 };
+
+/* Moves one WLAN MSA region the firmware reported from HLOS (3) to MSS_MSA
+ * (15) + WLAN (24) [+ WLAN_CE (25) when not secure], RW (6), as ath10k does.
+ * Only page-aligned regions inside the board's MSA carveout and outside the
+ * managed window are accepted. One SCM attempt per distinct region, at most
+ * two regions per boot; a failed or interrupted attempt retains its parameter
+ * page, is never retried and nothing is undone. Repeating a recorded region
+ * returns the recorded result without another call. */
+class MsaAssignment final {
+public:
+    MsaAssignment() = default;
+    MsaAssignment(const MsaAssignment &) = delete;
+    MsaAssignment &operator=(const MsaAssignment &) = delete;
+    Result assign(const Ops &, uint64_t address, uint32_t bytes, bool secure);
+private:
+    struct Record { uint64_t address = 0; uint32_t bytes = 0; bool secure = false; Result result; };
+    uint32_t count_ = 0;
+    Record records_[2];
+    Region parameters_[2];
+};
+Result nativeAssignMsaRegion(uint64_t address, uint32_t bytes, bool secure);
 
 /* Native singleton returns its original assignment failure and exposes a
  * Region only on success. sync matches Control::Resources::sync and accepts

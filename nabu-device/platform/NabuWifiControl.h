@@ -20,7 +20,7 @@ public:
     enum class Error { None, InvalidResources, Provider, Registry, Smem, AlreadyRunning,
                        NotPrepared, Clock, Smp2p, Fatal, Restart, QueueFull, Protocol,
                        GlinkTimeout, IntentTimeout, ServiceTimeout, QmiTimeout, QmiResult,
-                       CapabilityFields, TransferTimeout, PdFailure, RmtfsIo };
+                       CapabilityFields, TransferTimeout, PdFailure, RmtfsIo, MsaRegion, MsaAssign };
     struct Event {
         Stage stage;
         Error error;
@@ -45,6 +45,13 @@ public:
         uint64_t shared_phys;
         size_t shared_bytes;
         int (*sync)(void *, void *, size_t, bool publish);
+        /* WLAN MSA carveout requested from the firmware (page aligned) and the
+         * platform's one-shot HLOS to MSS_MSA/WLAN[/WLAN_CE] permission change
+         * for one region. Zero is success. Called at most once per region,
+         * never retried or undone, and only for regions inside the request. */
+        uint64_t msa_phys;
+        uint32_t msa_bytes;
+        int (*assignMsa)(void *, uint64_t address, uint32_t bytes, bool secure);
     };
     struct Smp2pObservation { bool negotiated, entryPresent, fresh; uint32_t state; };
     struct Status {
@@ -141,6 +148,13 @@ private:
     bool qmi_pending_;
     uint64_t qmi_deadline_;
     uint32_t qmi_node_, qmi_port_, qmi_generation_;
+    enum class Wlfw : uint8_t { Idle, IndRegister, HostCap, MsaInfo, MsaAssign, MsaReady, Cap };
+    struct MsaRegion { uint64_t address; uint32_t bytes; bool secure; };
+    Wlfw wlfw_step_;
+    uint16_t wlfw_id_;
+    uint32_t msa_count_;
+    uint64_t msa_assign_at_;
+    MsaRegion msa_[2];
     uint32_t cache_next_, cache_active_;
     Transaction transactions_[8];
     Packet queue_[kQueue];
@@ -173,6 +187,9 @@ private:
     bool pdmapper(const wire::QrtrPacket &, const wire::QmiMessage &);
     void pdFailureDiagnostic(const wire::QmiMessage &, uint8_t, const char *);
     bool wlfw(const wire::QrtrPacket &, const wire::QmiMessage &);
+    bool wlfwNext();
+    bool wlfwSend(wire::QmiBuilder &, const char *);
+    bool wlfwMsaInfo(const wire::QmiMessage &);
     bool tftp(const wire::QrtrPacket &);
     bool transferRequest(const wire::QrtrPacket &);
     bool transferPoll();

@@ -29,6 +29,7 @@ Control::Control() : resources_{}, provider_{}, smem_{}, outbound_{}, descriptor
     open_sent_(false), open_ack_(false), remote_open_(false), intents_sent_(false), services_sent_(false),
     remote_channel_(0), transaction_(1), features_(0), queue_head_(0), queue_count_(0), registry_count_(0),
     rx_cursor_(0), next_local_iid_(9), qmi_pending_(false), qmi_deadline_(0), qmi_node_(0), qmi_port_(0), qmi_generation_(0),
+    wlfw_step_(Wlfw::Idle), wlfw_id_(0), msa_count_(0), msa_assign_at_(0), msa_{},
     cache_next_(0), cache_active_(UINT32_MAX), transactions_{}, queue_{}, remote_intents_{}, receive_{}, registry_{}, transfers_{}, ram_files_{}, scratch_{} {}
 
 const char *Control::stageName(Stage value) {
@@ -55,6 +56,7 @@ const char *Control::errorName(Error value) {
     case Error::QmiTimeout: return "qmi-timeout"; case Error::QmiResult: return "qmi-result";
     case Error::CapabilityFields: return "capability-fields"; case Error::TransferTimeout: return "transfer-timeout";
     case Error::PdFailure: return "pd-failure"; case Error::RmtfsIo: return "rmtfs-io";
+    case Error::MsaRegion: return "msa-region"; case Error::MsaAssign: return "msa-assign";
     }
     return "invalid";
 }
@@ -164,6 +166,8 @@ bool Control::initialize(const Resources &resources, const FileProvider &provide
     status_.generation = 1; status_.stage = Stage::Inputs;
     if (!provider.getFile || !resources.nowMs || !resources.waitMs || !resources.log || !resources.sync ||
         !span(resources.rmtfs_arena, resources.rmtfs_arena_bytes) || !span(resources.shared, resources.shared_bytes) ||
+        !resources.assignMsa || !resources.msa_bytes || (resources.msa_phys & 4095) || (resources.msa_bytes & 4095) ||
+        !resources.msa_phys || resources.msa_phys > UINT64_MAX - resources.msa_bytes ||
         resources.shared_bytes != 0x200000 || (resources.shared_phys & 4095) || !resources.shared_phys ||
         resources.shared_phys > UINT64_MAX - resources.shared_bytes ||
         ((resources.shared_phys & 0xffffffffull) + resources.shared_bytes > 0x100000000ull) ||
@@ -764,18 +768,121 @@ void Control::pdFailureDiagnostic(const QmiMessage &message, uint8_t tag, const 
     }
     event(diagnostic, bytes, captured, value ? 0 : -1);
 }
+bool Control::wlfwSend(QmiBuilder &request, const char *operation) {
+    const size_t bytes = request.finish();
+    if (!bytes) return fail(Error::Protocol, "wlfw-request-size");
+    if (!send(Data, kWlfwPort, status_.server_node, status_.server_port, request.data, bytes)) return false;
+    qmi_node_ = status_.server_node; qmi_port_ = status_.server_port; qmi_generation_ = status_.generation;
+    wlfw_id_ = uint16_t(request.data[3] | request.data[4] << 8);
+    qmi_pending_ = true; qmi_deadline_ = now_ + 10000;
+    event(operation, transaction_, wlfw_id_);
+    return true;
+}
+/* ath10k_qmi_event_server_arrive order: IND_REGISTER, HOST_CAP, MSA_INFO, MSA
+ * permissions, MSA_READY, CAP. Each request waits for its matching reply. */
+bool Control::wlfwNext() {
+    static const uint8_t one = 1;
+    switch (wlfw_step_) {
+    case Wlfw::IndRegister: {
+        QmiBuilder request(kQmiRequest, transaction_, 0x20);
+        request.tlv(0x10, &one, 1); request.tlv(0x13, &one, 1); request.u32(0x15, 0x4b4e454c);
+        return wlfwSend(request, "wlfw-ind-request");
+    }
+    case Wlfw::HostCap: {
+        QmiBuilder request(kQmiRequest, transaction_, 0x34);
+        request.u32(0x10, 0);
+        return wlfwSend(request, "wlfw-host-cap-request");
+    }
+    case Wlfw::MsaInfo: {
+        QmiBuilder request(kQmiRequest, transaction_, 0x2d);
+        request.u64(1, resources_.msa_phys); request.u32(2, resources_.msa_bytes);
+        return wlfwSend(request, "wlfw-msa-info-request");
+    }
+    case Wlfw::MsaAssign:
+        if (now_ < msa_assign_at_) return true;
+        for (uint32_t i = 0; i < msa_count_; ++i) {
+            const int status = resources_.assignMsa(resources_.ctx, msa_[i].address, msa_[i].bytes, msa_[i].secure);
+            event("wlfw-msa-assign", msa_[i].address, msa_[i].bytes, status);
+            if (status) return fail(Error::MsaAssign, "wlfw-msa-assign", status);
+        }
+        wlfw_step_ = Wlfw::MsaReady;
+        return wlfwNext();
+    case Wlfw::MsaReady: {
+        QmiBuilder request(kQmiRequest, transaction_, 0x2e);
+        return wlfwSend(request, "wlfw-msa-ready-request");
+    }
+    case Wlfw::Cap: {
+        QmiBuilder request(kQmiRequest, transaction_, 0x24);
+        return wlfwSend(request, "wlfw-cap-request");
+    }
+    case Wlfw::Idle: break;
+    }
+    return true;
+}
+bool Control::wlfwMsaInfo(const QmiMessage &message) {
+    size_t bytes; const uint8_t *regions = message.get(3, bytes);
+    if (!regions || !bytes || regions[0] > 2 || bytes != size_t(1) + size_t(regions[0]) * 13)
+        return fail(Error::MsaRegion, "wlfw-msa-fields", int(bytes));
+    msa_count_ = 0;
+    for (uint32_t i = 0; i < regions[0]; ++i) {
+        const uint8_t *entry = regions + 1 + i * 13;
+        const uint64_t address = wire::le64(entry); const uint32_t size = le32(entry + 8);
+        if (!size || (address & 4095) || (size & 4095) || address < resources_.msa_phys ||
+            address - resources_.msa_phys > resources_.msa_bytes || size > resources_.msa_bytes - (address - resources_.msa_phys))
+            return fail(Error::MsaRegion, "wlfw-msa-region", int(i));
+        event("wlfw-msa-region", address, size, entry[12] != 0);
+        msa_[i] = {address, size, entry[12] != 0};
+    }
+    msa_count_ = regions[0];
+    return true;
+}
 bool Control::wlfw(const QrtrPacket &packet, const QmiMessage &message) {
     if (message.type != kQmiResponse || !qmi_pending_ || packet.source_node != qmi_node_ ||
-        packet.source_port != qmi_port_ || message.transaction != transaction_ || message.id != 0x24 ||
+        packet.source_port != qmi_port_ || message.transaction != transaction_ || message.id != wlfw_id_ ||
         qmi_generation_ != status_.generation) { event("wlfw-unmatched", message.id, message.transaction); return true; }
     uint16_t error = 0;
-    if (!message.result(error)) return fail(Error::QmiResult, "wlfw-cap-result", error);
-    if (!wire::capability(message, status_.capability)) return fail(Error::CapabilityFields, "wlfw-cap-fields");
-    qmi_pending_ = false;
-    status_.capability_generation = status_.generation;
-    event("wlfw-chip-family", status_.capability.chip_id, status_.capability.chip_family);
-    event("wlfw-board-soc", status_.capability.board_id, status_.capability.soc_id);
-    stage(Stage::Complete, 0); return true;
+    const bool ok = message.result(error);
+    switch (wlfw_step_) {
+    case Wlfw::IndRegister: {
+        if (!ok) return fail(Error::QmiResult, "wlfw-ind-result", error);
+        size_t bytes; const uint8_t *status = message.get(0x10, bytes);
+        if (status && bytes != 8) return fail(Error::Protocol, "wlfw-ind-fields");
+        const uint64_t firmware = status ? wire::le64(status) : 0;
+        event("wlfw-ind-registered", firmware, 0, status ? 0 : -1);
+        wlfw_step_ = (firmware & 2) ? Wlfw::Cap : Wlfw::HostCap;
+        break;
+    }
+    case Wlfw::HostCap:
+        /* QMI_ERR_NOT_SUPPORTED (94): older firmware without this request. */
+        if (!ok && error != 94) return fail(Error::QmiResult, "wlfw-host-cap-result", error);
+        event("wlfw-host-cap", error, ok ? 0 : 1);
+        wlfw_step_ = Wlfw::MsaInfo;
+        break;
+    case Wlfw::MsaInfo:
+        if (!ok) return fail(Error::QmiResult, "wlfw-msa-info-result", error);
+        if (!wlfwMsaInfo(message)) return false;
+        msa_assign_at_ = now_ + 20;
+        wlfw_step_ = Wlfw::MsaAssign;
+        break;
+    case Wlfw::MsaReady:
+        if (!ok) return fail(Error::QmiResult, "wlfw-msa-ready-result", error);
+        event("wlfw-msa-ready", 0, 0, 0);
+        wlfw_step_ = Wlfw::Cap;
+        break;
+    case Wlfw::Cap:
+        if (!ok) return fail(Error::QmiResult, "wlfw-cap-result", error);
+        if (!wire::capability(message, status_.capability)) return fail(Error::CapabilityFields, "wlfw-cap-fields");
+        qmi_pending_ = false;
+        status_.capability_generation = status_.generation;
+        event("wlfw-chip-family", status_.capability.chip_id, status_.capability.chip_family);
+        event("wlfw-board-soc", status_.capability.board_id, status_.capability.soc_id);
+        wlfw_step_ = Wlfw::Idle;
+        stage(Stage::Complete, 0); return true;
+    case Wlfw::MsaAssign: case Wlfw::Idle:
+        event("wlfw-unmatched", message.id, message.transaction); return true;
+    }
+    qmi_pending_ = false; ++transaction_;
+    return true;
 }
 
 bool Control::poll(uint64_t now_ms) {
@@ -829,12 +936,9 @@ bool Control::poll(uint64_t now_ms) {
         stage(Stage::Services, 120000); if (!advertise(0)) return false; stage(Stage::WaitWlfw, 120000);
     }
     if (status_.stage == Stage::WaitWlfw && status_.server_port && queue_count_ < kQueue - 1) {
-        QmiBuilder request(kQmiRequest, transaction_, 0x24);
-        if (!send(Data, kWlfwPort, status_.server_node, status_.server_port, request.data, request.finish())) return false;
-        qmi_node_ = status_.server_node; qmi_port_ = status_.server_port; qmi_generation_ = status_.generation;
-        qmi_pending_ = true; qmi_deadline_ = now_ + 10000; stage(Stage::Capability, 10000);
-        event("wlfw-cap-request", transaction_, 0x24);
+        wlfw_step_ = Wlfw::IndRegister; stage(Stage::Capability, 60000);
     }
+    if (status_.stage == Stage::Capability && !qmi_pending_ && queue_count_ < kQueue - 1 && !wlfwNext()) return false;
     if (!transferPoll() || !flush()) return false;
     if (qmi_pending_ && now_ >= qmi_deadline_) return fail(Error::QmiTimeout, "wlfw-cap-timeout");
     if (status_.stage != Stage::Complete && now_ >= stage_deadline_) return fail(status_.stage == Stage::Glink ? Error::GlinkTimeout : Error::ServiceTimeout, "stage-timeout");
