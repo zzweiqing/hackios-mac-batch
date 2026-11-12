@@ -1184,6 +1184,24 @@ bool Control::tftp(const QrtrPacket &packet) {
     }
     return true;
 }
+/* State of a transfer that stopped being acknowledged: transfer position,
+ * queue and remote-intent occupancy, and the raw GLINK FIFO indices. */
+void Control::transferDiagnostic(unsigned index) {
+    const Transfer &transfer = transfers_[index];
+    event("tftp-timeout-transfer", (uint64_t(transfer.block) << 32) | transfer.acknowledged,
+          (uint64_t(transfer.next_block) << 32) | transfer.window_end, int(transfer.retries));
+    unsigned free = 0, busy = 0;
+    for (const Intent &intent : remote_intents_) { if (!intent.bytes) ++free; else if (intent.busy) ++busy; }
+    unsigned advertised = 0, active = 0;
+    for (const Receive &receive : receive_) { if (receive.advertised) ++advertised; if (receive.active) ++active; }
+    event("tftp-timeout-queue", (uint64_t(queue_count_) << 32) | queue_head_,
+          (uint64_t(free) << 32) | busy, int(advertised << 8 | active));
+    if (!descriptors_.bytes) { event("tftp-timeout-fifo"); return; }
+    const uint32_t tx_tail = smem_.read(descriptors_.offset), tx_head = smem_.read(descriptors_.offset + 4);
+    const uint32_t rx_cursor = smem_.read(descriptors_.offset + 8), rx_head = smem_.read(descriptors_.offset + 12);
+    event("tftp-timeout-fifo", (uint64_t(tx_head) << 32) | tx_tail, (uint64_t(rx_head) << 32) | rx_cursor,
+          int(status_.smp2p_state));
+}
 bool Control::transferPoll() {
     for (unsigned i = 0; i < kTransfers; ++i) {
         Transfer &transfer = transfers_[i];
@@ -1203,7 +1221,11 @@ bool Control::transferPoll() {
             transfer.retry_at = now_ + transfer.timeout_ms; continue;
         }
         if (!transfer.next_block && now_ >= transfer.retry_at && queue_count_ < kQueue - 4) {
-            if (++transfer.retries > 5) return fail(Error::TransferTimeout, "tftp-ack-timeout", int(i));
+            if (++transfer.retries > kTftpRetries) {
+                transferDiagnostic(i);
+                return fail(Error::TransferTimeout, "tftp-ack-timeout", int(i));
+            }
+            event("tftp-retry", (uint64_t(transfer.block) << 32) | transfer.acknowledged, transfer.retries);
             if (transfer.initial_bytes) {
                 if (!send(Data, 0x100 + i, transfer.node, transfer.port, transfer.initial, transfer.initial_bytes)) return false;
                 transfer.retry_at = now_ + transfer.timeout_ms; continue;

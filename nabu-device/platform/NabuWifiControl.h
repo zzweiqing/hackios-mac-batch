@@ -101,7 +101,7 @@ public:
 private:
     enum { kQueue = 16, kIntents = 8, kRemoteIntents = 128, kTransfers = 8,
            kRamFiles = 8, kRamFileBytes = 65536, kRegistry = 32, kBlockBytes = 1024,
-           kPdDiagnosticBytes = 256 };
+           kPdDiagnosticBytes = 256, kTftpRetries = 25 };
     struct Packet {
         uint8_t data[wire::kPacketBytes];
         uint32_t bytes, offset, iid, generation;
@@ -194,6 +194,7 @@ private:
     bool tftp(const wire::QrtrPacket &);
     bool transferRequest(const wire::QrtrPacket &);
     bool transferPoll();
+    void transferDiagnostic(unsigned);
     bool transferBlock(unsigned, uint32_t);
     void closeTransfer(unsigned);
     bool transferError(uint32_t, uint32_t, uint32_t, uint16_t, const char *);
