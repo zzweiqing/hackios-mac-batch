@@ -201,7 +201,147 @@ int Power::beginBeforeGpu(const Io &io, uint64_t managedBase, uint64_t managedBy
     return status;
 }
 
-int Power::submitVote(uint32_t address, uint32_t value)
+int Power::findWlanResources()
+{
+    report_.stage = Stage::CommandDb;
+    uint32_t pointer = 0, version = 0, magic = 0;
+    int status = read(Domain::CommandDbInfo, 0, &pointer);
+    if (status) return status;
+    status = read(Domain::CommandDb, 0, &version);
+    if (status) return status;
+    status = read(Domain::CommandDb, 4, &magic);
+    if (status) return status;
+    if (pointer != 0x85f20000 || !version || magic != 0x0c0330db) return fail(Error::Resource);
+
+    struct Header { uint32_t slave, records, auxiliary, count; } headers[8]{};
+    bool ended = false;
+    uint32_t slaves = 0;
+    for (unsigned index = 0; index < 8; ++index) {
+        uint32_t words[4]{};
+        for (unsigned word = 0; word < 4; ++word) {
+            status = read(Domain::CommandDb, 8 + index * 16 + word * 4, &words[word]);
+            if (status) return status;
+        }
+        Header &header = headers[index];
+        header.slave = words[0] & 0xffff;
+        if (!header.slave) {
+            if (words[0] || words[1] || words[2] || words[3]) return fail(Error::Resource);
+            ended = true;
+            continue;
+        }
+        if (ended || header.slave < 3 || header.slave > 5 ||
+            (slaves & Bit(header.slave)) || (words[2] & 0xffff0000) || words[3]) {
+            return fail(Error::Resource);
+        }
+        slaves |= Bit(header.slave);
+        header.records = 144 + (words[0] >> 16);
+        header.auxiliary = 144 + (words[1] & 0xffff);
+        header.count = words[1] >> 16;
+        if ((header.records & 3) || header.records > CommandDbBytes || header.count > 4096 ||
+            header.count * 24 > CommandDbBytes - header.records || header.auxiliary > CommandDbBytes) {
+            return fail(Error::Resource);
+        }
+        for (unsigned previous = 0; previous < index; ++previous) {
+            const Header &other = headers[previous];
+            if (header.count && other.count && header.records < other.records + other.count * 24 &&
+                other.records < header.records + header.count * 24) return fail(Error::Resource);
+        }
+    }
+
+    static const char names[4][8] = {"ldoa1", "ldoa7", "ldoc2", "ldoc11"};
+    uint32_t addresses[4]{}, entries[4]{}, seen = 0;
+    for (const Header &header : headers) {
+        for (uint32_t entry = 0; entry < header.count; ++entry) {
+            const uint32_t at = header.records + entry * 24;
+            uint32_t record[6]{};
+            for (unsigned word = 0; word < 6; ++word) {
+                status = read(Domain::CommandDb, at + word * 4, &record[word]);
+                if (status) return status;
+            }
+            const uint32_t address = record[4], bytes = record[5] & 0xffff;
+            const uint32_t auxiliary = header.auxiliary + (record[5] >> 16);
+            if (!address || (address & 3) || ((address >> 16) & 7) != header.slave ||
+                (header.slave == 4 && (address & 15)) || auxiliary > CommandDbBytes ||
+                bytes > CommandDbBytes - auxiliary) return fail(Error::Resource);
+            for (const Header &table : headers) {
+                if (bytes && table.count && auxiliary < table.records + table.count * 24 &&
+                    table.records < auxiliary + bytes) return fail(Error::Resource);
+            }
+            char name[8]{};
+            for (unsigned byte = 0; byte < 8; ++byte) {
+                name[byte] = char(record[byte / 4] >> (byte % 4 * 8));
+            }
+            if (!name[0]) return fail(Error::Resource);
+            for (unsigned supply = 0; supply < 4; ++supply) {
+                if (memcmp(name, names[supply], sizeof(name))) continue;
+                if (header.slave != 4 || (seen & Bit(supply)) || address > UINT32_MAX - 8) {
+                    return fail(Error::Resource);
+                }
+                addresses[supply] = address;
+                entries[supply] = at;
+                seen |= Bit(supply);
+            }
+        }
+    }
+    if (seen != 15) return fail(Error::Resource);
+
+    // Scan every address after all four matches exist, including unrelated
+    // VRM entries that preceded them. A second ID cannot alias a WLAN group.
+    for (const Header &header : headers) {
+        for (uint32_t entry = 0; entry < header.count; ++entry) {
+            const uint32_t at = header.records + entry * 24;
+            uint32_t address = 0;
+            status = read(Domain::CommandDb, at + 16, &address);
+            if (status) return status;
+            for (unsigned supply = 0; supply < 4; ++supply) {
+                if (at != entries[supply] && (address & ~15u) == addresses[supply]) return fail(Error::Resource);
+                if (at == entries[supply] && address != addresses[supply]) return fail(Error::Resource);
+            }
+        }
+    }
+    for (unsigned supply = 0; supply < 4; ++supply) {
+        report_.wlanSupplies[supply].address = addresses[supply];
+    }
+    return 0;
+}
+
+int Power::enableWlanSupplies()
+{
+    Operation operation(&operation_);
+    if (!operation.acquired) return -1;
+    if (report_.error != Error::None) return report_.status;
+    if (!begun_ || released_ || report_.wlanSuppliesRequested) return fail(Error::Sequence);
+    report_.wlanSuppliesRequested = true;
+    int status = findWlanResources();
+    if (status) return status;
+    static const uint32_t millivolts[4] = {752, 1800, 1304, 3312};
+    static const uint32_t offsets[3] = {0, 8, 4};
+    for (unsigned index = 0; index < 4; ++index) {
+        Report::WlanSupply &supply = report_.wlanSupplies[index];
+        const uint32_t values[3] = {millivolts[index], 7, 1};
+        for (unsigned command = 0; command < 3; ++command) {
+            report_.resourceAddress = supply.address + offsets[command];
+            report_.requestedLevel = values[command];
+            status = submitVote(report_.resourceAddress, values[command], &supply, Bit(command));
+            // The complete supply sequence and settling period are one
+            // operation. Keep it pending even if a later slot becomes busy.
+            report_.pending = true;
+            if (status) {
+                log();
+                return status;
+            }
+        }
+    }
+    report_.stage = Stage::WlanSupplies;
+    status = io_.waitUs(io_.ctx, 10000);
+    if (status) return fail(Error::Io, status);
+    report_.wlanSuppliesReady = true;
+    report_.pending = false;
+    log();
+    return 0;
+}
+
+int Power::submitVote(uint32_t address, uint32_t value, Report::WlanSupply *supply, uint32_t command)
 {
     report_.stage = Stage::TcsPrepare;
     uint32_t configuration = 0;
@@ -248,6 +388,7 @@ int Power::submitVote(uint32_t address, uint32_t value)
     status = write(Domain::Rpmh, base + 0x1c, 1);
     if (status) return status;
     report_.stage = Stage::TcsSubmit;
+    if (supply) supply->submitted |= command;
     log();
     status = write(Domain::Rpmh, base + 0x14, Bit(16) | Bit(24));
     if (status) return status;
@@ -255,6 +396,7 @@ int Power::submitVote(uint32_t address, uint32_t value)
     if (status) return status;
     status = poll(Domain::Rpmh, base + 0x3c, Bit(8) | Bit(16), Bit(8) | Bit(16), 1000);
     if (status) return status;
+    if (supply) supply->acknowledged |= command;
     report_.stage = Stage::TcsComplete;
     status = write(Domain::Rpmh, base + 0x1c, 0);
     if (status) return status;
@@ -326,7 +468,7 @@ int Power::ring()
     return write(Domain::Doorbell, 0, 1);
 }
 
-int Power::openQmp()
+int Power::openQmp(bool rejectBusy)
 {
     report_.stage = Stage::QmpOpen;
     uint32_t magic = 0, version = 0;
@@ -342,6 +484,12 @@ int Power::openQmp()
     if (mailboxOffset_ < 64 || (mailboxOffset_ & 3) || mailboxBytes_ < 64 ||
         mailboxOffset_ > 0x400 || mailboxBytes_ > 0x400 - mailboxOffset_) {
         return fail(Error::Resource);
+    }
+    if (rejectBusy) {
+        uint32_t occupied = 0;
+        status = read(Domain::Qmp, mailboxOffset_, &occupied);
+        if (status) return status;
+        if (occupied) return fail(Error::Busy);
     }
     uint32_t states[10]{};
     for (unsigned index = 0; index < 10; ++index) {
@@ -380,31 +528,36 @@ int Power::openQmp()
     return 0;
 }
 
-int Power::setModemLoadState()
+int Power::sendQmp(const char *message, size_t messageBytes,
+    uint32_t paddedBytes, bool wlanQdss)
 {
-    Operation operation(&operation_);
-    if (!operation.acquired) return -1;
-    if (report_.error != Error::None) return report_.status;
-    if (!begun_ || released_ ||
-        !xoEnabled_ || loadStateOn_) return fail(Error::Sequence);
-    int status = openQmp();
+    int status = openQmp(wlanQdss);
     if (status) return status;
-    const char message[] = "{class: image, res: load_state, name: modem, val: on}";
-    const uint32_t bytes = (sizeof(message) + 3) & ~uint32_t(3);
-    if (!linkUp_ || bytes + 4 > mailboxBytes_) return fail(Error::Resource);
-    status = poll(Domain::Qmp, mailboxOffset_, UINT32_MAX, 0, 100000);
+    if (!linkUp_ || !message || messageBytes > paddedBytes || (paddedBytes & 3) ||
+        mailboxBytes_ < 4 || paddedBytes > mailboxBytes_ - 4) return fail(Error::Resource);
+    if (wlanQdss) {
+        uint32_t occupied = 0;
+        status = read(Domain::Qmp, mailboxOffset_, &occupied);
+        if (status) return status;
+        if (occupied) return fail(Error::Busy);
+    } else {
+        status = poll(Domain::Qmp, mailboxOffset_, UINT32_MAX, 0, 100000);
+    }
     if (status) return status;
     report_.stage = Stage::QmpSubmit;
     report_.pending = true;
-    for (uint32_t offset = 0; offset < bytes; offset += 4) {
+    for (uint32_t offset = 0; offset < paddedBytes; offset += 4) {
         uint32_t value = 0;
-        for (unsigned byte = 0; byte < 4 && offset + byte < sizeof(message); ++byte) {
+        for (unsigned byte = 0; byte < 4 && offset + byte < messageBytes; ++byte) {
             value |= uint32_t(uint8_t(message[offset + byte])) << (byte * 8);
         }
         status = write(Domain::Qmp, mailboxOffset_ + 4 + offset, value);
         if (status) return status;
     }
-    status = write(Domain::Qmp, mailboxOffset_, bytes);
+    /* The size write can make the clock request visible even when its write
+     * or subsequent doorbell/ACK reports an error. Retain the vote first. */
+    if (wlanQdss) report_.wlanQdssPending = true;
+    status = write(Domain::Qmp, mailboxOffset_, paddedBytes);
     if (status) return status;
     log();
     status = ring();
@@ -413,16 +566,40 @@ int Power::setModemLoadState()
     if (status) return status;
     report_.stage = Stage::QmpComplete;
     report_.pending = false;
-    loadStateOn_ = true;
+    if (wlanQdss) report_.wlanQdssAccepted = true;
+    else loadStateOn_ = true;
     log();
     return 0;
+}
+
+int Power::setModemLoadState()
+{
+    Operation operation(&operation_);
+    if (!operation.acquired) return -1;
+    if (report_.error != Error::None) return report_.status;
+    if (!begun_ || released_ ||
+        !xoEnabled_ || loadStateOn_) return fail(Error::Sequence);
+    const char message[] = "{class: image, res: load_state, name: modem, val: on}";
+    const uint32_t bytes = (sizeof(message) + 3) & ~uint32_t(3);
+    return sendQmp(message, sizeof(message), bytes, false);
+}
+
+int Power::setWlanQdss()
+{
+    Operation operation(&operation_);
+    if (!operation.acquired) return -1;
+    if (report_.error != Error::None) return report_.status;
+    if (!begun_ || released_ || report_.wlanQdssPending) return fail(Error::Sequence);
+    const char message[] = "{class: clock, res: qdss, val: 1}";
+    return sendQmp(message, sizeof(message), 64, true);
 }
 
 bool Power::completeBeforeGpu()
 {
     Operation operation(&operation_);
     if (!operation.acquired || !begun_ || released_ || report_.pending ||
-        report_.error != Error::None || !loadStateOn_) return false;
+        report_.error != Error::None || !loadStateOn_ ||
+        (report_.wlanSuppliesRequested && !report_.wlanSuppliesReady)) return false;
     released_ = true;
     report_.stage = Stage::Released;
     log();
@@ -489,12 +666,22 @@ int nativeWait(void *, unsigned microseconds)
 void nativeLog(void *, const Report *report)
 {
     IOLog("NabuWifiPower: stage=%u error=%u status=%d domain=%u offset=%x "
-        "value=%x expected=%x mask=%x resource=%x level=%u index=%u pending=%u managed_base=%llx managed_bytes=%llx\n",
+        "value=%x expected=%x mask=%x resource=%x level=%u index=%u pending=%u "
+        "qdss_pending=%u qdss_accepted=%u supplies_requested=%u supplies_ready=%u "
+        "managed_base=%llx managed_bytes=%llx\n",
         unsigned(report->stage), unsigned(report->error), report->status,
         unsigned(report->domain), report->offset, report->value, report->expected,
         report->mask, report->resourceAddress, report->requestedLevel,
-        report->levelIndex, report->pending,
+        report->levelIndex, report->pending, report->wlanQdssPending, report->wlanQdssAccepted,
+        report->wlanSuppliesRequested, report->wlanSuppliesReady,
         (unsigned long long)report->managedBase, (unsigned long long)report->managedBytes);
+    if (report->wlanSuppliesRequested) {
+        for (unsigned index = 0; index < 4; ++index) {
+            const Report::WlanSupply &supply = report->wlanSupplies[index];
+            IOLog("NabuWifiPower: supply=%u resource=%x submitted=%x acknowledged=%x\n",
+                index, supply.address, supply.submitted, supply.acknowledged);
+        }
+    }
 }
 }
 
@@ -504,7 +691,7 @@ int beginBeforeGpu()
     if (!__atomic_compare_exchange_n(&owner.claim, &expected, 1, false,
         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return int(kIOReturnBusy);
     unsigned mode = 0, gpu = 0;
-    if (!PE_parse_boot_argn("nabu-wifi", &mode, sizeof(mode)) || mode != 2 ||
+    if (!PE_parse_boot_argn("nabu-wifi", &mode, sizeof(mode)) || (mode != 2 && mode != 3) ||
         !PE_parse_boot_argn("nabu-gpu", &gpu, sizeof(gpu)) || gpu != 0) {
         IOLog("NabuWifiPower: cold owner rejected wifi=%u gpu=%u\n", mode, gpu);
         return int(kIOReturnUnsupported);
@@ -539,6 +726,13 @@ int beginBeforeGpu()
 int vote(void *, const char *name, uint32_t level) { return owner.power.vote(name, level); }
 int enableXo(void *) { return owner.power.enableXo(); }
 int setModemLoadState(void *) { return owner.power.setModemLoadState(); }
+int setWlanQdss(void *) { return owner.power.setWlanQdss(); }
+int enableWlanSupplies(void *)
+{
+    unsigned mode = 0;
+    if (!PE_parse_boot_argn("nabu-wifi", &mode, sizeof(mode)) || mode != 3) return int(kIOReturnUnsupported);
+    return owner.power.enableWlanSupplies();
+}
 bool completeBeforeGpu() { return owner.power.completeBeforeGpu(); }
 uint32_t mergeArcVote(uint32_t address, uint32_t value)
 {

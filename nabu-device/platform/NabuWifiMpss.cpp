@@ -607,7 +607,8 @@ Result Mpss::start(const Ops &ops)
         !ops.prepareSmp2p || !ops.pollSmp2p || !platform.managedWindow ||
         !platform.claimColdBoot || !platform.map || !platform.unmap ||
         !platform.allocate || !platform.release || !platform.publish ||
-        !platform.scm.invoke || !platform.scm.now_us || !platform.scm.wait_us) {
+        !platform.scm.invoke || !platform.scm.now_us || !platform.scm.wait_us ||
+        (bool(ops.prepareRadio) != bool(ops.radioAuthAttempted))) {
         fail(result, Error::MissingOps);
         return finish();
     }
@@ -681,6 +682,17 @@ Result Mpss::start(const Ops &ops)
         }
         result.scmConvention = 32;
         pasBase = 0x02000200;
+    }
+    if (ops.prepareRadio) {
+        if (!callScm(ops, platform, result, Stage::PasShutdown,
+                     pasBase | 6, 1, PasId, 0, 0)) return finish();
+        result.radioQuiesced = true;
+        advance(ops, result, Stage::PrepareRadio);
+        status = ops.prepareRadio(ops.ctx);
+        if (status) {
+            fail(result, Error::Radio, status);
+            return finish();
+        }
     }
     advance(ops, result, Stage::AllocateMetadata);
     result.metadataBytes = plan.headerBytes + plan.hashBytes;
@@ -756,6 +768,10 @@ Result Mpss::start(const Ops &ops)
     if (status) {
         fail(result, Error::Aop, status);
         return finish();
+    }
+    if (ops.radioAuthAttempted) {
+        result.radioQuiesced = false;
+        ops.radioAuthAttempted(ops.ctx);
     }
     if (!callScm(ops, platform, result, Stage::PasAuthAndReset,
         pasBase | 5, 1, PasId, 0, 0)) {
@@ -1070,7 +1086,7 @@ const char *stageName(Stage stage)
         "publish-metadata", "pas-init-image", "pas-mem-setup", "map-mpss",
         "load-segments", "publish-segments", "signal-aop", "pas-auth-and-reset",
         "wait-ready", "ready", "allocate-shared", "publish-shared", "assign-shared", "shared-ready",
-        "assign-msa", "msa-assigned"
+        "assign-msa", "msa-assigned", "pas-shutdown", "prepare-radio"
     };
     const uint32_t index = uint32_t(stage);
     return index < sizeof(names) / sizeof(names[0]) ? names[index] : "invalid-stage";
@@ -1083,7 +1099,7 @@ const char *errorName(Error error)
         "invalid-mdt", "segment-size", "segment-range", "segment-overlap",
         "mapping", "allocation", "cache", "smp2p", "already-running", "power",
         "scm-convention", "scm-transport", "scm-secure", "scm-incomplete", "aop",
-        "clock", "wait", "fatal", "ready-timeout"
+        "clock", "wait", "fatal", "ready-timeout", "radio"
     };
     const uint32_t index = uint32_t(error);
     return index < sizeof(names) / sizeof(names[0]) ? names[index] : "invalid-error";

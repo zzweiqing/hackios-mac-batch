@@ -28,6 +28,7 @@ enum GlinkCommand { Version = 0, VersionAck, Open, Close, OpenAck, Intent,
                     CloseAck = 11, TxDataCont, ReadNotify, RxDoneReuse, Signals };
 static const uint32_t kAppsNode = 1, kControlPort = 0xfffffffeu, kBroadcastNode = 0xffffffffu;
 static const uint32_t kRmtfsPort = 0x10, kPdPort = 0x11, kTftpPort = 0x12, kWlfwPort = 0x13;
+static const uint32_t kWlfwDaemonPort = 0x14;
 
 struct QrtrPacket {
     uint32_t type, source_node, source_port, destination_node, destination_port, confirm;
@@ -90,11 +91,18 @@ struct QmiMessage {
     }
 };
 
-class QmiBuilder {
+template <size_t Capacity>
+class QmiBuffer {
 public:
-    uint8_t data[1024];
+    uint8_t data[Capacity];
     size_t bytes;
-    QmiBuilder(uint8_t type, uint16_t txn, uint16_t id) : data{}, bytes(7) {
+    QmiBuffer(uint8_t type, uint16_t txn, uint16_t id) : data{}, bytes(7) {
+        reset(type, txn, id);
+    }
+    void reset(uint8_t type, uint16_t txn, uint16_t id) {
+        static_assert(Capacity >= 7 && Capacity <= 65535, "Bounded QMI buffer capacity");
+        memset(data, 0, 7);
+        bytes = 7;
         data[0] = type; put16(data + 1, txn); put16(data + 3, id);
     }
     bool tlv(uint8_t tag, const void *value, size_t n) {
@@ -116,6 +124,7 @@ public:
         return bytes;
     }
 };
+using QmiBuilder = QmiBuffer<1024>;
 
 struct Capability {
     bool valid;

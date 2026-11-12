@@ -1,0 +1,57 @@
+--- a/iokit/Kernel/MiniIONetworkStack.cpp
++++ b/iokit/Kernel/MiniIONetworkStack.cpp
+@@ -21,7 +21,7 @@
+ #include <sys/systm.h>
+ #include <sys/proc.h>
+ 
+-#include "MiniDrivers.h"
++#include <sys/nabu_wifi_network.h>
+ 
+ class IONetworkStack : public IOService
+ {
+@@ -95,9 +95,10 @@
+ 
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ 
+-void
+-MiniIONetworkStackStart(void)
++bool
++nabu_wifi_network_stack_start(void)
+ {
++	if (!nabu_wifi_network_classes_ready()) return false;
+ 	/* where the real one is: IOService:/IOResources/IONetworkStack */
+ 	IOService * resources = IOService::getResourceService();
+ 	IONetworkStack * stack = OSTypeAlloc(IONetworkStack);
+@@ -105,10 +106,12 @@
+ 	if (resources == NULL || stack == NULL || !stack->init() || !stack->attach(resources)) {
+ 		OSSafeReleaseNULL(stack);
+ 		IOLog("MiniIONetworkStack: cannot create the service\n");
+-		return;
++		return false;
+ 	}
+-	if (!stack->start(resources)) {
++	bool started = stack->start(resources);
++	if (!started) {
+ 		stack->detach(resources);
+ 	}
+ 	stack->release();
++	return started;
+ }
+--- a/iokit/Kernel/hakios.wlan.cpp
++++ b/iokit/Kernel/hakios.wlan.cpp
+@@ -39,6 +39,7 @@
+ #include <IOKit/IOUserClient.h>
+ #include <libkern/c++/OSData.h>
+ #include <libkern/c++/OSNumber.h>
++#include <sys/nabu_wifi_network.h>
+ 
+ extern "C" void HakiosWLANStart(const char * interface, const uint8_t * address);
+ 
+@@ -115,6 +116,7 @@
+ void
+ HakiosWLANStart(const char * interface, const uint8_t * address)
+ {
++	if (!nabu_wifi_network_classes_ready()) return;
+ 	IOService * platform = IOService::getPlatform();
+ 	OSDictionary * match = IOService::nameMatching("wlan");
+ 	IOService * node = match != NULL ? IOService::copyMatchingService(match) : NULL;   /* the device tree's */

@@ -1,0 +1,52 @@
+--- a/bsd/dev/hakios.apple80211.c
++++ b/bsd/dev/hakios.apple80211.c
+@@ -1,3 +1,11 @@
++/* 21H16 Apple80211 layout awaits original-input qualification. */
++#ifndef NABU_WIFI_APPLE80211_21H16_ABI
++#define NABU_WIFI_APPLE80211_21H16_ABI 0
++#endif
++#if NABU_WIFI_APPLE80211_21H16_ABI != 0
++#error NABU_WIFI_APPLE80211_21H16_ABI_has_no_qualified_layout
++#endif
++#if NABU_WIFI_APPLE80211_21H16_ABI
+ /*
+  * Darwin-on-hakios: Apple80211, answered in the kernel.
+  *
+@@ -792,3 +800,37 @@
+ 	}
+ 	return error;
+ }
++
++#else
++#include <sys/errno.h>
++#include <sys/systm.h>
++#include <sys/hakios.net.h>
++#include <sys/hakios.sta.h>
++
++errno_t
++hakios_apple80211_ioctl(u_long command, void *data)
++{
++	(void)command;
++	(void)data;
++	return EOPNOTSUPP;
++}
++
++void
++hakios_apple80211_event(enum hakios_sta_event event, int status)
++{
++	(void)event;
++	(void)status;
++}
++
++void
++hakios_apple80211_signal(int rssi)
++{
++	(void)rssi;
++}
++
++void
++hakios_apple80211_summary(void)
++{
++	printf("NABU WIFI network: Apple80211 21H16 layout unqualified, ioctl/events disabled\n");
++}
++#endif

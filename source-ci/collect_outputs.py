@@ -126,7 +126,7 @@ def selected_files(upstream):
                 add(path, path.relative_to(work))
             elif relative == 'native-ufs' and (path.suffix in ('.cpp', '.h') or
                                                path.name in ('NativeUfs.o', 'compile.log') or
-                                               path.name.startswith('NabuWifi') and path.suffix in ('.o', '.log', '.json')):
+                                               path.name.startswith(('NabuWifi', 'NabuHall')) and path.suffix in ('.o', '.log', '.json')):
                 add(path, path.relative_to(work))
             elif relative == 'native-ram-block' and path.name in (
                     'NativeRamBlock.o', 'NativeRamBlock.cpp', 'compile.log', 'NabuGpuUserprobeAddon.h', 'PersistOverlay.h', 'DirectDisk.h'):
@@ -280,6 +280,9 @@ def selected_sources(device):
                 for directory in ('platform', 'ufs')
                 for p in sorted((device / directory).glob('NabuWifi*')) if p.suffix in ('.h', '.cpp')]
     sources += [(source_dir / 'nabu_wifi_ci.py', 'source-ci/nabu_wifi_ci.py')]
+    sources += [(source_dir / 'nabu_hall_ci.py', 'source-ci/nabu_hall_ci.py')]
+    sources += [(p, 'device/platform/' + p.name) for p in sorted((device / 'platform').glob('NabuHall*'))]
+    sources += [(device / 'scripts/nabu_hall_source.py', 'device/scripts/nabu_hall_source.py')]
     sources += [(device / 'scripts/nabu_capture_source.py', 'device/scripts/nabu_capture_source.py'),
                 (device / 'platform/NabuUsbProbe.cpp', 'device/platform/NabuUsbProbe.cpp'),
                 (device / 'platform/NabuHeartbeat.cpp', 'device/platform/NabuHeartbeat.cpp'),
@@ -441,6 +444,10 @@ def main():
                 from nabu_wifi_ci import qualify_candidate as qualify_wifi
                 manifest['wifi_qualification'] = qualify_wifi(args.upstream, args.device, candidate, prepared)
                 summary['wifi_qualified_statically'] = manifest['wifi_qualification']['compiled']
+            if prepared.get('hall_sensor') is not None:
+                from nabu_hall_ci import qualify_candidate as qualify_hall
+                manifest['hall_qualification'] = qualify_hall(args.upstream, args.device, candidate, prepared)
+                summary['hall_qualified_statically'] = manifest['hall_qualification']['compiled']
             manifest['data_skeleton_qualification'] = qualify_data_skeleton(
                 args.upstream, prepared.get('data_skeleton'), capture_logs=bool(identity['log_capture']))
             summary['data_skeleton_qualified_statically'] = bool(

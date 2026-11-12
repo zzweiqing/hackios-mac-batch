@@ -697,9 +697,15 @@ def main():
     p.add_argument('--gpu-userprobe', action='store_true', help='Enable the closed ABI1 probe addon boot transport')
     p.add_argument('--ui-watch', action='store_true', help='Compile opt-in bounded UI exec/main-thread observations')
     p.add_argument('--wifi-control', action='store_true', help='Build the independent firmware loader and MPSS control executor')
+    p.add_argument('--wifi-radio', action='store_true', help='Build the owned WLAN DMA domain before PAS authentication')
+    p.add_argument('--hall-sensor', action='store_true', help='Build opt-in Hall GPIO sampling')
     args = p.parse_args()
     if args.wifi_control and (args.profile not in UFS_OWNER_PROFILES or not args.capture_logs):
         raise SystemExit('The first Wi-Fi control candidate requires a captured hardware UFS owner profile')
+    if args.wifi_radio and (not args.wifi_control or args.profile != UFS_GPU_METAL_PROFILE):
+        raise SystemExit('Wi-Fi radio requires the captured Wi-Fi control Metal profile')
+    if args.hall_sensor and (args.profile not in UFS_OWNER_PROFILES or not args.capture_logs):
+        raise SystemExit('Hall sampling requires a captured hardware UFS owner profile')
     if args.ui_watch and (args.profile != UFS_GPU_METAL_PROFILE or not args.capture_logs or not args.gpu_userprobe):
         raise SystemExit('UI watch requires the explicit captured Metal profile and GPU userprobe')
     if args.capture_logs and args.profile not in UFS_OWNER_PROFILES:
@@ -787,7 +793,11 @@ def main():
     if 'CONFIG_XNU_OWNER_DATA_MOUNT=y' in options:
         data_skeleton = prepare_data_skeleton(args.upstream)
     log_capture = enable_logging(args.upstream, args.device) if args.capture_logs else None
-    wifi_control = enable_wifi(args.upstream, args.device) if args.wifi_control else None
+    wifi_control = enable_wifi(args.upstream, args.device, radio=args.wifi_radio) if args.wifi_control else None
+    hall_sensor = None
+    if args.hall_sensor:
+        from nabu_hall_ci import enable_hall
+        hall_sensor = enable_hall(args.upstream, args.device)
     data_none = (prepare_data_none(args.upstream, args.device)
                  if 'CONFIG_XNU_OWNER_DATA_MOUNT=y' in options else None)
     nabu_idle = None
@@ -839,6 +849,7 @@ def main():
         'signature_scan_io': signature_scan,
         'log_capture': log_capture,
         'wifi_control': wifi_control,
+        'hall_sensor': hall_sensor,
         'vc_text_scale': {'argument': VC_TEXT_SCALE['argument'],
                           'default': VC_TEXT_SCALE['default'],
                           'maximum': VC_TEXT_SCALE['maximum'],

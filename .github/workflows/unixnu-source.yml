@@ -26,6 +26,14 @@ on:
         description: Build the independent ESP firmware loader and one-shot MPSS control chain
         type: boolean
         default: false
+      wifi_radio:
+        description: Build the owned WLAN DMA domain for the captured Wi-Fi control Metal profile
+        type: boolean
+        default: false
+      hall_sensor:
+        description: Build opt-in GPIO9 Hall sampling with a bound source FDT
+        type: boolean
+        default: false
       ui_watch:
         description: Build opt-in bounded UI exec and first main-thread observation (no device installation)
         type: boolean
@@ -66,7 +74,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: unixnu-source-${{ github.ref }}
+  group: unixnu-source-${{ github.ref }}-${{ inputs.turnip_only && format('turnip-{0}', inputs.turnip_render_mode) || 'kernel' }}
   cancel-in-progress: false
 defaults:
   run:
@@ -96,6 +104,8 @@ jobs:
           GPU_USERPROBE: ${{ inputs.gpu_userprobe }}
           UI_WATCH: ${{ inputs.ui_watch }}
           WIFI_CONTROL: ${{ inputs.wifi_control }}
+          WIFI_RADIO: ${{ inputs.wifi_radio }}
+          HALL_SENSOR: ${{ inputs.hall_sensor }}
           TURNIP_RENDER_MODE: ${{ inputs.turnip_render_mode }}
           FPS_OPT: ${{ inputs.fps_opt }}
           WALLPAPER_FIX: ${{ inputs.wallpaper_fix }}
@@ -118,6 +128,11 @@ jobs:
           log_args=()
           if [ "$CAPTURE_LOGS" = true ]; then log_args+=(--capture-logs); fi
           if [ "$WIFI_CONTROL" = true ]; then log_args+=(--wifi-control); fi
+          if [ "$WIFI_RADIO" = true ]; then
+            test "$WIFI_CONTROL" = true && test "$REQUESTED_CONFIG" = nabu_ufs_gpu_metal_defconfig
+            log_args+=(--wifi-radio)
+          fi
+          if [ "$HALL_SENSOR" = true ]; then log_args+=(--hall-sensor); fi
           if [ "$GPU_USERPROBE" = true ]; then log_args+=(--gpu-userprobe); fi
           if [ "$UI_WATCH" = true ]; then
             test "$GPU_USERPROBE" = true && test "$CAPTURE_LOGS" = true
@@ -257,10 +272,13 @@ jobs:
           WALLPAPER_FIX: ${{ inputs.wallpaper_fix }}
           WORKER_OPT: ${{ inputs.worker_opt }}
           TURNIP_RENDER_MODE: ${{ inputs.turnip_render_mode }}
+          WIFI_RADIO: ${{ inputs.wifi_radio }}
+          HALL_SENSOR: ${{ inputs.hall_sensor }}
           ASYNC_FIX: ${{ inputs.async_fix }}
           COMPLETION_FIX: ${{ inputs.completion_fix }}
           COMPLETION_OBSERVE: ${{ inputs.completion_observe }}
         run: |
+          test "$WIFI_RADIO" != true && test "$HALL_SENSOR" != true
           fps_args=()
           if [ "$FPS_OPT" = true ]; then fps_args+=(--fps-opt); fi
           if [ "$WALLPAPER_FIX" = true ]; then

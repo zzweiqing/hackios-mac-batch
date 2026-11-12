@@ -3,9 +3,13 @@
 #include "NabuWifiControl.h"
 #include "NabuWifiMpss.h"
 #include "NabuWifiPower.h"
+#include "NabuWifiDma.h"
 #include <IOKit/IOLib.h>
 #include <IOKit/IODeviceMemory.h>
+#include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOMemoryDescriptor.h>
+#include <IOKit/IORegistryEntry.h>
+#include <libkern/c++/OSData.h>
 #include <kern/clock.h>
 #include <kern/thread.h>
 #include <mach/mach_time.h>
@@ -47,6 +51,21 @@ int assignMsa(void *, uint64_t address, uint32_t bytes, bool secure) {
     if (result.msaAssigned) return 0;
     return result.error == NabuWifiMpss::Error::None ? -1 : int(result.error) << 16 | (result.status & 0xffff);
 }
+#if defined(NABU_WIFI_RADIO) && NABU_WIFI_RADIO
+int prepareRadio(void *) { return NabuWifiDma::activateRadioAfterPasStop(); }
+void radioAuthAttempted(void *) { NabuWifiDma::radioAuthAttempted(); }
+uint64_t global_fault_sequence = 0;
+void logGlobalFault() {
+    NabuWifiDma::FaultRecord fault;
+    if (nabu_wifi_smmu_global_fault_read(&global_fault_sequence, &fault)) {
+        IOLog("NABU WIFI DMA global fault sequence=%llu status=%08x sid-field=%x "
+              "syndrome=%08x/%08x/%08x ack=%08x io=%d dropped=%llu attribution=unresolved\n",
+              (unsigned long long)fault.sequence, fault.status, fault.sidField,
+              fault.syndrome0, fault.syndrome1, fault.syndrome2, fault.ackReadback,
+              fault.ioStatus, (unsigned long long)fault.dropped);
+    }
+}
+#endif
 int prepareSmp2p(void *, const NabuWifiMpss::Region *region, NabuWifiMpss::Smp2pObservation *out) {
     if (!control || region->physical != NabuWifiMpss::SmemBase || region->bytes != NabuWifiMpss::SmemBytes)
         return int(kIOReturnBadArgument);
@@ -89,10 +108,35 @@ bool allocateSeeds() {
     seed_arena = static_cast<uint8_t *>(IOMalloc(seed_bytes));
     return seed_arena != nullptr;
 }
-void coldStart() {
+bool selectedBoard(char *path, size_t capacity, uint32_t *capability) {
+    IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
+    if (!chosen) return false;
+    const OSData *property = OSDynamicCast(OSData, chosen->getProperty("nabu-wifi-bdf"));
+    const size_t bytes = property ? property->getLength() : 0;
+    const char *value = property ? static_cast<const char *>(property->getBytesNoCopy()) : nullptr;
+    const OSData *expected = OSDynamicCast(OSData, chosen->getProperty("nabu-wifi-bdf-capability"));
+    const bool valid = value && bytes > 11 && bytes <= capacity && value[bytes - 1] == 0 &&
+        memchr(value, 0, bytes - 1) == nullptr && !strncmp(value, "firmware/bd", 11) &&
+        expected && expected->getLength() == 24 && expected->getBytesNoCopy();
+    if (valid) {
+        memcpy(path, value, bytes);
+        memcpy(capability, expected->getBytesNoCopy(), 24);
+    }
+    chosen->release();
+    return valid;
+}
+void coldStart(bool firmware_ready) {
+#if !defined(NABU_WIFI_RADIO) || !NABU_WIFI_RADIO
+    if (firmware_ready) { IOLog("NABU WIFI boot error gate=radio-not-compiled\n"); return; }
+#endif
     unsigned gpu = 0;
     PE_parse_boot_argn("nabu-gpu", &gpu, sizeof(gpu));
     if (gpu) { IOLog("NABU WIFI boot error gate=concurrent-gpu-power-owner\n"); return; }
+    char board_path[64] = {};
+    uint32_t board_capability[6] = {};
+    if (firmware_ready && !selectedBoard(board_path, sizeof(board_path), board_capability)) {
+        IOLog("NABU WIFI boot error gate=unbound-board-selection\n"); return;
+    }
     control = new nabu_wifi::Control();
     nabu_wifi::Control::Resources resources{};
     if (!control || !allocateSeeds() || !mapControl(&resources.smem)) {
@@ -121,6 +165,12 @@ void coldStart() {
     if (!control->initialize(resources, provider)) return;
     const int power = NabuWifiPower::beginBeforeGpu();
     if (power) { IOLog("NABU WIFI boot error gate=power-owner status=%d\n", power); return; }
+    if (firmware_ready) {
+        const int supplies = NabuWifiPower::enableWlanSupplies(nullptr);
+        if (supplies) { IOLog("NABU WIFI boot error gate=wlan-supplies status=%d\n", supplies); return; }
+        const int qdss = NabuWifiPower::setWlanQdss(nullptr);
+        if (qdss) { IOLog("NABU WIFI boot error gate=wlan-qdss status=%d\n", qdss); return; }
+    }
     NabuWifiMpss::Ops ops{};
     ops.getFile = modemFile;
     ops.vote = NabuWifiPower::vote;
@@ -128,7 +178,16 @@ void coldStart() {
     ops.setModemLoadState = NabuWifiPower::setModemLoadState;
     ops.prepareSmp2p = prepareSmp2p;
     ops.pollSmp2p = pollSmp2p;
+#if defined(NABU_WIFI_RADIO) && NABU_WIFI_RADIO
+    if (firmware_ready) {
+        ops.prepareRadio = prepareRadio;
+        ops.radioAuthAttempted = radioAuthAttempted;
+    }
+#endif
     const NabuWifiMpss::Result result = modem.start(ops);
+#if defined(NABU_WIFI_RADIO) && NABU_WIFI_RADIO
+    if (firmware_ready) logGlobalFault();
+#endif
     if (!result.authenticated || !result.readyObserved || result.error != NabuWifiMpss::Error::None) return;
     if (!control->startAfterPas(nowMs(nullptr))) return;
     const nabu_wifi::Control::Status status = control->run();
@@ -142,7 +201,43 @@ void coldStart() {
           status.capability.soc_id, status.capability.firmware_valid, status.capability.firmware_version,
           (unsigned long long)status.rmtfs_requests, (unsigned long long)status.pd_requests,
           (unsigned long long)status.tftp_requests);
-    while (control->poll(nowMs(nullptr))) waitMs(nullptr, 1);
+    if (firmware_ready) {
+#if defined(NABU_WIFI_RADIO) && NABU_WIFI_RADIO
+        if (!NabuWifiDma::observeRadio()) { control->reportRadioFailure(-1); return; }
+#endif
+        const auto &cap = status.capability;
+        const uint32_t actual[] = {cap.chip_id, cap.chip_family, cap.board_id, cap.soc_id,
+            cap.firmware_version, uint32_t(cap.chip_valid) | uint32_t(cap.board_valid) << 1 |
+            uint32_t(cap.soc_valid) << 2 | uint32_t(cap.firmware_valid) << 3};
+        if (memcmp(actual, board_capability, sizeof(actual))) {
+            IOLog("NABU WIFI boot error gate=board-capability-mismatch\n"); return;
+        }
+        if (!control->beginBoardDownload(board_path)) return;
+    }
+    bool reported_ready = false;
+#if defined(NABU_WIFI_RADIO) && NABU_WIFI_RADIO
+    uint64_t radio_observation_at = 0;
+#endif
+    while (control->poll(nowMs(nullptr))) {
+#if defined(NABU_WIFI_RADIO) && NABU_WIFI_RADIO
+        const uint64_t now = nowMs(nullptr);
+        if (firmware_ready && now >= radio_observation_at) {
+            logGlobalFault();
+            if (!NabuWifiDma::observeRadio()) { control->reportRadioFailure(-1); break; }
+            radio_observation_at = now + 1000;
+        }
+#endif
+        const auto &current = control->status();
+        if (!reported_ready && current.stage == nabu_wifi::Control::Stage::FirmwareReady) {
+            IOLog("NABU WIFI firmware ready generation=%u fw_ready_generation=%u init_generation=%u "
+                  "board_bytes=%u board_sent=%u segments=%u bdf_accepted=%u cal_reported=%u\n",
+                  current.generation, current.fw_ready_generation, current.fw_init_generation,
+                  current.board_bytes, current.board_sent, current.board_segments,
+                  current.board_downloaded, current.calibration_reported);
+            reported_ready = true;
+        }
+        waitMs(nullptr, 1);
+    }
     const nabu_wifi::Control::Status stopped = control->status();
     IOLog("NABU WIFI services stopped stage=%s error=%s status=%d\n",
           nabu_wifi::Control::stageName(stopped.stage), nabu_wifi::Control::errorName(stopped.error), stopped.detail);
@@ -152,7 +247,7 @@ void worker(void *argument, wait_result_t) {
     thread_set_thread_name(current_thread(), "nabu-wifi-control");
     IOLog("NABU WIFI boot begin mode=%lu\n", static_cast<unsigned long>(mode));
     if (nabu_wifi_firmware_load() == 0) {
-        if (mode == 2) coldStart();
+        if (mode == 2 || mode == 3) coldStart(mode == 3);
         else IOLog("NABU WIFI boot input-only-complete\n");
     }
     thread_terminate(current_thread());
@@ -162,7 +257,7 @@ void worker(void *argument, wait_result_t) {
 extern "C" void nabu_wifi_start() {
     unsigned mode = 0;
     if (!PE_parse_boot_argn("nabu-wifi", &mode, sizeof(mode)) || !mode) return;
-    if (mode > 2) { IOLog("NABU WIFI boot error gate=mode\n"); return; }
+    if (mode > 3) { IOLog("NABU WIFI boot error gate=mode\n"); return; }
     uint32_t expected = 0;
     if (!__atomic_compare_exchange_n(&started, &expected, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
     thread_t thread = THREAD_NULL;

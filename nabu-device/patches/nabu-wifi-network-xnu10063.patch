@@ -1,0 +1,189 @@
+--- a/bsd/dev/hakios.apple80211.c
++++ b/bsd/dev/hakios.apple80211.c
+@@ -38,7 +38,6 @@
+ #include <sys/kern_event.h>
+ #include <sys/kernel.h>
+ #include <sys/proc.h>
+-#include <sys/hakios.input.h>
+ #include <sys/hakios.net.h>
+ #include <sys/hakios.sta.h>
+ #include <sys/sockio.h>
+--- a/bsd/dev/hakios.lx.c
++++ b/bsd/dev/hakios.lx.c
+@@ -17,19 +17,12 @@
+ #include <kern/locks.h>
+ #include <kern/sched_prim.h>
+ #include <kern/thread.h>
+-#include <os/atomic_private.h>
+ #include <libkern/libkern.h>
+ #include <mach/mach_types.h>
+-#include <mach/vm_param.h>
+-#include <pexpert/pexpert.h>
+ #include <sys/errno.h>
+ #include <sys/random.h>
+-#include <sys/hakios.input.h>
+ #include <sys/hakios.lx.h>
+-#include <sys/hakios.net.h>
+ #include <sys/systm.h>
+-#include <vm/memory_types.h>
+-#include <vm/vm_kern.h>
+ 
+ static LCK_GRP_DECLARE(lx_lock_group, "hakios-lx");
+ static LCK_MTX_DECLARE(lx_lock, &lx_lock_group);
+@@ -81,12 +74,13 @@
+ 
+ 	kfree_type(struct lx_thread, parameter);
+ 	start.function(start.argument);
+-	thread_terminate(current_thread());
++	thread_terminate_self();
+ }
+ 
+ int
+ lx_os_thread(const char *name, void (*function)(void *), void *argument)
+ {
++	if (name == NULL || function == NULL) return EINVAL;
+ 	struct lx_thread *start = kalloc_type(struct lx_thread, Z_WAITOK | Z_ZERO);
+ 	thread_t thread;
+ 
+@@ -125,7 +119,8 @@
+ 		return lck_mtx_sleep(&lx_lock, LCK_SLEEP_DEFAULT, (event_t)address, THREAD_UNINT) == THREAD_TIMED_OUT;
+ 	}
+ 	nanoseconds_to_absolutetime(nanoseconds, &deadline);
+-	deadline += mach_absolute_time();
++	uint64_t now = mach_absolute_time();
++	deadline = deadline > UINT64_MAX - now ? UINT64_MAX : now + deadline;
+ 	return lck_mtx_sleep_deadline(&lx_lock, LCK_SLEEP_DEFAULT, (event_t)address, THREAD_UNINT, deadline) == THREAD_TIMED_OUT;
+ }
+ 
+@@ -140,6 +135,12 @@
+ void
+ lx_os_random(void *buffer, unsigned long size)
+ {
+-	read_random(buffer, (u_int)size);
++	unsigned char *cursor = buffer;
++	while (size != 0) {
++		u_int bytes = size > UINT32_MAX ? UINT32_MAX : (u_int)size;
++		read_random(cursor, bytes);
++		cursor += bytes;
++		size -= bytes;
++	}
+ }
+ 
+--- a/bsd/dev/hakios.net.c
++++ b/bsd/dev/hakios.net.c
+@@ -31,12 +31,14 @@
+ #include <sys/kpi_mbuf.h>
+ #include <sys/proc.h>
+ #include <sys/hakios.net.h>
++#include <sys/nabu_wifi_network.h>
+ #include <sys/sockio.h>
+ #include <sys/systm.h>
+ 
+ extern void HakiosWLANStart(const char *interface, const uint8_t *address);  /* drivers/wifi/hakios.wlan.cpp */
+ 
+ static LCK_GRP_DECLARE(net_lck_grp, "hakios-net");
++static LCK_MTX_DECLARE(net_attach_lock, &net_lck_grp);
+ 
+ /* One interface: enN on its link. */
+ struct net_if {
+@@ -175,14 +177,14 @@
+ 	mbuf_t packet = NULL;
+ 	char *header;
+ 
+-	if (n == NULL) {
+-		return;
+-	}
+-	trace_frame("in ", frame, length, length);
++	if (n == NULL || frame == NULL) {
++		return;
++	}
+ 	if (length < ETHER_HDR_LEN || length > HAKIOS_NET_FRAME_MAX || mbuf_allocpacket(MBUF_DONTWAIT, length, &chunks, &packet) != 0) {
+ 		n->count.dropped_in++;
+ 		return;
+ 	}
++	trace_frame("in ", frame, length, length);
+ 	if (mbuf_copyback(packet, 0, length, frame, MBUF_DONTWAIT) != 0) {
+ 		mbuf_freem(packet);
+ 		n->count.dropped_in++;
+@@ -332,6 +334,8 @@
+ bool
+ hakios_net_attach(const struct hakios_net_link *link)
+ {
++	if (link == NULL || link->name == NULL || link->transmit == NULL) return false;
++	if (link->wireless && !nabu_wifi_network_classes_ready()) return false;
+ 	unsigned unit = link->unit;
+ 	struct net_if *n = unit < HAKIOS_NET_UNITS ? &net_ifs[unit] : NULL;
+ 	char uniqueid[16];
+@@ -370,8 +374,10 @@
+ 		printf("net: there is no unit %u for %s\n", unit, link->name);
+ 		return false;
+ 	}
++	lck_mtx_lock(&net_attach_lock);
+ 	if (n->link != NULL) {
+ 		printf("net: en%u is on %s already; %s is not attached\n", unit, n->link->name, link->name);
++		lck_mtx_unlock(&net_attach_lock);
+ 		return false;
+ 	}
+ 	snprintf(uniqueid, sizeof(uniqueid), "hakios-en%u", unit);
+@@ -382,7 +388,9 @@
+ 	error = ifnet_allocate_extended(&init, &ifp);
+ 	if (error != 0) {
+ 		printf("net: the interface en%u cannot be made: error %d\n", unit, error);
++		lck_mtx_destroy(&n->tx_lock, &net_lck_grp);
+ 		n->link = NULL;
++		lck_mtx_unlock(&net_attach_lock);
+ 		return false;
+ 	}
+ 	ifnet_set_capabilities_enabled(ifp, 0, -1);
+@@ -396,7 +404,9 @@
+ 	if (error != 0) {
+ 		printf("net: the interface en%u cannot be attached: error %d\n", unit, error);
+ 		ifnet_release(ifp);
++		lck_mtx_destroy(&n->tx_lock, &net_lck_grp);
+ 		n->link = NULL;
++		lck_mtx_unlock(&net_attach_lock);
+ 		return false;
+ 	}
+ 	ifnet_set_lladdr(ifp, address, ETHER_ADDR_LEN);
+@@ -416,6 +426,7 @@
+ 	if (kernel_thread_start(net_thread, n, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
++	lck_mtx_unlock(&net_attach_lock);
+ 	return true;
+ }
+ 
+@@ -424,5 +435,4 @@
+ {
+ 	PE_parse_boot_argn("net_trace", &net_trace, sizeof(net_trace));
+ 	PE_parse_boot_argn("net_names", &net_names, sizeof(net_names));
+-	hakios_virtio_net_init();
+-}
++}
+--- a/bsd/dev/hakios.sta.c
++++ b/bsd/dev/hakios.sta.c
+@@ -11,7 +11,6 @@
+ #include <libkern/libkern.h>
+ #include <mach/mach_types.h>
+ #include <sys/errno.h>
+-#include <sys/hakios.input.h>
+ #include <sys/hakios.sta.h>
+ #include <sys/systm.h>
+ 
+@@ -337,14 +336,14 @@
+ 		if (state != NULL) {
+ 			kfree_data(state, sizeof(*state));
+ 		}
+-		hakios_wifi_tell("wifi: no memory for the station\n");
++		printf("wifi: no memory for the station\n");
+ 		lck_mtx_unlock(&sta_owner);
+ 		return;
+ 	}
+ 	if (!sta_thread_made) {
+ 		if (kernel_thread_start(sta_runs, NULL, &thread) != KERN_SUCCESS) {
+ 			kfree_data(state, sizeof(*state));
+-			hakios_wifi_tell("wifi: no thread for the station\n");
++			printf("wifi: no thread for the station\n");
+ 			lck_mtx_unlock(&sta_owner);
+ 			return;
+ 		}

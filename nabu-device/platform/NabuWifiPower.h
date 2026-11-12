@@ -9,10 +9,16 @@ namespace NabuWifiPower {
 
 enum class Domain {CommandDbInfo, CommandDb, Rpmh, Qmp, Doorbell};
 enum class Stage {Idle, CommandDb, VoteCx, VoteMss, EnableXo, TcsPrepare,
-    TcsSubmit, TcsComplete, QmpOpen, QmpSubmit, QmpComplete, Released};
+    TcsSubmit, TcsComplete, QmpOpen, QmpSubmit, QmpComplete, Released, WlanSupplies};
 enum class Error {None, MissingIo, AlreadyAttempted, Resource, Io, Busy,
     Timeout, Clock, Level, Sequence};
 struct Report {
+    struct WlanSupply {
+        uint32_t address = 0;
+        /* Bits 0/1/2 describe voltage/mode/enable. submitted is recorded
+         * before the TCS trigger attempt, acknowledged after its real ACK. */
+        uint32_t submitted = 0, acknowledged = 0;
+    };
     Stage stage = Stage::Idle;
     Error error = Error::None;
     Domain domain = Domain::CommandDbInfo;
@@ -20,6 +26,13 @@ struct Report {
     uint32_t resourceAddress = 0, requestedLevel = 0, levelIndex = 0;
     int status = 0;
     bool pending = false;
+    /* QDSS may be held once its mailbox submission is attempted. This boot
+     * has no PAS-stop/off path, so the pending vote survives a successful ACK
+     * as well as submission/ACK failures. pending above tracks mailbox work. */
+    bool wlanQdssPending = false, wlanQdssAccepted = false;
+    bool wlanSuppliesRequested = false, wlanSuppliesReady = false;
+    /* Ordered ldoa1, ldoa7, ldoc2, ldoc11. Votes survive this boot. */
+    WlanSupply wlanSupplies[4]{};
     uint64_t managedBase = 0, managedBytes = 0;
 };
 struct Io {
@@ -31,7 +44,7 @@ struct Io {
     void (*log)(void *, const Report *) = nullptr;
 };
 
-/* First-candidate configuration is nabu-wifi=2, nabu-gpu=0. The native
+/* Cold-candidate configuration is nabu-wifi=2/3, nabu-gpu=0. The native
  * beginBeforeGpu validates both arguments before mapping/writing registers.
  * GPU stays disabled throughout that boot and all Wi-Fi owners remain held.
  * Mode 1 is input-only and does not call this owner. The atomic operation
@@ -52,6 +65,12 @@ public:
     int vote(const char *, uint32_t);
     int enableXo();
     int setModemLoadState();
+    /* Explicit mode-3 caller enables QDSS before PAS. Requires this owner to
+     * have begun. A submitted vote is retained for the boot, with no retry. */
+    int setWlanQdss();
+    /* Explicit mode-3 operation, after begin and before QDSS/PAS. Validate
+     * the entire command DB before voting on any WLAN VRM resource. */
+    int enableWlanSupplies();
     bool completeBeforeGpu();
     uint32_t mergeArcVote(uint32_t address, uint32_t value) const;
     const Report &report() const { return report_; }
@@ -76,9 +95,11 @@ private:
     int write(Domain, uint32_t, uint32_t);
     int poll(Domain, uint32_t, uint32_t, uint32_t, uint64_t);
     int findResources();
-    int submitVote(uint32_t, uint32_t);
-    int openQmp();
+    int findWlanResources();
+    int submitVote(uint32_t, uint32_t, Report::WlanSupply * = nullptr, uint32_t command = 0);
+    int openQmp(bool rejectBusy = false);
     int ring();
+    int sendQmp(const char *, size_t messageBytes, uint32_t paddedBytes, bool wlanQdss);
     void log();
 };
 
@@ -92,6 +113,8 @@ int beginBeforeGpu();
 int vote(void *, const char *, uint32_t);
 int enableXo(void *);
 int setModemLoadState(void *);
+int setWlanQdss(void *);
+int enableWlanSupplies(void *);
 bool completeBeforeGpu();
 uint32_t mergeArcVote(uint32_t address, uint32_t value);
 

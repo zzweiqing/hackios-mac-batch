@@ -340,6 +340,10 @@ def main():
     root_layout.write_text(store_partition_parser(root_layout.read_text(encoding='utf-8')), encoding='utf-8')
     logging = os.environ.get('NABU_CAPTURE_LOG') == '1'
     wifi = os.environ.get('NABU_WIFI_CONTROL') == '1'
+    radio = os.environ.get('NABU_WIFI_RADIO') == '1'
+    hall = os.environ.get('NABU_HALL_SENSOR') == '1'
+    if radio and not wifi:
+        raise ValueError('WLAN DMA compilation requires the Wi-Fi control owner')
     logging_identity = None
     if logging:
         text = cpp.read_text(encoding='utf-8')
@@ -395,12 +399,45 @@ def main():
         scm = source / 'gpu/a640/NabuScmCall.h'
         scm.parent.mkdir(parents=True, exist_ok=True)
         scm.write_bytes((device / 'gpu/a640/NabuScmCall.h').read_bytes())
+        if radio:
+            dependencies = [device / 'usb/NabuUsbSmmu.h']
+            dependencies += sorted((device / 'gpu/upstream/ArmSmmu4K').glob('*.h'))
+            for path in dependencies:
+                target = source / path.relative_to(device)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(path.read_bytes())
+            text = '#include "platform/NabuWifiDma.h"\n' + cpp.read_text(encoding='utf-8')
+            anchor = '  uintptr_t smmu = mapPhys (nabu_ufs::kBoard.smmuBase, nabu_ufs::kBoard.smmuBytes, keep);\n'
+            guard = '''  struct SharedSmmuScope {
+    bool acquired;
+    SharedSmmuScope() : acquired(nabu_wifi_smmu_lock() == 0) {}
+    ~SharedSmmuScope() { if (acquired) nabu_wifi_smmu_unlock(); }
+  } lease;
+  if (!lease.acquired) panic("NATIVE_UFS smmu: shared owner unavailable");
+'''
+            if text.count(anchor) != 1:
+                raise ValueError('Expected the single owned UFS SMMU setup')
+            cpp.write_text(text.replace(anchor, guard + anchor, 1), encoding='utf-8')
         if not logging:
             for path in sorted((device / 'ufs').glob('NabuLog*.h')):
                 (source / path.name).write_bytes(path.read_bytes())
         wifi_sources = {p.relative_to(source).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                         for p in sorted(source.rglob('*')) if p.is_file() and
-                        (p.name.startswith('NabuWifi') or p == scm)}
+                        (p.name.startswith('NabuWifi') or p == scm or
+                         radio and (p.parent == source / 'usb' or
+                                    p.parent == source / 'gpu/upstream/ArmSmmu4K'))}
+    hall_sources = {}
+    if hall:
+        for path in sorted((device / 'platform').glob('NabuHall*')):
+            target = source / 'platform' / path.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(path.read_bytes())
+            hall_sources['platform/' + path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        text = '#include "platform/NabuHall.h"\n' + cpp.read_text(encoding='utf-8')
+        anchor = '  native_ufs_root_step = 2;\n'
+        if text.count(anchor) != 1:
+            raise ValueError('Expected the single UFS root startup hook')
+        cpp.write_text(text.replace(anchor, '  nabu_hall_start();\n' + anchor, 1), encoding='utf-8')
     obj = out / 'NativeUfs.o'
     command = platform.compile_command(record, cpp, obj)
     command += ['-I', str(headers), '-I', str(root / '.cache/xnu-work/osfmk'),
@@ -411,6 +448,8 @@ def main():
                 '-DXNU_NATIVE_UFS=1']
     if wifi:
         command += ['-I', str(source / 'platform')]
+    if radio:
+        command += ['-DNABU_WIFI_RADIO=1']
     if logging and os.environ.get('XNU_NABU_SHALLOW_IDLE') == '1':
         command.append('-DXNU_NABU_SHALLOW_IDLE=1')
     (out / 'compile-command.json').write_text(json.dumps(command, indent=2) + '\n', encoding='utf-8')
@@ -429,6 +468,8 @@ def main():
             wifi_obj = out / (path.stem + '.o')
             wifi_command = platform.compile_command(record, path, wifi_obj)
             wifi_command += ['-I', str(root / '.cache/xnu-work/osfmk')]
+            if radio:
+                wifi_command += ['-DNABU_WIFI_RADIO=1']
             (out / (path.stem + '-compile-command.json')).write_text(
                 json.dumps(wifi_command, indent=2) + '\n', encoding='utf-8')
             result = subprocess.run(wifi_command, cwd=record['directory'], capture_output=True)
@@ -439,6 +480,22 @@ def main():
             wifi_objects.append(wifi_obj)
             wifi_build[path.name] = {'source_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
                                      'object_sha256': hashlib.sha256(wifi_obj.read_bytes()).hexdigest()}
+    hall_objects = []
+    hall_build = {}
+    if hall:
+        path = source / 'platform/NabuHall.cpp'
+        hall_obj = out / 'NabuHall.o'
+        hall_command = platform.compile_command(record, path, hall_obj)
+        hall_command += ['-I', str(root / '.cache/xnu-work/osfmk'), '-DXNU_NABU_HALL=1']
+        (out / 'NabuHall-compile-command.json').write_text(json.dumps(hall_command, indent=2) + '\n', encoding='utf-8')
+        result = subprocess.run(hall_command, cwd=record['directory'], capture_output=True)
+        (out / 'NabuHall-compile.log').write_bytes(result.stdout + result.stderr)
+        if result.returncode:
+            raise SystemExit(result.stderr.decode('utf-8', errors='replace')[-6000:])
+        platform.check_object(hall_obj.read_bytes())
+        hall_objects.append(hall_obj)
+        hall_build[path.name] = dict(source_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                                     object_sha256=hashlib.sha256(hall_obj.read_bytes()).hexdigest())
 
     # VirtIO's original-bindings.o is the single provider of the absolute
     # IOBlockStorageDevice aliases in this combined profile. Keep the UFS
@@ -461,7 +518,7 @@ def main():
 
     archive = out / 'libNativeUfs.a'
     subprocess.run(['xcrun', 'ar', 'rcs', str(archive), str(obj), str(compat_obj),
-                    *map(str, wifi_objects)], check=True)
+                    *map(str, wifi_objects), *map(str, hall_objects)], check=True)
     (out / 'build-report.json').write_text(json.dumps({
         'source_commit': prepare.PINNED_COMMIT,
         'source_files': {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
@@ -479,7 +536,11 @@ def main():
         'logging_source_identity': logging_identity,
         'wifi_control': {'enabled': wifi, 'sources': wifi_sources, 'objects': wifi_build,
                          'default': 'off', 'input_only_mode': 1, 'cold_start_mode': 2,
+                         'firmware_ready_mode': 3,
+                         'radio_enabled': radio,
                          'runtime_qualified': False},
+        'hall_sensor': {'enabled': hall, 'default': 'off', 'sources': hall_sources,
+                        'objects': hall_build, 'runtime_qualified': False},
         'solid_state_media': nabu_storage_media.metadata('ufs', cpp.read_text(encoding='utf-8')),
         'hardware_tested': False, 'runtime_qualified': False,
     }, indent=2) + '\n', encoding='utf-8')

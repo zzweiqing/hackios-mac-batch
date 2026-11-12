@@ -32,7 +32,7 @@ enum class Stage : uint32_t {
     AllocateMetadata, PublishMetadata, PasInitImage, PasMemSetup,
     MapMpss, LoadSegments, PublishSegments, SignalAop, PasAuthAndReset,
     WaitReady, Ready, AllocateShared, PublishShared, AssignShared, SharedReady,
-    AssignMsa, MsaAssigned
+    AssignMsa, MsaAssigned, PasShutdown, PrepareRadio
 };
 
 enum class Error : uint32_t {
@@ -40,7 +40,7 @@ enum class Error : uint32_t {
     InvalidMdt, SegmentSize, SegmentRange, SegmentOverlap, Mapping,
     Allocation, Cache, Smp2p, AlreadyRunning, Power, ScmConvention,
     ScmTransport, ScmSecure, ScmIncomplete, Aop, Clock, Wait,
-    Fatal, ReadyTimeout
+    Fatal, ReadyTimeout, Radio
 };
 
 struct Result {
@@ -68,6 +68,7 @@ struct Result {
     size_t sharedBytes = 0;
     uint64_t managedBase = 0;
     uint64_t managedBytes = 0;
+    bool radioQuiesced = false;
 };
 
 struct Region {
@@ -129,6 +130,12 @@ struct Ops {
     int (*prepareSmp2p)(void *, const Region *, Smp2pObservation *) = nullptr;
     int (*pollSmp2p)(void *, Smp2pObservation *) = nullptr;
     const Platform *platform = nullptr;
+    /* Optional radio domain. After the normal ARC/XO setup, successful PAS4
+     * shutdown establishes real master quiescence before this callback.
+     * Both callbacks are required together. The second invalidates that
+     * quiescence before an authentication/reset can reach secure world. */
+    int (*prepareRadio)(void *) = nullptr;
+    void (*radioAuthAttempted)(void *) = nullptr;
 };
 
 const char *stageName(Stage);

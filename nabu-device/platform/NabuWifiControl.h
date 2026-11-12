@@ -16,11 +16,13 @@ struct FileProvider {
 class Control final {
 public:
     enum class Stage { Empty, Inputs, Smp2pPrepared, WaitReady, Glink, Services,
-                       WaitWlfw, Capability, Complete, PdFailureAck, Failed };
+                       WaitWlfw, Capability, Complete, BoardDownload, WaitFirmware,
+                       FirmwareReady, PdFailureAck, Failed };
     enum class Error { None, InvalidResources, Provider, Registry, Smem, AlreadyRunning,
                        NotPrepared, Clock, Smp2p, Fatal, Restart, QueueFull, Protocol,
                        GlinkTimeout, IntentTimeout, ServiceTimeout, QmiTimeout, QmiResult,
-                       CapabilityFields, TransferTimeout, PdFailure, RmtfsIo, MsaRegion, MsaAssign };
+                       CapabilityFields, TransferTimeout, PdFailure, RmtfsIo, MsaRegion, MsaAssign,
+                       BoardSelection, FirmwareTimeout, Radio };
     struct Event {
         Stage stage;
         Error error;
@@ -61,6 +63,9 @@ public:
         uint32_t generation, smp2p_state, server_node, server_port, capability_generation;
         wire::Capability capability;
         uint64_t rmtfs_requests, pd_requests, tftp_requests, packets;
+        uint32_t msa_ready_generation, fw_ready_generation, fw_init_generation;
+        uint32_t board_bytes, board_sent, board_segments;
+        bool board_downloaded, calibration_reported;
     };
 
     /* Allocate this object off the kernel stack. Approximately 1 MiB of
@@ -94,6 +99,11 @@ public:
     /* Synchronous executor for a thread created by the coordinator. Returns
      * at capability success or a retained failure. No PAS operation here. */
     Status run();
+    /* Explicitly selected file from the pinned immutable provider, after this
+     * generation's capability. KNEL retains MSA ownership. DMON owns BDF/CAL.
+     * Poll remains the sole executor and continues all modem file services. */
+    bool beginBoardDownload(const char *path);
+    bool reportRadioFailure(int status);
     const Status &status() const { return status_; }
     static const char *stageName(Stage);
     static const char *errorName(Error);
@@ -148,13 +158,17 @@ private:
     bool qmi_pending_;
     uint64_t qmi_deadline_;
     uint32_t qmi_node_, qmi_port_, qmi_generation_;
-    enum class Wlfw : uint8_t { Idle, IndRegister, HostCap, MsaInfo, MsaAssign, MsaReady, Cap };
+    enum class Wlfw : uint8_t { Idle, IndRegister, HostCap, MsaInfo, MsaAssign, MsaReady, Cap,
+                                DynamicFeature, DaemonRegister, Board, Calibration };
     struct MsaRegion { uint64_t address; uint32_t bytes; bool secure; };
     Wlfw wlfw_step_;
     uint16_t wlfw_id_;
     uint32_t msa_count_;
     uint64_t msa_assign_at_;
     MsaRegion msa_[2];
+    const uint8_t *board_data_;
+    uint32_t board_chunk_, qmi_local_port_;
+    wire::QmiBuffer<6200> board_request_;
     uint32_t cache_next_, cache_active_;
     Transaction transactions_[8];
     Packet queue_[kQueue];
@@ -189,7 +203,7 @@ private:
     void rawDiagnostic(const char *, const uint8_t *, size_t, int);
     bool wlfw(const wire::QrtrPacket &, const wire::QmiMessage &);
     bool wlfwNext();
-    bool wlfwSend(wire::QmiBuilder &, const char *);
+    bool wlfwSend(const uint8_t *, size_t, const char *);
     bool wlfwMsaInfo(const wire::QmiMessage &);
     bool tftp(const wire::QrtrPacket &);
     bool transferRequest(const wire::QrtrPacket &);
