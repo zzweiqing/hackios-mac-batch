@@ -46,6 +46,11 @@ on:
         description: Build opt-in render lowering worker and runtime telemetry on the deployed wallpaper baseline
         type: boolean
         default: false
+      turnip_render_mode:
+        description: Optional matched render-mode comparison with counters; requires worker_opt; both keep nocb
+        type: choice
+        options: [unchanged, sysmem, gmem]
+        default: unchanged
       async_fix:
         description: Turnip-only async Metal creation fix and bounded callback regression; no device installation
         type: boolean
@@ -91,6 +96,7 @@ jobs:
           GPU_USERPROBE: ${{ inputs.gpu_userprobe }}
           UI_WATCH: ${{ inputs.ui_watch }}
           WIFI_CONTROL: ${{ inputs.wifi_control }}
+          TURNIP_RENDER_MODE: ${{ inputs.turnip_render_mode }}
           FPS_OPT: ${{ inputs.fps_opt }}
           WALLPAPER_FIX: ${{ inputs.wallpaper_fix }}
           ASYNC_FIX: ${{ inputs.async_fix }}
@@ -102,6 +108,7 @@ jobs:
           test "$ASYNC_FIX" != true
           test "$COMPLETION_FIX" != true
           test "$COMPLETION_OBSERVE" != true
+          test -z "$TURNIP_RENDER_MODE" || test "$TURNIP_RENDER_MODE" = unchanged
           test "$REQUESTED_REF" = 245aca1a9ec5b730b1cad80fade295800d2981f1
           if [ "$GPU_USERPROBE" = true ]; then test "$REQUESTED_CONFIG" = nabu_ufs_gpu_metal_defconfig; fi
           test -d "$DEVELOPER_DIR"
@@ -249,6 +256,7 @@ jobs:
           FPS_OPT: ${{ inputs.fps_opt }}
           WALLPAPER_FIX: ${{ inputs.wallpaper_fix }}
           WORKER_OPT: ${{ inputs.worker_opt }}
+          TURNIP_RENDER_MODE: ${{ inputs.turnip_render_mode }}
           ASYNC_FIX: ${{ inputs.async_fix }}
           COMPLETION_FIX: ${{ inputs.completion_fix }}
           COMPLETION_OBSERVE: ${{ inputs.completion_observe }}
@@ -263,6 +271,13 @@ jobs:
             test "$FPS_OPT" = true && test "$WALLPAPER_FIX" = true
             fps_args+=(--worker-opt)
           fi
+          case "$TURNIP_RENDER_MODE" in
+            ''|unchanged) ;;
+            sysmem|gmem)
+              test "$WORKER_OPT" = true
+              fps_args+=(--turnip-render-mode "$TURNIP_RENDER_MODE") ;;
+            *) printf '%s\n' 'Unsupported Turnip render mode' >&2; exit 2 ;;
+          esac
           if [ "$ASYNC_FIX" = true ]; then
             test "$FPS_OPT" != true
             fps_args+=(--async-fix)

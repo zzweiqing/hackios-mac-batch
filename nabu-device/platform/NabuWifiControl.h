@@ -16,7 +16,7 @@ struct FileProvider {
 class Control final {
 public:
     enum class Stage { Empty, Inputs, Smp2pPrepared, WaitReady, Glink, Services,
-                       WaitWlfw, Capability, Complete, Failed };
+                       WaitWlfw, Capability, Complete, PdFailureAck, Failed };
     enum class Error { None, InvalidResources, Provider, Registry, Smem, AlreadyRunning,
                        NotPrepared, Clock, Smp2p, Fatal, Restart, QueueFull, Protocol,
                        GlinkTimeout, IntentTimeout, ServiceTimeout, QmiTimeout, QmiResult,
@@ -69,7 +69,16 @@ public:
     bool pollSmp2p(Smp2pObservation &);
     /* Call exactly once after this boot's PAS authenticated reset. */
     bool startAfterPas(uint64_t now_ms);
-    /* True means the bounded iteration completed and services remain alive.
+    /* True means the bounded iteration can continue, including PdFailureAck
+     * draining the existing send queue. PD diagnostics log up to 256 bytes
+     * per field as hex, with original/captured lengths in Event a/b and
+     * status -1 for an absent TLV. Full ACK submission ends in Failed /
+     * PdFailure. A send/transport error retains PdFailure and logs its cause
+     * Error in Event a, alongside the operation and platform detail.
+     * Pending ACKs keep the 32-command RX budget even at the queue high-water
+     * mark. QRTR restarts invalidate their generation. Remaining RX defers
+     * TX while enforcing the existing queue deadline; new service work and
+     * HELLO advertisements are suppressed during this terminal phase.
      * Complete keeps handling traffic indefinitely, with per-transaction /
      * transfer deadlines and remote fatal/ready-loss/restart monitoring.
      * False means a retained Failed state. A first capability remains bound
@@ -84,7 +93,8 @@ public:
 
 private:
     enum { kQueue = 16, kIntents = 8, kRemoteIntents = 128, kTransfers = 8,
-           kRamFiles = 8, kRamFileBytes = 65536, kRegistry = 32, kBlockBytes = 1024 };
+           kRamFiles = 8, kRamFileBytes = 65536, kRegistry = 32, kBlockBytes = 1024,
+           kPdDiagnosticBytes = 256 };
     struct Packet {
         uint8_t data[wire::kPacketBytes];
         uint32_t bytes, offset, iid, generation;
@@ -152,13 +162,14 @@ private:
     bool commandSpace(uint32_t);
     bool receiveOne();
     void peek(uint32_t off, void *, size_t);
-    bool flush();
+    bool flush(bool transmit = true);
     bool send(uint32_t, uint32_t, uint32_t, uint32_t, const void *, size_t);
     bool advertise();
     bool packet(const uint8_t *, size_t);
     bool controlPacket(const wire::QrtrPacket &);
     bool rmtfs(const wire::QrtrPacket &, const wire::QmiMessage &);
     bool pdmapper(const wire::QrtrPacket &, const wire::QmiMessage &);
+    void pdFailureDiagnostic(const wire::QmiMessage &, uint8_t, const char *);
     bool wlfw(const wire::QrtrPacket &, const wire::QmiMessage &);
     bool tftp(const wire::QrtrPacket &);
     bool transferRequest(const wire::QrtrPacket &);

@@ -38,6 +38,7 @@ const char *Control::stageName(Stage value) {
     case Stage::Glink: return "glink"; case Stage::Services: return "services";
     case Stage::WaitWlfw: return "wait-wlfw"; case Stage::Capability: return "capability";
     case Stage::Complete: return "complete"; case Stage::Failed: return "failed";
+    case Stage::PdFailureAck: return "pd-failure-ack";
     }
     return "invalid";
 }
@@ -65,8 +66,13 @@ void Control::event(const char *operation, uint64_t a, uint64_t b, int detail) {
 }
 bool Control::fail(Error error, const char *operation, int detail) {
     if (status_.stage != Stage::Failed) {
-        status_.error = error; status_.detail = detail;
-        event(operation, 0, 0, detail); status_.stage = Stage::Failed;
+        // A transport failure while draining the ACK is secondary to the
+        // recorded PD failure. Keep both the primary error and this cause.
+        const bool pd_failure = status_.error == Error::PdFailure;
+        if (!pd_failure) status_.error = error;
+        status_.detail = detail;
+        event(operation, pd_failure ? uint64_t(error) : 0, 0, detail);
+        status_.stage = Stage::Failed;
         qmi_pending_ = false; queue_count_ = 0;
     }
     return false;
@@ -471,12 +477,13 @@ bool Control::send(uint32_t type, uint32_t source_port, uint32_t node, uint32_t 
     packet.generation = status_.generation; packet.deadline = now_ + 3000; packet.intent_requested = false;
     ++queue_count_; return true;
 }
-bool Control::flush() {
+bool Control::flush(bool transmit) {
     for (Intent &intent : remote_intents_) if (intent.busy && now_ >= intent.deadline) return fail(Error::IntentTimeout, "glink-rx-done-timeout");
     for (unsigned budget = 0; budget < 16 && queue_count_; ++budget) {
         Packet &packet = queue_[queue_head_];
         if (packet.generation != status_.generation) return fail(Error::Restart, "queued-generation");
         if (now_ >= packet.deadline) return fail(Error::IntentTimeout, "glink-send-timeout");
+        if (!transmit) return true;
         if (!packet.iid) {
             Intent *selected = nullptr;
             for (Intent &intent : remote_intents_)
@@ -552,6 +559,7 @@ bool Control::controlPacket(const QrtrPacket &packet) {
     if (packet.bytes != 20 || le32(packet.payload) != packet.type) return fail(Error::Protocol, "qrtr-control-size");
     const uint8_t *data = packet.payload;
     if (packet.type == Hello) {
+        if (status_.stage == Stage::PdFailureAck) return true;
         uint8_t hello[20] = {}; put32(hello, Hello);
         if (!send(Hello, kControlPort, packet.source_node, kControlPort, hello, sizeof(hello))) return false;
         return services_sent_ ? true : advertise();
@@ -587,6 +595,7 @@ bool Control::packet(const uint8_t *data, size_t bytes) {
     if (packet.source_node == kAppsNode ||
         (packet.destination_node != kAppsNode && packet.destination_node != kBroadcastNode)) return fail(Error::Protocol, "qrtr-node");
     if (packet.type != Data) return controlPacket(packet);
+    if (status_.stage == Stage::PdFailureAck) return true;
     if (packet.confirm) {
         uint8_t resume[20] = {}; put32(resume, ResumeTx); put32(resume + 4, packet.destination_node); put32(resume + 8, packet.destination_port);
         if (!send(ResumeTx, packet.destination_port, packet.source_node, packet.source_port, resume, sizeof(resume))) return false;
@@ -666,8 +675,13 @@ bool Control::pdmapper(const QrtrPacket &packet, const QmiMessage &message) {
     ++status_.pd_requests; event("pd-request", message.id, message.transaction);
     QmiBuilder response(kQmiResponse, message.transaction, message.id);
     if (message.id == 0x24) {
-        response.result(0); if (!reply(packet, response)) return false;
-        return fail(Error::PdFailure, "pd-failure-report");
+        status_.error = Error::PdFailure;
+        event("pd-failure-report", packet.source_node, packet.source_port, message.transaction);
+        pdFailureDiagnostic(message, 1, "pd-failure-service");
+        pdFailureDiagnostic(message, 2, "pd-failure-reason");
+        stage(Stage::PdFailureAck, 0);
+        response.result(0);
+        return reply(packet, response);
     }
     if (message.id != 0x21) { response.result(0x47); return reply(packet, response); }
     size_t name_bytes, offset_bytes; const uint8_t *name = message.get(1, name_bytes), *offset_data = message.get(0x10, offset_bytes);
@@ -689,6 +703,22 @@ bool Control::pdmapper(const QrtrPacket &packet, const QmiMessage &message) {
     response.result(0); uint8_t count[2]; put16(count, total); response.tlv(0x10, count, 2);
     put16(count, 1); response.tlv(0x11, count, 2); response.tlv(0x12, list, used);
     event("pd-domains", total, list[0]); return reply(packet, response);
+}
+void Control::pdFailureDiagnostic(const QmiMessage &message, uint8_t tag, const char *operation) {
+    size_t bytes;
+    const uint8_t *value = message.get(tag, bytes);
+    const size_t captured = bytes > kPdDiagnosticBytes ? size_t(kPdDiagnosticBytes) : bytes;
+    char diagnostic[sizeof("pd-failure-service hex=") + 2 * kPdDiagnosticBytes]{};
+    size_t cursor = strlen(operation);
+    memcpy(diagnostic, operation, cursor);
+    memcpy(diagnostic + cursor, " hex=", 5);
+    cursor += 5;
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < captured; ++i) {
+        diagnostic[cursor++] = hex[value[i] >> 4];
+        diagnostic[cursor++] = hex[value[i] & 15];
+    }
+    event(diagnostic, bytes, captured, value ? 0 : -1);
 }
 bool Control::wlfw(const QrtrPacket &packet, const QmiMessage &message) {
     if (message.type != kQmiResponse || !qmi_pending_ || packet.source_node != qmi_node_ ||
@@ -721,12 +751,23 @@ bool Control::poll(uint64_t now_ms) {
     } else if (!observation.negotiated || !observation.entryPresent || !(observation.state & 2)) {
         ++status_.generation; return fail(Error::Restart, "modem-ready-lost");
     }
-    if (!flush()) return false;
+    if (status_.stage != Stage::PdFailureAck && !flush()) return false;
     for (const Receive &receive : receive_)
         if (receive.active && now_ >= receive.deadline) return fail(Error::Protocol, "glink-reassembly-timeout");
-    for (unsigned budget = 0; budget < 32 && queue_count_ < kQueue - 4 && status_.stage != Stage::Failed; ++budget)
+    for (unsigned budget = 0; budget < 32 && status_.stage != Stage::Failed &&
+         (queue_count_ < kQueue - 4 || status_.stage == Stage::PdFailureAck); ++budget)
         if (!receiveOne()) break;
     if (status_.stage == Stage::Failed) return false;
+    if (status_.stage == Stage::PdFailureAck) {
+        // Consume RX credits and restart notices before submitting the ACK.
+        // A remaining RX backlog defers TX, with the existing queue deadline
+        // and generation checks still enforced by flush(false).
+        Smem::barrier();
+        const bool receive_drained = smem_.read(descriptors_.offset + 8) == smem_.read(descriptors_.offset + 12);
+        if (!flush(receive_drained)) return false;
+        if (!queue_count_) return fail(Error::PdFailure, "pd-failure-ack-submitted");
+        return true;
+    }
     if (version_ && !open_sent_) {
         static const char name[] = "IPCRTR";
         if (command(Open, 1, sizeof(name), name, sizeof(name))) open_sent_ = true;

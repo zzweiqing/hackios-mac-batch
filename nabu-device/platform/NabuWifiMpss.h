@@ -12,6 +12,8 @@ constexpr uint64_t MpssBase = UINT64_C(0x8e000000);
 constexpr size_t MpssBytes = 0x9600000;
 constexpr uint64_t SmemBase = UINT64_C(0x86000000);
 constexpr size_t SmemBytes = 0x200000;
+/* Trusted nabu /chosen DRAM envelope. gPhysBase/gPhysSize describe the
+ * loader-selected kernel-managed subwindow, not this entire envelope. */
 constexpr uint64_t XnuBase = UINT64_C(0xc0000000);
 constexpr uint64_t XnuBytes = UINT64_C(0x140000000);
 constexpr uint32_t PasId = 4;
@@ -59,6 +61,8 @@ struct Result {
     bool sharedAssigned = false;
     uint64_t sharedPhysical = 0;
     size_t sharedBytes = 0;
+    uint64_t managedBase = 0;
+    uint64_t managedBytes = 0;
 };
 
 struct Region {
@@ -125,6 +129,9 @@ struct Ops {
 const char *stageName(Stage);
 const char *errorName(Error);
 const Platform &nativePlatform();
+/* Nonempty, nonoverflowing subwindow of trusted high RAM, disjoint from
+ * MPSS and SMEM. Owned pages must additionally fit this actual window. */
+bool managedWindowValid(uint64_t base, uint64_t bytes);
 
 /* Owns a below-4-GiB contiguous 2 MiB buffer, retained guard pages, and an
  * independent SCM parameter/extended-argument page. Assigns HLOS (3) to

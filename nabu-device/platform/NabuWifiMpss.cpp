@@ -98,7 +98,7 @@ void log(const Ops &ops, const Result &result)
         "smc=%x info=%x args=%llx/%llx/%llx/%llx convention=%u transport=%lld secure=%lld stop=%s calls=%u "
         "interrupted=%u busy=%u continuation=%llx elapsed_us=%llu "
         "metadata=%llx/%lu retained=%u pas=%u authenticated=%u state=%x ready=%u "
-        "assign_submitted=%u shared_assigned=%u shared=%llx/%lu\n",
+        "assign_submitted=%u shared_assigned=%u shared=%llx/%lu managed_base=%llx managed_bytes=%llx\n",
         stageName(result.stage), errorName(result.error), result.status,
         result.segment, (unsigned long long)result.loadedBytes,
         result.scmFunction, result.scmArgInfo,
@@ -114,7 +114,8 @@ void log(const Ops &ops, const Result &result)
         (unsigned long)result.metadataBytes, result.metadataRetained,
         result.pasSubmitted, result.authenticated, result.smp2pState,
         result.readyObserved, result.assignmentSubmitted, result.sharedAssigned,
-        (unsigned long long)result.sharedPhysical, (unsigned long)result.sharedBytes);
+        (unsigned long long)result.sharedPhysical, (unsigned long)result.sharedBytes,
+        (unsigned long long)result.managedBase, (unsigned long long)result.managedBytes);
 #endif
 }
 
@@ -429,7 +430,7 @@ int nativeMap(void *, uint64_t physical, size_t bytes, Region *region)
 {
     if (!region || !((physical == MpssBase && bytes == MpssBytes) ||
         (physical == SmemBase && bytes == SmemBytes)) ||
-        !range(gPhysBase, gPhysSize) || overlap(physical, bytes, gPhysBase, gPhysSize)) {
+        !managedWindowValid(gPhysBase, gPhysSize) || overlap(physical, bytes, gPhysBase, gPhysSize)) {
         return int(kIOReturnBadArgument);
     }
     IODeviceMemory *memory = IODeviceMemory::withRange(physical, bytes);
@@ -460,7 +461,8 @@ void nativeUnmap(void *, Region *region)
 
 int nativeAllocate(void *, size_t bytes, unsigned bits, Region *region)
 {
-    if (!region || !bytes || bytes > MaxOwnedBytes || (bits != 32 && bits != 64)) {
+    if (!region || !bytes || bytes > MaxOwnedBytes || (bits != 32 && bits != 64) ||
+        !managedWindowValid(gPhysBase, gPhysSize)) {
         return int(kIOReturnBadArgument);
     }
     const size_t capacity = (bytes + PAGE_SIZE - 1) & ~(size_t(PAGE_SIZE) - 1);
@@ -567,6 +569,14 @@ int nativeWait(void *, unsigned microseconds)
 #endif
 } // namespace
 
+bool managedWindowValid(uint64_t base, uint64_t bytes)
+{
+    return inside(base, bytes, XnuBase, XnuBytes) &&
+        !overlap(MpssBase, MpssBytes, base, bytes) &&
+        !overlap(SmemBase, SmemBytes, base, bytes) &&
+        !overlap(MpssBase, MpssBytes, SmemBase, SmemBytes);
+}
+
 Result Mpss::start(const Ops &ops)
 {
     Result result;
@@ -602,13 +612,8 @@ Result Mpss::start(const Ops &ops)
         return finish();
     }
     advance(ops, result, Stage::ValidateResources);
-    uint64_t managedBase = 0, managedBytes = 0;
-    int status = platform.managedWindow(platform.ctx, &managedBase, &managedBytes);
-    if (status || managedBase != XnuBase || managedBytes != XnuBytes ||
-        !range(managedBase, managedBytes) ||
-        overlap(MpssBase, MpssBytes, managedBase, managedBytes) ||
-        overlap(SmemBase, SmemBytes, managedBase, managedBytes) ||
-        overlap(MpssBase, MpssBytes, SmemBase, SmemBytes)) {
+    int status = platform.managedWindow(platform.ctx, &result.managedBase, &result.managedBytes);
+    if (status || !managedWindowValid(result.managedBase, result.managedBytes)) {
         fail(result, Error::InvalidResources, status);
         return finish();
     }
@@ -684,7 +689,7 @@ Result Mpss::start(const Ops &ops)
     if (status || !metadata_.handle || !metadata_.data || metadata_.bytes < capacity ||
         metadata_.bytes > MaxMetadataBytes || (metadata_.physical & 4095) ||
         (metadata_.bytes & 4095) || (uintptr_t(metadata_.data) & 4095) ||
-        !inside(metadata_.physical, metadata_.bytes, managedBase, managedBytes) ||
+        !inside(metadata_.physical, metadata_.bytes, result.managedBase, result.managedBytes) ||
         !range(uintptr_t(metadata_.data), metadata_.bytes) ||
         (result.scmConvention == 32 &&
             !inside(metadata_.physical, metadata_.bytes, 0, UINT64_C(0x100000000))) ||
@@ -793,9 +798,8 @@ Result RmtfsShared::initialize(const Ops &ops)
         return finish();
     }
     advance(ops, result, Stage::ValidateResources);
-    uint64_t base = 0, bytes = 0;
-    int status = platform.managedWindow(platform.ctx, &base, &bytes);
-    if (status || base != XnuBase || bytes != XnuBytes) {
+    int status = platform.managedWindow(platform.ctx, &result.managedBase, &result.managedBytes);
+    if (status || !managedWindowValid(result.managedBase, result.managedBytes)) {
         fail(result, Error::InvalidResources, status);
         return finish();
     }
@@ -826,7 +830,7 @@ Result RmtfsShared::initialize(const Ops &ops)
         (storage_.physical & 4095) || (uintptr_t(storage_.data) & 4095) ||
         (storage_.bytes & 4095) || storage_.bytes < RmtfsSharedBytes + 8192 ||
         storage_.bytes > MaxOwnedBytes ||
-        !inside(storage_.physical, storage_.bytes, base, bytes) ||
+        !inside(storage_.physical, storage_.bytes, result.managedBase, result.managedBytes) ||
         !inside(storage_.physical, storage_.bytes, 0, UINT64_C(0x100000000)) ||
         !range(uintptr_t(storage_.data), storage_.bytes)) {
         fail(result, Error::Allocation, status);
@@ -840,7 +844,7 @@ Result RmtfsShared::initialize(const Ops &ops)
     if (status || !parameters_.handle || !parameters_.data || parameters_.bytes < 4096 ||
         parameters_.bytes > MaxMetadataBytes || (parameters_.bytes & 4095) ||
         (parameters_.physical & 4095) || (uintptr_t(parameters_.data) & 4095) ||
-        !inside(parameters_.physical, parameters_.bytes, base, bytes) ||
+        !inside(parameters_.physical, parameters_.bytes, result.managedBase, result.managedBytes) ||
         !range(uintptr_t(parameters_.data), parameters_.bytes) ||
         (result.scmConvention == 32 &&
             !inside(parameters_.physical, parameters_.bytes, 0, UINT64_C(0x100000000))) ||

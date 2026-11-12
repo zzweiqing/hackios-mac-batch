@@ -44,6 +44,12 @@ LOWERING_WORKER_PATCH = 'patches/adrenometal-nabu-lowering-worker.patch'
 RUNTIME_TELEMETRY_PATCH = 'patches/adrenometal-nabu-runtime-telemetry.patch'
 RUNTIME_WAIT_PHASES_PATCH = 'patches/metal2vulkan-nabu-wait-phases.patch'
 WORKER_OBSERVATION_PATCHES = WALLPAPER_PATCHES + (LOWERING_WORKER_PATCH, RUNTIME_TELEMETRY_PATCH)
+# A separate matched-pair experiment. Existing recipes keep their original mode
+# and telemetry; these variants change only TU_DEBUG and add the same observer.
+TURNIP_RENDER_MODES = ('sysmem', 'gmem')
+RENDER_MODE_PATCH = 'patches/adrenometal-nabu-render-mode.patch'
+RENDER_MODE_HEADER = 'platform/NabuTurnipRenderMode.h'
+RENDER_MODE_PROVIDER = 'patches/mesa/turnip-render-mode-for-attachment-memory.patch'
 WORKER_RUNTIME_UPSTREAM = '624bab3918de5b978e1101517abca2b4fa426565'
 WAIT_PHASES_SOURCE = 'crates/metal2vulkan-runtime/src/command_buffer/mod.rs'
 WAIT_PHASES_UPSTREAM_SOURCE_SHA256 = 'bbddb227a0a7cbbc450e5d2b200a9bd61ff841482bd6e64ba6c6ef9d737182bc'
@@ -100,8 +106,19 @@ def fetch(path, url, commit, *, blob_filter=False):
         raise SystemExit('Pinned checkout differs: ' + str(path))
 
 
+def board_arguments(turnip_render_mode=None):
+    if turnip_render_mode is None:
+        return BOARD_ARGUMENTS
+    if turnip_render_mode not in TURNIP_RENDER_MODES:
+        raise ValueError('Turnip render mode must be sysmem or gmem; both retain nocb')
+    return BOARD_ARGUMENTS + ('--turnip-debug', turnip_render_mode + ',nocb')
+
+
 def plugin_patches(fps_opt=False, async_fix=False, completion_fix=False, completion_observe=False,
-                   wallpaper_fix=False, worker_opt=False):
+                   wallpaper_fix=False, worker_opt=False, turnip_render_mode=None):
+    board_arguments(turnip_render_mode)
+    if turnip_render_mode is not None and not worker_opt:
+        raise ValueError('Turnip render-mode comparison requires the worker observation recipe')
     if sum((fps_opt, async_fix, completion_fix, completion_observe)) > 1:
         raise ValueError('Keep the async creation, FPS, completion-wait and completion-observation experiments separate')
     if worker_opt:
@@ -109,7 +126,7 @@ def plugin_patches(fps_opt=False, async_fix=False, completion_fix=False, complet
             raise ValueError('The lowering-worker experiment requires the FPS/QoS wallpaper source recipe')
         if async_fix or completion_fix or completion_observe:
             raise ValueError('Keep the lowering-worker experiment separate from async and completion modes')
-        return WORKER_OBSERVATION_PATCHES
+        return WORKER_OBSERVATION_PATCHES + ((RENDER_MODE_PATCH,) if turnip_render_mode is not None else ())
     if wallpaper_fix:
         if not fps_opt:
             raise ValueError('Wallpaper CoreImage support requires the FPS/QoS profile')
@@ -435,8 +452,9 @@ def prepare_private_shader_cache(metal, device):
 
 
 def prepare(root, device, fps_opt=False, async_fix=False, completion_fix=False, completion_observe=False,
-            wallpaper_fix=False, worker_opt=False):
-    selected = plugin_patches(fps_opt, async_fix, completion_fix, completion_observe, wallpaper_fix, worker_opt)
+            wallpaper_fix=False, worker_opt=False, turnip_render_mode=None):
+    selected = plugin_patches(fps_opt, async_fix, completion_fix, completion_observe, wallpaper_fix, worker_opt,
+                              turnip_render_mode)
     for path, (url, commit) in SUBMODULES.items():
         entry = read(['git', '-C', root, 'ls-tree', 'HEAD', path]).split()
         if entry[:3] != ['160000', 'commit', commit]:
@@ -455,6 +473,12 @@ def prepare(root, device, fps_opt=False, async_fix=False, completion_fix=False, 
         run(['git', '-C', metal, 'apply', device / patch])
     shutil.copyfile(device / 'platform/NabuGpuScanoutWire.h', metal / 'NabuGpuScanoutWire.h')
     shutil.copyfile(device / 'platform/NabuGpuProblemStream.h', metal / 'NabuGpuProblemStream.h')
+    if turnip_render_mode is not None:
+        header = device / RENDER_MODE_HEADER
+        target = metal / header.name
+        if not header.is_file() or header.is_symlink() or target.exists() or target.is_symlink():
+            raise ValueError('Render-mode observer helper input or target differs')
+        shutil.copyfile(header, target)
     if fps_opt:
         shutil.copyfile(device / 'platform/NabuScanoutSourceCache.h', metal / 'NabuScanoutSourceCache.h')
         prepare_runtime_qos(metal, device, wait_phases=worker_opt)
@@ -485,8 +509,48 @@ def bundle_files(bundle):
     return files
 
 
+def collect_render_mode(root, device, output, selected):
+    """Bind the selected observer to the actual, exported eight-word provider.
+
+    Only selected experiments depend on this symbol. No GPU runs on the host;
+    mode selection and a linked observer are not evidence of executed GMEM work.
+    """
+    board_arguments(selected)
+    metal = root / 'drivers/AdrenoMetal'
+    header = metal / Path(RENDER_MODE_HEADER).name
+    if header.read_bytes() != (device / RENDER_MODE_HEADER).read_bytes():
+        raise ValueError('Compiled render-mode helper differs from its input')
+    library = root / 'build/adreno-metal-plugin/NativeAdrenoMetal.bundle/libvulkan_freedreno.dylib'
+    symbols = read(['xcrun', 'nm', '-gU', library])
+    if sum(line.split()[-1:] == ['_tu_render_mode_stats'] for line in symbols.splitlines()) != 1:
+        raise ValueError('Built Turnip does not export exactly one tu_render_mode_stats provider')
+    provider = root / '.cache/mesa-work/src/freedreno/vulkan/tu_cmd_buffer.cc'
+    text = provider.read_text()
+    if ('static uint64_t tu_render_mode_counts[8];' not in text or
+            'tu_render_mode_stats(uint64_t out[8])' not in text or
+            'out[i] = p_atomic_read(&tu_render_mode_counts[i]);' not in text):
+        raise ValueError('Turnip render-mode provider differs from the recorded eight-word ABI')
+    archive = output / 'render-mode-source'
+    archive.mkdir()
+    sources = (header, metal / 'NativeAdrenoMetalConfig.h', metal / 'NativeAdrenoMetalPlugin.mm',
+               metal / 'NativeBridgeMetalFrontend.mm', provider, root / RENDER_MODE_PROVIDER,
+               device / RENDER_MODE_PATCH)
+    for path in sources:
+        shutil.copyfile(path, archive / path.name)
+    return dict(compiled=True, requested=selected, turnip_debug=selected + ',nocb',
+                inherited_debug_overridden=True, concurrent_binning=False,
+                provider_symbol='tu_render_mode_stats', provider_words=8,
+                source_sha256={path.name: sha(path) for path in sources},
+                head_rows=['S-pid', 'RM1-render-mode', 'J-runtime-phases'],
+                pipeline_row='retained after head rows; not in the installed writer first-three snapshot',
+                counters='independent process-wide recorded passes, not completed work or frames',
+                count_encoding='hexadecimal', mode_codes={'s': 'sysmem,nocb', 'g': 'gmem,nocb', '?': 'unexpected'},
+                missing_provider='explicit unavailable row, never zero counters',
+                gpu_exercised=False, runtime_qualified=False)
+
+
 def build(root, device, output, env, fps_opt=False, async_fix=False, completion_fix=False, completion_observe=False,
-          wallpaper_fix=False, worker_opt=False):
+          wallpaper_fix=False, worker_opt=False, turnip_render_mode=None):
     """Returns the report's plugin section; the build's own return code is plugin['plugin_returncode']."""
     root, device, output = Path(root), Path(device).resolve(), Path(output)
     abi = device / 'gpu/upstream/Adreno6xx'
@@ -494,9 +558,10 @@ def build(root, device, output, env, fps_opt=False, async_fix=False, completion_
     report = {'adrenometal_commit': SUBMODULES['drivers/AdrenoMetal'][1],
               'adrenopm4_commit': SUBMODULES['kits/AdrenoPM4'][1], 'rust_toolchain': RUST,
               'abi_header_sha256': sha(abi / 'NativeAdrenoABI.h'), 'gpu_exercised': False, 'runtime_qualified': False}
-    selected = plugin_patches(fps_opt, async_fix, completion_fix, completion_observe, wallpaper_fix, worker_opt)
+    selected = plugin_patches(fps_opt, async_fix, completion_fix, completion_observe, wallpaper_fix, worker_opt,
+                              turnip_render_mode)
     report['metal2vulkan_commit'] = prepare(root, device, fps_opt, async_fix, completion_fix, completion_observe,
-                                            wallpaper_fix, worker_opt)
+                                            wallpaper_fix, worker_opt, turnip_render_mode)
     report['adrenometal_patches'] = {patch: sha(device / patch)
                                    for patch in selected}
     report['fps_opt'] = fps_opt
@@ -505,12 +570,18 @@ def build(root, device, output, env, fps_opt=False, async_fix=False, completion_
     report['completion_observe'] = completion_observe
     report['wallpaper_fix'] = wallpaper_fix
     report['worker_opt'] = worker_opt
+    report['turnip_render_mode'] = turnip_render_mode
+    if turnip_render_mode is not None:
+        report['render_mode'] = dict(compiled=False, requested=turnip_render_mode,
+            turnip_debug=turnip_render_mode + ',nocb', patch_sha256=sha(device / RENDER_MODE_PATCH),
+            helper_sha256=sha(device / RENDER_MODE_HEADER), runtime_qualified=False)
     report['baseline_recipe'] = ('423593-adrenometal-nine-patch-no-private-cache' if worker_opt else
                                  'wallpaper-current' if wallpaper_fix else 'default-mode')
     report['runtime_telemetry'] = {
         'compiled': RUNTIME_TELEMETRY_PATCH in selected,
         'patch_sha256': sha(device / RUNTIME_TELEMETRY_PATCH),
-        'head_rows': ['S-pid', 'V-pipeline', 'J-runtime-phases'],
+        'head_rows': ['S-pid', 'RM1-render-mode' if turnip_render_mode is not None else 'V-pipeline',
+                      'J-runtime-phases'],
         'wait_stages': {'runtime': 'runtime wait call including queued lowering settlement',
                         'handlers': 'frontend dispatch group wait',
                         'original_wait_totals_retained': True,
@@ -611,7 +682,7 @@ def build(root, device, output, env, fps_opt=False, async_fix=False, completion_
     compiler = shutil.which('glslangValidator', path=env['PATH'])
     if not compiler:
         raise SystemExit('glslangValidator is required for the bundled shaders')
-    arguments = ['--gpu-abi-dir', str(abi), *BOARD_ARGUMENTS, '--shader-compiler', compiler]
+    arguments = ['--gpu-abi-dir', str(abi), *board_arguments(turnip_render_mode), '--shader-compiler', compiler]
     report['arguments'] = arguments
     log = output / 'build-adreno-metal-plugin.log'
     with log.open('w') as stream:
@@ -629,6 +700,8 @@ def build(root, device, output, env, fps_opt=False, async_fix=False, completion_
             report['runtime_qos'] = collect_runtime_qos(root, device, output, wait_phases=worker_opt)
         if worker_opt:
             report['runtime_wait_phases'] = collect_runtime_wait_phases(root, device, output)
+        if turnip_render_mode is not None:
+            report['render_mode'].update(collect_render_mode(root, device, output, turnip_render_mode))
         if fps_opt and not worker_opt:
             metal = root / 'drivers/AdrenoMetal'
             helper = metal / 'NabuPrivateShaderCache.h'

@@ -1,0 +1,72 @@
+--- a/NativeAdrenoMetalPlugin.mm
++++ b/NativeAdrenoMetalPlugin.mm
+@@ -275,7 +275,9 @@
+         exceptiondiag::start(); // the throw site of an uncaught exception, for the kernel's THROW row (ExceptionDiag.h)
+         // The board selects Turnip's render-pass and concurrent-binning options.
+         if (NATIVE_ADRENO_TURNIP_DEBUG[0]) {
+-            setenv("TU_DEBUG", NATIVE_ADRENO_TURNIP_DEBUG, 0);
++            // A matched SYSMEM/GMEM experiment must not inherit a different
++            // render mode from launchd. Both variants keep nocb.
++            setenv("TU_DEBUG", NATIVE_ADRENO_TURNIP_DEBUG, 1);
+         }
+         if (strcmp(getprogname(), "backboardd") != 0) return device = clientDevice(port);
+         // The discovery releases the accelerator port when it is done; the monitor and the scanout client keep using it.
+--- a/NativeBridgeMetalFrontend.mm
++++ b/NativeBridgeMetalFrontend.mm
+@@ -30,9 +30,11 @@
+ #include <mach/mach.h>
+ #include "bridge/NativeMetalObjects.h"
+ #include "NativeBridgeMetalFrontend.h"
++#include "NabuTurnipRenderMode.h"
+
+ extern "C" void sys_dcache_flush(void *start, size_t length);
+
+ static NmbDevice *gDevice;
++static nabu_turnip_mode::ReadStats gTurnipRenderModeStats;
+ static bool gDeviceHostCoherent;
+ static id gDeviceObject;
+@@ -2100,6 +2102,14 @@
+  gMissing=missing;gInFlight=[NSMutableSet set];
+  gDevice=nmb_device_open(loader,cache);
+  if(!gDevice){NBLOG(@"native-metal: device refused: %s",nmb_last_error());return nil;}
++ // Resolve only from the exact driver already opened by this device. Balance
++ // our extra handle; the runtime retains its own for gDevice's lifetime.
++ // Absence is diagnostic-only and is printed as unavailable, not zero passes.
++ if(void *driver=dlopen(loader,RTLD_NOW|RTLD_LOCAL|RTLD_NOLOAD)) {
++  gTurnipRenderModeStats=reinterpret_cast<nabu_turnip_mode::ReadStats>(
++   dlsym(driver,"tu_render_mode_stats"));
++  dlclose(driver);
++ }
+  gDeviceHostCoherent=nmb_device_host_coherent(gDevice);
+  if(cache){gJournalPath=std::string(cache)+"/pipelines.log";gJournalBegan=nowUs();}
+  char name[128]={};nmb_device_name(gDevice,name,sizeof name);gName=[NSString stringWithUTF8String:name];gRegistryID=registryID;
+@@ -2272,10 +2282,11 @@
+   (unsigned long long)gDraws.load(),(unsigned long long)gFullScreenPasses.load(),(unsigned long long)(gBiggestPass.load()>>10),
+   (unsigned long long)gDispatches.load(),(unsigned long long)gBlits.load());
+- if(headWorkReadable)
+-  row("V pipe n%llu work%llums max%llums wait%llums fail%llu h%llu m%llu wr%llu",(unsigned long long)headWork[0],ms(headWork[1]),
+-   ms(headWork[2]),ms(headWork[3]),(unsigned long long)headWork[4],(unsigned long long)headWork[7],
+-   (unsigned long long)headWork[8],(unsigned long long)headWork[9]);
++ // The installed kernel captures the first three rows. Prioritize S/RM1/J
++ // for this experiment; retain the full V row immediately after them.
++ char renderMode[96];
++ if(nabu_turnip_mode::formatRow(renderMode,sizeof renderMode,getenv("TU_DEBUG"),gTurnipRenderModeStats))
++  row("%s",renderMode);
+  else
+-  row("%s","V pipe unreadable");
++  row("%s","RM1 unavailable format-error");
+  if(headPhasesReadable)
+   row("J phase-us s%llu settle%llu post%llu c%llu settle%llu post%llu",
+@@ -2287,6 +2296,12 @@
+    (unsigned long long)headPhases[3],(unsigned long long)headPhases[4],(unsigned long long)headPhases[5]);
+  else
+   row("%s","J phase unreadable");
++ if(headWorkReadable)
++  row("V pipe n%llu work%llums max%llums wait%llums fail%llu h%llu m%llu wr%llu",(unsigned long long)headWork[0],ms(headWork[1]),
++   ms(headWork[2]),ms(headWork[3]),(unsigned long long)headWork[4],(unsigned long long)headWork[7],
++   (unsigned long long)headWork[8],(unsigned long long)headWork[9]);
++ else
++  row("%s","V pipe unreadable");
+  {std::lock_guard<std::mutex> lock(gBenchLock);for(unsigned r=0;r<4;r++)if(gBench[r][0])row("%.90s",gBench[r]);}
+  row("T function n=%llu total=%llums max=%llums",
+   (unsigned long long)gTimeFunction.count.load(),ms(gTimeFunction.total.load()),ms(gTimeFunction.slowest.load()));

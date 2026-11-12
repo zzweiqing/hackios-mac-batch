@@ -182,14 +182,19 @@ int Power::findResources()
     return seen == 7 ? 0 : fail(Error::Resource);
 }
 
-int Power::beginBeforeGpu(const Io &io)
+int Power::beginBeforeGpu(const Io &io, uint64_t managedBase, uint64_t managedBytes)
 {
     uint32_t expected = 0;
     if (!__atomic_compare_exchange_n(&attempted_, &expected, 1, false,
         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return -1;
     io_ = io;
+    report_.managedBase = managedBase;
+    report_.managedBytes = managedBytes;
     if (!io.read32 || !io.write32 || !io.nowUs || !io.waitUs) {
         return fail(Error::MissingIo);
+    }
+    if (!NabuWifiMpss::managedWindowValid(managedBase, managedBytes)) {
+        return fail(Error::Resource);
     }
     int status = findResources();
     if (!status) begun_ = true;
@@ -484,11 +489,12 @@ int nativeWait(void *, unsigned microseconds)
 void nativeLog(void *, const Report *report)
 {
     IOLog("NabuWifiPower: stage=%u error=%u status=%d domain=%u offset=%x "
-        "value=%x expected=%x mask=%x resource=%x level=%u index=%u pending=%u\n",
+        "value=%x expected=%x mask=%x resource=%x level=%u index=%u pending=%u managed_base=%llx managed_bytes=%llx\n",
         unsigned(report->stage), unsigned(report->error), report->status,
         unsigned(report->domain), report->offset, report->value, report->expected,
         report->mask, report->resourceAddress, report->requestedLevel,
-        report->levelIndex, report->pending);
+        report->levelIndex, report->pending,
+        (unsigned long long)report->managedBase, (unsigned long long)report->managedBytes);
 }
 }
 
@@ -503,9 +509,11 @@ int beginBeforeGpu()
         IOLog("NabuWifiPower: cold owner rejected wifi=%u gpu=%u\n", mode, gpu);
         return int(kIOReturnUnsupported);
     }
-    if (gPhysBase != UINT64_C(0xc0000000) || gPhysSize != UINT64_C(0x140000000)) {
-        IOLog("NabuWifiPower: managed window rejected base=%llx bytes=%llx\n",
-            (unsigned long long)gPhysBase, (unsigned long long)gPhysSize);
+    const uint64_t managedBase = gPhysBase, managedBytes = gPhysSize;
+    const bool valid = NabuWifiMpss::managedWindowValid(managedBase, managedBytes);
+    IOLog("NabuWifiPower: managed base=%llx bytes=%llx valid=%u\n",
+        (unsigned long long)managedBase, (unsigned long long)managedBytes, valid);
+    if (!valid) {
         return int(kIOReturnUnsupported);
     }
     for (unsigned index = 0; index < 5; ++index) {
@@ -525,7 +533,7 @@ int beginBeforeGpu()
         }
     }
     const Io io{nullptr, nativeRead, nativeWrite, nativeNow, nativeWait, nativeLog};
-    return owner.power.beginBeforeGpu(io);
+    return owner.power.beginBeforeGpu(io, managedBase, managedBytes);
 }
 
 int vote(void *, const char *name, uint32_t level) { return owner.power.vote(name, level); }

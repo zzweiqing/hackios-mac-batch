@@ -3,6 +3,7 @@
 #define NABU_WIFI_POWER_H
 #include <stddef.h>
 #include <stdint.h>
+#include "NabuWifiMpss.h"
 
 namespace NabuWifiPower {
 
@@ -19,6 +20,7 @@ struct Report {
     uint32_t resourceAddress = 0, requestedLevel = 0, levelIndex = 0;
     int status = 0;
     bool pending = false;
+    uint64_t managedBase = 0, managedBytes = 0;
 };
 struct Io {
     void *ctx = nullptr;
@@ -43,7 +45,10 @@ struct Io {
  */
 class Power final {
 public:
-    int beginBeforeGpu(const Io &);
+    /* Native passes the observed kernel-managed window. Existing injected
+     * I/O callers default to the trusted board envelope. */
+    int beginBeforeGpu(const Io &, uint64_t managedBase = NabuWifiMpss::XnuBase,
+                       uint64_t managedBytes = NabuWifiMpss::XnuBytes);
     int vote(const char *, uint32_t);
     int enableXo();
     int setModemLoadState();

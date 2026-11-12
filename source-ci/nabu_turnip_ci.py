@@ -114,6 +114,8 @@ def main():
                         help='add CoreImage library/stitching support to --fps-opt; compile qualification only')
     parser.add_argument('--worker-opt', action='store_true',
                         help='build the opt-in lowering worker on the deployed nine-patch wallpaper baseline')
+    parser.add_argument('--turnip-render-mode', choices=('sysmem', 'gmem'),
+                        help='matched render-mode comparison with pass counters; requires --worker-opt; keeps nocb')
     parser.add_argument('--async-fix', action='store_true',
                         help='qualify and build asynchronous Metal creation on the four-patch plugin baseline')
     parser.add_argument('--completion-fix', action='store_true',
@@ -125,6 +127,8 @@ def main():
     require(not args.wallpaper_fix or (args.plugin and args.fps_opt), '--wallpaper-fix requires --plugin --fps-opt')
     require(not args.worker_opt or (args.plugin and args.fps_opt and args.wallpaper_fix),
             '--worker-opt requires --plugin --fps-opt --wallpaper-fix')
+    require(args.turnip_render_mode is None or args.worker_opt,
+            '--turnip-render-mode requires --worker-opt and its matched observation recipe')
     require(not args.async_fix or args.plugin, '--async-fix requires --plugin')
     require(not args.completion_fix or args.plugin, '--completion-fix requires --plugin')
     require(not args.completion_observe or args.plugin, '--completion-observe requires --plugin')
@@ -179,7 +183,7 @@ def main():
                   patches=pins['patches'], patch_sha256={p: sha(root / p) for p in pins['patches']},
                   nabu_patches={p: sha(device / p) for p in NABU_PATCHES},
                   upstream_pins_sha256=upstream_pins_sha256, recorded_pins_sha256=sha(pins_path),
-                  disk_cache=disk_cache, worker_opt=args.worker_opt,
+                  disk_cache=disk_cache, worker_opt=args.worker_opt, turnip_render_mode=args.turnip_render_mode,
                   abi_header_sha256=sha(abi / 'NativeAdrenoABI.h'), build_returncode=result.returncode,
                   library_built=library.is_file(), gpu_exercised=False, runtime_qualified=False)
     if library.is_file():
@@ -221,7 +225,8 @@ def main():
                                                    completion_fix=args.completion_fix,
                                                    completion_observe=args.completion_observe,
                                                    wallpaper_fix=args.wallpaper_fix,
-                                                   worker_opt=args.worker_opt)
+                                                   worker_opt=args.worker_opt,
+                                                   turnip_render_mode=args.turnip_render_mode)
             except (subprocess.CalledProcessError, SystemExit, OSError, ValueError, KeyError) as error:
                 plugin = {'plugin_returncode': 1, 'bundle_built': False, 'error': str(error)[-2000:],
                           'gpu_exercised': False, 'runtime_qualified': False}
