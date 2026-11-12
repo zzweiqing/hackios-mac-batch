@@ -131,7 +131,7 @@ private:
     Smem::Item outbound_, descriptors_, tx_, rx_;
     RmtfsRamStore store_;
     size_t part_bytes_[4];
-    uint32_t handle_node_[4], handle_port_[4];
+    uint32_t handle_node_[4];
     bool handle_open_[4];
     Status status_;
     uint64_t now_, stage_deadline_, incomplete_since_;

@@ -24,7 +24,7 @@ static bool join(char *out, size_t capacity, const char *a, const char *b) {
 }
 
 Control::Control() : resources_{}, provider_{}, smem_{}, outbound_{}, descriptors_{}, tx_{}, rx_{},
-    store_{}, part_bytes_{}, handle_node_{}, handle_port_{}, handle_open_{}, status_{}, now_(0), stage_deadline_(0),
+    store_{}, part_bytes_{}, handle_node_{}, handle_open_{}, status_{}, now_(0), stage_deadline_(0),
     incomplete_since_(0), attempted_(false), inbound_seen_(false), restart_flag_(false), fresh_ready_(false), version_(false),
     open_sent_(false), open_ack_(false), remote_open_(false), intents_sent_(false), services_sent_(false),
     remote_channel_(0), transaction_(1), features_(0), queue_head_(0), queue_count_(0), registry_count_(0),
@@ -624,8 +624,6 @@ bool Control::controlPacket(const QrtrPacket &packet) {
         }
     } else if (packet.type == DelClient) {
         const uint32_t node = le32(data + 4), port = le32(data + 8);
-        for (unsigned i = 0; i < 4; ++i)
-            if (handle_node_[i] == node && handle_port_[i] == port) handle_open_[i] = false;
         for (unsigned i = 0; i < kTransfers; ++i)
             if (transfers_[i].used && transfers_[i].node == node && transfers_[i].port == port) closeTransfer(i);
     }
@@ -656,22 +654,25 @@ bool Control::rmtfs(const QrtrPacket &packet, const QmiMessage &message) {
     ++status_.rmtfs_requests; event("rmtfs-request", message.id, message.transaction);
     QmiBuilder response(kQmiResponse, message.transaction, message.id); uint32_t handle = 0; uint16_t error = 0;
     message.u32(1, handle);
-    const bool owned = handle >= 1 && handle <= 4 && handle_open_[handle - 1] &&
-        handle_node_[handle - 1] == packet.source_node && handle_port_[handle - 1] == packet.source_port;
+    const bool owned = handle >= 1 && handle <= 4 && handle_open_[handle - 1] && handle_node_[handle - 1] == packet.source_node;
     if (message.id == 1) {
         static const char *const names[4] = {"/boot/modem_fs1", "/boot/modem_fs2", "/boot/modem_fsg", "/boot/modem_fsc"};
         size_t bytes; const uint8_t *path = message.get(1, bytes); handle = 0;
         for (unsigned i = 0; i < 4; ++i) if (path && bytes == strlen(names[i]) && !memcmp(path, names[i], bytes)) handle = i + 1;
-        if (!handle || (handle_open_[handle - 1] && (handle_node_[handle - 1] != packet.source_node || handle_port_[handle - 1] != packet.source_port))) error = 3;
-        else { handle_open_[handle - 1] = true; handle_node_[handle - 1] = packet.source_node; handle_port_[handle - 1] = packet.source_port; }
+        if (!handle || (handle_open_[handle - 1] && handle_node_[handle - 1] != packet.source_node)) error = 3;
+        else { handle_open_[handle - 1] = true; handle_node_[handle - 1] = packet.source_node; }
+        if (error) pdFailureDiagnostic(message, 1, "rmtfs-open-path");
+        event("rmtfs-open", handle, bytes, error);
         response.result(error); if (!error) response.u32(0x10, handle);
     } else if (message.id == 2) {
         error = owned ? 0 : 3; if (owned) handle_open_[handle - 1] = false; response.result(error);
     } else if (message.id == 4) {
         uint32_t size = 0;
-        error = owned && message.u32(2, size) && size && size <= resources_.shared_bytes ? 0 : 3;
+        const bool sized = message.u32(2, size);
+        error = sized && size && size <= resources_.shared_bytes ? 0 : 3;
         response.result(error); if (!error) response.u64(0x10, resources_.shared_phys);
         event("rmtfs-alloc", size, resources_.shared_phys, error);
+        event("rmtfs-alloc-caller", handle, owned ? 1 : 0, sized ? 0 : -1);
     } else if (message.id == 3) {
         size_t bytes, dir_bytes, force_bytes;
         const uint8_t *entries = message.get(3, bytes), *direction = message.get(2, dir_bytes), *force = message.get(4, force_bytes);
