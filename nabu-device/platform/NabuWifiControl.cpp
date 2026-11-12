@@ -755,6 +755,9 @@ bool Control::pdmapper(const QrtrPacket &packet, const QmiMessage &message) {
 void Control::pdFailureDiagnostic(const QmiMessage &message, uint8_t tag, const char *operation) {
     size_t bytes;
     const uint8_t *value = message.get(tag, bytes);
+    rawDiagnostic(operation, value, bytes, value ? 0 : -1);
+}
+void Control::rawDiagnostic(const char *operation, const uint8_t *value, size_t bytes, int status) {
     const size_t captured = bytes > kPdDiagnosticBytes ? size_t(kPdDiagnosticBytes) : bytes;
     char diagnostic[sizeof("pd-failure-service hex=") + 2 * kPdDiagnosticBytes]{};
     size_t cursor = strlen(operation);
@@ -766,7 +769,7 @@ void Control::pdFailureDiagnostic(const QmiMessage &message, uint8_t tag, const 
         diagnostic[cursor++] = hex[value[i] >> 4];
         diagnostic[cursor++] = hex[value[i] & 15];
     }
-    event(diagnostic, bytes, captured, value ? 0 : -1);
+    event(diagnostic, bytes, captured, status);
 }
 bool Control::wlfwSend(QmiBuilder &request, const char *operation) {
     const size_t bytes = request.finish();
@@ -870,6 +873,7 @@ bool Control::wlfw(const QrtrPacket &packet, const QmiMessage &message) {
         wlfw_step_ = Wlfw::Cap;
         break;
     case Wlfw::Cap:
+        rawDiagnostic("wlfw-cap-response", message.tlvs, message.bytes, ok ? 0 : int(error));
         if (!ok) return fail(Error::QmiResult, "wlfw-cap-result", error);
         if (!wire::capability(message, status_.capability)) return fail(Error::CapabilityFields, "wlfw-cap-fields");
         qmi_pending_ = false;

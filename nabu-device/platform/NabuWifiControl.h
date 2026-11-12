@@ -186,6 +186,7 @@ private:
     bool rmtfs(const wire::QrtrPacket &, const wire::QmiMessage &);
     bool pdmapper(const wire::QrtrPacket &, const wire::QmiMessage &);
     void pdFailureDiagnostic(const wire::QmiMessage &, uint8_t, const char *);
+    void rawDiagnostic(const char *, const uint8_t *, size_t, int);
     bool wlfw(const wire::QrtrPacket &, const wire::QmiMessage &);
     bool wlfwNext();
     bool wlfwSend(wire::QmiBuilder &, const char *);
