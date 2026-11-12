@@ -3,6 +3,7 @@
 
 #if defined(NABU_WIFI_RADIO) && NABU_WIFI_RADIO
 #include <IOKit/IOLib.h>
+#include <IOKit/IOLocks.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IORegistryEntry.h>

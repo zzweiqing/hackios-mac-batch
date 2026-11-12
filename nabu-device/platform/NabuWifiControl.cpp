@@ -998,8 +998,11 @@ bool Control::beginBoardDownload(const char *path) {
         status_.capability_generation != status_.generation || board_data_ || qmi_pending_)
         return fail(Error::NotPrepared, "wlfw-bdf-state");
     if (!path || strncmp(path, "firmware/bd", 11) || strlen(path) >= 64 ||
-        strchr(path + 9, '/') || strstr(path, ".."))
+        strchr(path + 9, '/'))
         return fail(Error::BoardSelection, "wlfw-bdf-path");
+    for (size_t index = 9; path[index]; ++index)
+        if (path[index] == '.' && path[index + 1] == '.')
+            return fail(Error::BoardSelection, "wlfw-bdf-path");
     const uint8_t *data = nullptr; size_t bytes = 0;
     if (!provider_.getFile(provider_.ctx, path, &data, &bytes) || !span(data, bytes) || bytes > 1024 * 1024)
         return fail(Error::BoardSelection, "wlfw-bdf-file");
