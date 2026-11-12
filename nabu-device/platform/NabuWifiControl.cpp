@@ -189,7 +189,30 @@ bool Control::initialize(const Resources &resources, const FileProvider &provide
     if (!store_.initialize(seeds, resources.rmtfs_arena, resources.rmtfs_arena_bytes)) return fail(Error::InvalidResources, "rmtfs-arena");
     const Smem::Result result = smem_.initialize(resources.smem);
     if (result != Smem::Ok) return fail(Error::Smem, "smem-layout", result);
+    logModemReason("modem-reason-before-pas");
     return prepareSmp2p();
+}
+void Control::logModemReason(const char *operation) {
+    // SM8150 MPSS uses global SMEM item 421 for its crash reason.
+    // Read the pre-PAS value too, so retained text can be identified.
+    Smem::Item item{};
+    const Smem::Result result = smem_.get(421, item, true);
+    if (result != Smem::Ok) { event(operation, 0, 0, result); return; }
+    uint8_t value[256];
+    const size_t limit = item.bytes < sizeof(value) ? item.bytes : sizeof(value);
+    Smem::barrier();
+    smem_.copyOut(item.offset, value, limit);
+    char diagnostic[sizeof("modem-reason-before-pas hex=") + 2 * sizeof(value)]{};
+    size_t cursor = strlen(operation), captured = 0;
+    memcpy(diagnostic, operation, cursor);
+    memcpy(diagnostic + cursor, " hex=", 5); cursor += 5;
+    static const char hex[] = "0123456789abcdef";
+    while (captured < limit && value[captured]) {
+        diagnostic[cursor++] = hex[value[captured] >> 4];
+        diagnostic[cursor++] = hex[value[captured] & 15];
+        ++captured;
+    }
+    event(diagnostic, item.bytes, captured);
 }
 bool Control::prepareSmp2p() {
     Smp2pObservation incoming{};
@@ -256,7 +279,10 @@ bool Control::pollSmp2p(Smp2pObservation &out) {
     if (out.entryPresent) {
         if (!inbound_seen_ || status_.smp2p_state != out.state) event("smp2p-state", out.state, out.fresh);
         status_.smp2p_state = out.state; inbound_seen_ = true;
-        if ((out.state & 1) && status_.stage != Stage::Inputs) return fail(Error::Fatal, "smp2p-fatal", int(out.state));
+        if ((out.state & 1) && status_.stage != Stage::Inputs) {
+            logModemReason("modem-reason-at-fatal");
+            return fail(Error::Fatal, "smp2p-fatal", int(out.state));
+        }
     }
     if (fresh_ready_ && (!out.entryPresent || !(out.state & 2))) {
         ++status_.generation; return fail(Error::Restart, "smp2p-ready-lost");
@@ -511,23 +537,25 @@ bool Control::flush(bool transmit) {
         memcpy(scratch_ + 8, packet.data + packet.offset, chunk);
         if (!command(packet.offset ? TxDataCont : TxData, 1, packet.iid, scratch_, chunk + 8)) return status_.stage != Stage::Failed;
         packet.offset += chunk;
-        if (packet.offset == packet.bytes) { --queue_count_; queue_head_ = (queue_head_ + 1) % kQueue; }
+        if (packet.offset == packet.bytes) {
+            if (le32(packet.data + 4) == NewServer)
+                event("qrtr-advertisement-submitted", le32(packet.data + 36), le32(packet.data + 24));
+            --queue_count_; queue_head_ = (queue_head_ + 1) % kQueue;
+        }
     }
     return true;
 }
-bool Control::advertise() {
+bool Control::advertise(uint32_t node) {
     static const uint32_t services[3][3] = {{14, 1, kRmtfsPort}, {0x40, 0x101, kPdPort}, {4096, 1, kTftpPort}};
     uint8_t data[20];
     for (const auto &service : services) {
         put32(data, NewServer); put32(data + 4, service[0]); put32(data + 8, service[1]);
         put32(data + 12, kAppsNode); put32(data + 16, service[2]);
-        if (!send(NewServer, kControlPort, kBroadcastNode, kControlPort, data, sizeof(data))) return false;
+        if (!send(NewServer, kControlPort, node, kControlPort, data, sizeof(data))) return false;
     }
-    /* Lookup version 1, any instance; service presence is only set by the
-     * remote NEW_SERVER, never by this request or a successful FIFO write. */
-    put32(data, NewLookup); put32(data + 4, 0x45); put32(data + 8, 1); put32(data + 12, 0); put32(data + 16, 0);
-    services_sent_ = send(NewLookup, kControlPort, kBroadcastNode, kControlPort, data, sizeof(data));
-    return services_sent_;
+    // Remote NEW_SERVER messages supply discovery. NEW_LOOKUP is local to NS.
+    services_sent_ = true;
+    return true;
 }
 bool Control::reply(const QrtrPacket &packet, QmiBuilder &message) {
     const size_t bytes = message.finish();
@@ -572,14 +600,17 @@ bool Control::controlPacket(const QrtrPacket &packet) {
     const uint8_t *data = packet.payload;
     if (packet.type == Hello) {
         if (status_.stage == Stage::PdFailureAck) return true;
+        event("qrtr-hello", packet.source_node, packet.source_port);
         uint8_t hello[20] = {}; put32(hello, Hello);
         if (!send(Hello, kControlPort, packet.source_node, kControlPort, hello, sizeof(hello))) return false;
-        return services_sent_ ? true : advertise();
+        return advertise(packet.source_node);
     }
     if (packet.type == Bye || packet.type == Exit) { ++status_.generation; return fail(Error::Restart, "qrtr-bye"); }
     if (packet.type == NewServer || packet.type == DelServer) {
         const uint32_t service = le32(data + 4), instance = le32(data + 8), node = le32(data + 12), port = le32(data + 16);
         event(packet.type == NewServer ? "qrtr-new-server" : "qrtr-del-server", service, instance);
+        event("qrtr-server-source", packet.source_node, packet.source_port);
+        event("qrtr-server-endpoint", node, port);
         if (service == 0x45 && (instance & 0xff) == 1 && node == packet.source_node && node != kAppsNode && port && port != kControlPort) {
             if (packet.type == DelServer && node == status_.server_node && port == status_.server_port) {
                 ++status_.generation; return fail(Error::Restart, "wlfw-deleted");
@@ -794,7 +825,7 @@ bool Control::poll(uint64_t now_ms) {
         }
     }
     if (version_ && open_ack_ && remote_open_ && intents_sent_ && !services_sent_) {
-        stage(Stage::Services, 120000); if (!advertise()) return false; stage(Stage::WaitWlfw, 120000);
+        stage(Stage::Services, 120000); if (!advertise(0)) return false; stage(Stage::WaitWlfw, 120000);
     }
     if (status_.stage == Stage::WaitWlfw && status_.server_port && queue_count_ < kQueue - 1) {
         QmiBuilder request(kQmiRequest, transaction_, 0x24);

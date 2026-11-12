@@ -158,6 +158,7 @@ private:
     bool domain(wire::Json &, char *, uint32_t &);
     bool serviceList(wire::Json &, Registry *, unsigned &);
     bool prepareSmp2p();
+    void logModemReason(const char *operation);
     bool attachGlink();
     bool command(uint16_t, uint16_t, uint32_t, const void * = nullptr, size_t = 0);
     bool commandSpace(uint32_t);
@@ -165,7 +166,7 @@ private:
     void peek(uint32_t off, void *, size_t);
     bool flush(bool transmit = true);
     bool send(uint32_t, uint32_t, uint32_t, uint32_t, const void *, size_t);
-    bool advertise();
+    bool advertise(uint32_t node);
     bool packet(const uint8_t *, size_t);
     bool controlPacket(const wire::QrtrPacket &);
     bool rmtfs(const wire::QrtrPacket &, const wire::QmiMessage &);

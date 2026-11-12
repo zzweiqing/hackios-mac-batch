@@ -56,11 +56,12 @@ public:
         ready_ = count_ != 0;
         return ready_ ? Ok : Invalid;
     }
-    Result get(uint16_t item, Item &out) const {
+    Result get(uint16_t item, Item &out, bool global_only = false) const {
         if (!ready_) return Invalid;
         for (unsigned pass = 0; pass < 2; ++pass) {
             for (unsigned i = 0; i < count_; ++i) {
                 const bool global = parts_[i].host0 == 0xfffe;
+                if (global_only && !global) continue;
                 if (global != (pass == 1)) continue;
                 const Result result = find(parts_[i], item, out);
                 if (result != Missing) return result;
