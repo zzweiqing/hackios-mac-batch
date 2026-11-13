@@ -55,7 +55,7 @@ DONOR_FILES = {
     'patches/8796/nabu-wifi-control-state.patch': '48ec2501f3e7ff43a5c2be96b3b8adb629f0fb7a3c384f4c537f52be48d5073e',
 }
 LOCAL_PATCHES = {
-    'nabu-wifi-network-xnu10063.patch': 'c06fd9c04896a88d3da2e5b2b2c7bb221220db5574d798eeb23e137aa737dbf6',
+    'nabu-wifi-network-xnu10063.patch': 'b4bb2dd43ae59d4a52c119b9212318a21c382544639b269b6aee695515b604b5',
     'nabu-wifi-network-apple80211-disabled.patch': 'f7bf478854dfb3c76d7b498e2f624d0926c80a40d3a951995aecb8e0d1c11b65',
     'nabu-wifi-network-registry.patch': 'd2d0dc66d3f77a1e7438ae9dc13b2d07e8d291ed0ccbac2a3ef0868168935fbb',
 }
@@ -499,6 +499,8 @@ def make(inputs, headers, patch_dir=None):
     require(set(headers) == set(XNU_HEADERS), 'Incomplete or undeclared XNU API header set')
     for path, digest in XNU_HEADERS.items():
         _validated(headers[path], digest, path)
+    require(re.search(rb'extern\s+void\s+thread_terminate_self\(void\);', headers['osfmk/kern/thread.h']) is not None,
+            'Pinned thread_terminate_self declaration drift')
     for key, record in dependencies.items():
         _validated(inputs[key], record['sha256'], key)
     files = {}
@@ -551,8 +553,8 @@ def make(inputs, headers, patch_dir=None):
             recipe='current XNU C recipe per C unit; current IOPlatformExpert.cpo.json per C++ unit',
             retarget_helper='existing build-nabu-platform.py compile_command',
             c_standard='gnu17', cxx_standard='current XNU C++ recipe',
-            include_directories=['source/bsd', '.cache/xnu-work/osfmk'],
-            defines=['KERNEL', 'KERNEL_PRIVATE', 'XNU_KERNEL_PRIVATE', 'MACH_KERNEL_PRIVATE',
+            include_directories=['source/bsd', 'headers', 'selected XNU recipe include directories'],
+            defines=['KERNEL', 'KERNEL_PRIVATE', 'XNU_KERNEL_PRIVATE',
                      'BSD_KERNEL_PRIVATE', '__APPLE_API_PRIVATE', '__APPLE_API_UNSTABLE'],
             c_flags=['-mgeneral-regs-only', '-ffreestanding', '-fno-common'],
             constructor_units=['iokit/Kernel/hakios.wlan.cpp', 'iokit/Kernel/MiniIONetworkStack.cpp'],

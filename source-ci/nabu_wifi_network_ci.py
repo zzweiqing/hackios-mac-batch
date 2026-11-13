@@ -113,7 +113,7 @@ def _platform(root):
     return module, path
 
 
-def command_for(record, path, obj, dependency, source_dir, header_dir, language, retarget, xnu_source):
+def command_for(record, path, obj, dependency, source_dir, header_dir, language, retarget):
     admit_recipe(record, language)
     command = retarget(record, path, obj)
     command = [value for value in command if value not in ('-MMD', '-MD', '-MP')]
@@ -123,13 +123,8 @@ def command_for(record, path, obj, dependency, source_dir, header_dir, language,
     prefixes = ['-I', str(source_dir / 'bsd')]
     prefixes += ['-I', str(header_dir)]
     command[1:1] = prefixes
-    # MACH_KERNEL_PRIVATE makes exported string.h include the unexported
-    # libsa/types.h. Match the osfmk component's source and libsa include roots;
-    # retain the selected recipe's include precedence and capture the actual
-    # header closure rather than supplying replacement type declarations.
-    command += ['-I', str(xnu_source / 'osfmk'), '-I', str(xnu_source / 'osfmk/libsa')]
     command += [
-        '-DKERNEL=1', '-DKERNEL_PRIVATE=1', '-DXNU_KERNEL_PRIVATE=1', '-DMACH_KERNEL_PRIVATE=1',
+        '-DKERNEL=1', '-DKERNEL_PRIVATE=1', '-DXNU_KERNEL_PRIVATE=1',
         '-DBSD_KERNEL_PRIVATE=1', '-D__APPLE_API_PRIVATE=1', '-D__APPLE_API_UNSTABLE=1']
     command += ['-mgeneral-regs-only', '-ffreestanding', '-fno-common', '-MMD', '-MF', str(dependency), '-MT', str(obj)]
     require('-fno-common' in command and '-mgeneral-regs-only' in command, 'Missing kernel object flags')
@@ -470,7 +465,7 @@ def qualify_artifacts(read, metadata):
         dependency = root / record['dependency_artifact']['artifact_path']
         full_dependency = root / record['full_dependency_artifact']['artifact_path']
         expected = command_for(recipes[language], source_path, obj, dependency, source_dir, header_dir,
-                               language, helper.compile_command, root / '.cache/xnu-work')
+                               language, helper.compile_command)
         require(record['recipe'] == (chosen if language == 'c' else CXX_RECIPE), 'Unit recipe selection drift')
         require(record['command'] == expected and json.loads(artifact_bytes(read, record['command_artifact'])) == expected,
                 'Actual compilation flags drift')
@@ -614,8 +609,7 @@ def build_kernel(root, out=None):
         commands.mkdir(parents=True, exist_ok=True)
         dependency = commands / (path.stem + '.d')
         full_dependency = commands / (path.stem + '.full.d')
-        command = command_for(record, path, obj, dependency, source_dir, header_dir, language,
-                              platform.compile_command, root / '.cache/xnu-work')
+        command = command_for(record, path, obj, dependency, source_dir, header_dir, language, platform.compile_command)
         command_path = commands / (path.stem + '.compile.json')
         command_path.write_text(json.dumps(command, indent=2) + '\n')
         dependency_command = full_dependency_command(command, full_dependency, obj)
@@ -659,10 +653,21 @@ def build_kernel(root, out=None):
                              dependencies=dependency_records, sections=section_receipt(parsed))
         return obj, data, parsed
 
-    parsed_objects = {}
+    parsed_objects, compilation_failures = {}, []
     for unit, policy in source_report['translation_units'].items():
-        obj, data, parsed = compile_unit(unit, policy['language'], source_dir / unit)
+        try:
+            obj, data, parsed = compile_unit(unit, policy['language'], source_dir / unit)
+        except RuntimeError as error:
+            # Compile independent units to preserve all actionable compiler
+            # diagnostics in this run. Never qualify or archive a partial set.
+            compilation_failures.append(dict(unit=unit, error=str(error)))
+            continue
         raw_objects[unit], parsed_objects[unit], paths[unit] = data, parsed, obj
+    if compilation_failures:
+        _write(output / 'compilation-failures.json',
+               (json.dumps(compilation_failures, indent=2) + '\n').encode())
+        raise RuntimeError('Network compilation failed for: ' +
+                           ', '.join(item['unit'] for item in compilation_failures))
     qualification = source.qualify(inputs, headers, files, source_report, raw_objects)
     constructors, late = [], {}
     objcopy = shutil.which('llvm-objcopy')

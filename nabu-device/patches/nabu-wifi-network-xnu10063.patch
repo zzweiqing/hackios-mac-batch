@@ -10,7 +10,7 @@
  #include <sys/sockio.h>
 --- a/bsd/dev/hakios.lx.c
 +++ b/bsd/dev/hakios.lx.c
-@@ -17,19 +17,12 @@
+@@ -17,19 +17,15 @@
  #include <kern/locks.h>
  #include <kern/sched_prim.h>
  #include <kern/thread.h>
@@ -28,9 +28,12 @@
 -#include <vm/memory_types.h>
 -#include <vm/vm_kern.h>
  
++/* Exact declaration from the pinned kern/thread.h; no Mach-private structs. */
++extern void thread_terminate_self(void);
++
  static LCK_GRP_DECLARE(lx_lock_group, "hakios-lx");
  static LCK_MTX_DECLARE(lx_lock, &lx_lock_group);
-@@ -81,12 +74,13 @@
+@@ -81,12 +77,13 @@
  
  	kfree_type(struct lx_thread, parameter);
  	start.function(start.argument);
@@ -45,7 +48,7 @@
  	struct lx_thread *start = kalloc_type(struct lx_thread, Z_WAITOK | Z_ZERO);
  	thread_t thread;
  
-@@ -125,7 +119,8 @@
+@@ -125,7 +122,8 @@
  		return lck_mtx_sleep(&lx_lock, LCK_SLEEP_DEFAULT, (event_t)address, THREAD_UNINT) == THREAD_TIMED_OUT;
  	}
  	nanoseconds_to_absolutetime(nanoseconds, &deadline);
@@ -55,7 +58,7 @@
  	return lck_mtx_sleep_deadline(&lx_lock, LCK_SLEEP_DEFAULT, (event_t)address, THREAD_UNINT, deadline) == THREAD_TIMED_OUT;
  }
  
-@@ -140,6 +135,12 @@
+@@ -140,6 +138,12 @@
  void
  lx_os_random(void *buffer, unsigned long size)
  {
