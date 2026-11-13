@@ -79,7 +79,12 @@ def admit_recipe(record, language):
     expected_language = ('-xc',) if language == 'c' else ('-xc++', '--driver-mode=g++')
     require(all(value in expected_language for value in language_flags), 'Conflicting XNU source language flags')
     standards = [value for value in arguments if value.startswith('-std=')]
-    require(len(standards) == 1 and ('++' in standards[0]) == (language == 'c++'), 'XNU recipe dialect drift')
+    if language == 'c':
+        # Actual XNU .o.json C records rely on the compiler's default dialect.
+        # command_for explicitly selects gnu17 for the generated network units.
+        require(len(standards) <= 1 and not any('++' in value for value in standards), 'XNU recipe dialect drift')
+    else:
+        require(len(standards) == 1 and '++' in standards[0], 'XNU recipe dialect drift')
     return record
 
 
@@ -430,7 +435,7 @@ def qualify_artifacts(read, metadata):
     require(set(metadata['recipes']) == {'c', 'c++'}, 'Network recipe manifest drift')
     recipes = {language: read_recipe(artifact_bytes(read, record)) for language, record in metadata['recipes'].items()}
     chosen = metadata['selected_c_recipe']
-    require(chosen.startswith(PROFILE + '/') and chosen.endswith('.co.json') and
+    require(chosen.startswith(PROFILE + '/') and chosen.endswith(('.o.json', '.co.json')) and
             '/bsd/' in recipes['c']['file'], 'Selected actual BSD recipe drift')
     require(metadata['chosen_recipe_sha256'] == metadata['recipes']['c']['sha256'] and
             metadata['cxx_recipe_sha256'] == metadata['recipes']['c++']['sha256'], 'Actual recipe input SHA drift')
@@ -576,7 +581,8 @@ def build_kernel(root, out=None):
                         for path, content in files.items()}
     source.qualify(inputs, headers, files, source_report)
     platform, platform_path = _platform(root)
-    recipe_files = sorted((root / PROFILE).rglob('*.co.json'))
+    recipe_root = root / PROFILE
+    recipe_files = sorted([*recipe_root.rglob('*.o.json'), *recipe_root.rglob('*.co.json')])
     recipe_inputs = {path.relative_to(root).as_posix(): path.read_bytes() for path in recipe_files}
     candidates = [(path, read_recipe(content)) for path, content in recipe_inputs.items()]
     chosen, c_record = choose_c_recipe(candidates)
