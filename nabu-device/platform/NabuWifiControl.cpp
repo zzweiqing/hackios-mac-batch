@@ -23,15 +23,15 @@ static bool join(char *out, size_t capacity, const char *a, const char *b) {
     return true;
 }
 
-Control::Control() : resources_{}, provider_{}, smem_{}, outbound_{}, descriptors_{}, tx_{}, rx_{},
+Control::Control() : resources_{}, external_{}, provider_{}, smem_{}, outbound_{}, descriptors_{}, tx_{}, rx_{},
     store_{}, part_bytes_{}, handle_node_{}, handle_open_{}, status_{}, now_(0), stage_deadline_(0),
     incomplete_since_(0), attempted_(false), inbound_seen_(false), restart_flag_(false), fresh_ready_(false), version_(false),
     open_sent_(false), open_ack_(false), remote_open_(false), intents_sent_(false), services_sent_(false),
     remote_channel_(0), transaction_(1), features_(0), queue_head_(0), queue_count_(0), registry_count_(0),
-    rx_cursor_(0), next_local_iid_(9), qmi_pending_(false), qmi_deadline_(0), qmi_node_(0), qmi_port_(0), qmi_generation_(0),
+    rx_cursor_(0), next_local_iid_(9), qmi_pending_(false), withdrawal_queued_(0), external_head_(0), external_count_(0), qmi_deadline_(0), qmi_node_(0), qmi_port_(0), qmi_generation_(0),
     wlfw_step_(Wlfw::Idle), wlfw_id_(0), msa_count_(0), msa_assign_at_(0), msa_{},
     board_data_(nullptr), board_chunk_(0), qmi_local_port_(kWlfwPort), board_request_(kQmiRequest, 0, 0x25),
-    cache_next_(0), cache_active_(UINT32_MAX), transactions_{}, queue_{}, remote_intents_{}, receive_{}, registry_{}, transfers_{}, ram_files_{}, scratch_{} {}
+    cache_next_(0), cache_active_(UINT32_MAX), transactions_{}, queue_{}, remote_intents_{}, receive_{}, external_receive_{}, registry_{}, transfers_{}, ram_files_{}, scratch_{} {}
 
 const char *Control::stageName(Stage value) {
     switch (value) {
@@ -43,6 +43,8 @@ const char *Control::stageName(Stage value) {
     case Stage::BoardDownload: return "board-download";
     case Stage::WaitFirmware: return "wait-firmware";
     case Stage::FirmwareReady: return "firmware-ready";
+    case Stage::NativeHandoff: return "native-handoff";
+    case Stage::NativeReady: return "native-ready";
     case Stage::PdFailureAck: return "pd-failure-ack";
     }
     return "invalid";
@@ -83,6 +85,8 @@ bool Control::fail(Error error, const char *operation, int detail) {
         event(operation, pd_failure ? uint64_t(error) : 0, 0, detail);
         status_.stage = Stage::Failed;
         qmi_pending_ = false; queue_count_ = 0;
+        if (external_.invalidate)
+            external_.invalidate(external_.ctx, status_.generation, detail ? detail : int(status_.error));
     }
     return false;
 }
@@ -522,6 +526,7 @@ bool Control::send(uint32_t type, uint32_t source_port, uint32_t node, uint32_t 
     memset(packet.data + 32 + bytes, 0, padded - bytes);
     packet.bytes = uint32_t(32 + padded); packet.offset = 0; packet.iid = 0;
     packet.generation = status_.generation; packet.deadline = now_ + 3000;
+    packet.external_ticket = 0; packet.withdrawal = 0;
     packet.intent_requested = false; packet.intent_assigned = false;
     ++queue_count_; return true;
 }
@@ -551,7 +556,11 @@ bool Control::flush(bool transmit) {
         if (packet.offset == packet.bytes) {
             if (le32(packet.data + 4) == NewServer)
                 event("qrtr-advertisement-submitted", le32(packet.data + 36), le32(packet.data + 24));
+            const uint64_t ticket = packet.external_ticket;
+            const uint32_t withdrawal = packet.withdrawal;
             --queue_count_; queue_head_ = (queue_head_ + 1) % kQueue;
+            status_.withdrawn_clients |= withdrawal;
+            if (ticket && external_.submitted) external_.submitted(external_.ctx, ticket, 0);
         }
     }
     return true;
@@ -633,6 +642,9 @@ bool Control::controlPacket(const QrtrPacket &packet) {
                 status_.server_node = node; status_.server_port = port; event("wlfw-service", node, port);
             }
         }
+        if (external_.announce && node == packet.source_node && node != kAppsNode && port && port != kControlPort)
+            external_.announce(external_.ctx, status_.generation, service, instance,
+                               node, port, packet.type == NewServer);
     } else if (packet.type == DelClient) {
         const uint32_t node = le32(data + 4), port = le32(data + 8);
         for (unsigned i = 0; i < kTransfers; ++i)
@@ -654,7 +666,12 @@ bool Control::packet(const uint8_t *data, size_t bytes) {
     }
     if (packet.destination_port == kTftpPort || (packet.destination_port >= 0x100 && packet.destination_port < 0x100 + kTransfers)) return tftp(packet);
     if (packet.destination_port != kRmtfsPort && packet.destination_port != kPdPort &&
-        packet.destination_port != kWlfwPort && packet.destination_port != kWlfwDaemonPort) return true;
+        packet.destination_port != kWlfwPort && packet.destination_port != kWlfwDaemonPort) {
+        if (status_.stage == Stage::NativeReady && external_.receive) return receiveExternal(packet);
+        return true;
+    }
+    if ((status_.stage == Stage::NativeHandoff || status_.stage == Stage::NativeReady) &&
+        (packet.destination_port == kWlfwPort || packet.destination_port == kWlfwDaemonPort)) return true;
     QmiMessage message{};
     if (!QmiMessage::parse(packet.payload, packet.bytes, message)) return fail(Error::Protocol, "qmi-header");
     if (packet.destination_port == kWlfwPort || packet.destination_port == kWlfwDaemonPort) return wlfw(packet, message);
@@ -1017,6 +1034,90 @@ bool Control::reportRadioFailure(int status) {
     return fail(Error::Radio, "radio-resource-failure", status);
 }
 
+bool Control::configureExternal(const ExternalOps &ops) {
+    if (status_.stage != Stage::Empty || external_.poll || !ops.announce || !ops.receive ||
+        !ops.poll || !ops.invalidate || !ops.submitted) return false;
+    external_ = ops;
+    return true;
+}
+
+bool Control::beginNativeHandoff() {
+    if (status_.stage == Stage::NativeHandoff || status_.stage == Stage::NativeReady) return true;
+    if (status_.stage != Stage::FirmwareReady || status_.error != Error::None ||
+        status_.fw_ready_generation != status_.generation || !status_.board_downloaded ||
+        !status_.calibration_reported || qmi_pending_ || !external_.poll)
+        return fail(Error::NotPrepared, "native-handoff-state");
+    wlfw_step_ = Wlfw::Idle;
+    stage(Stage::NativeHandoff, 10000);
+    return true;
+}
+
+bool Control::withdrawClients() {
+    if (status_.withdrawn_clients == 3) stage(Stage::NativeReady, 0);
+    return true;
+}
+
+bool Control::receiveExternal(const QrtrPacket &packet) {
+    if (!external_count_ && external_.receive(external_.ctx, status_.generation, packet.source_node,
+        packet.source_port, packet.destination_port, packet.payload, packet.bytes)) return true;
+    if (external_count_ == kExternalIngress) return fail(Error::QueueFull, "external-ingress-full");
+    ExternalReceive &retained = external_receive_[(external_head_ + external_count_) % kExternalIngress];
+    if (packet.bytes) memcpy(retained.data, packet.payload, packet.bytes);
+    retained.bytes = uint32_t(packet.bytes);
+    retained.node = packet.source_node; retained.port = packet.source_port;
+    retained.local_port = packet.destination_port; retained.generation = status_.generation;
+    ++external_count_;
+    return true;
+}
+
+bool Control::drainExternal() {
+    for (unsigned budget = 0; budget < kExternalIngress && external_count_; ++budget) {
+        const ExternalReceive &retained = external_receive_[external_head_];
+        if (retained.generation != status_.generation) return fail(Error::Restart, "external-ingress-generation");
+        if (!external_.receive(external_.ctx, retained.generation, retained.node, retained.port,
+            retained.local_port, retained.data, retained.bytes)) break;
+        --external_count_; external_head_ = (external_head_ + 1) % kExternalIngress;
+    }
+    return true;
+}
+
+Control::QueueResult Control::queueExternal(uint32_t type, uint32_t source_port, uint32_t node,
+    uint32_t port, const void *data, size_t bytes, uint32_t generation, uint64_t ticket) {
+    const bool handoff = status_.stage == Stage::NativeHandoff;
+    if ((status_.stage != Stage::NativeReady && !handoff) || status_.error != Error::None ||
+        generation != status_.generation || !external_.poll) return QueueResult::Unavailable;
+    if (!ticket || !port || node == kAppsNode || bytes > kPacketBytes - 32 || (bytes && !data))
+        return QueueResult::Invalid;
+    if (type == Data) {
+        if (handoff) return QueueResult::Unavailable;
+        if (!source_port || source_port == kControlPort || source_port == kRmtfsPort ||
+            source_port == kPdPort || source_port == kTftpPort || source_port == kWlfwPort ||
+            source_port == kWlfwDaemonPort || (source_port >= 0x100 && source_port < 0x100 + kTransfers))
+            return QueueResult::Invalid;
+    } else if (type == DelClient) {
+        const uint8_t *payload = static_cast<const uint8_t *>(data);
+        if (port != kControlPort || bytes != 20 || le32(payload) != DelClient ||
+            le32(payload + 4) != kAppsNode || !le32(payload + 8) ||
+            (source_port != kControlPort && source_port != le32(payload + 8)))
+            return QueueResult::Invalid;
+        if (handoff) {
+            const uint32_t client = le32(payload + 8);
+            const uint32_t bit = client == kWlfwPort ? 1 : client == kWlfwDaemonPort ? 2 : 0;
+            if (!bit || (withdrawal_queued_ & bit) || node != status_.server_node) return QueueResult::Invalid;
+        }
+    } else return QueueResult::Invalid;
+    if (queue_count_ == kQueue) return QueueResult::Busy;
+    const uint32_t tail = (queue_head_ + queue_count_) % kQueue;
+    if (!send(type, source_port, node, port, data, bytes)) return QueueResult::Unavailable;
+    queue_[tail].external_ticket = ticket;
+    if (handoff) {
+        const uint32_t client = le32(static_cast<const uint8_t *>(data) + 8);
+        queue_[tail].withdrawal = client == kWlfwPort ? 1 : 2;
+        withdrawal_queued_ |= queue_[tail].withdrawal;
+    }
+    return QueueResult::Queued;
+}
+
 bool Control::poll(uint64_t now_ms) {
     if (status_.stage == Stage::Failed) return false;
     if (status_.stage < Stage::WaitReady) return fail(Error::NotPrepared, "poll-before-pas");
@@ -1076,6 +1177,10 @@ bool Control::poll(uint64_t now_ms) {
     if (qmi_pending_ && now_ >= qmi_deadline_) return fail(Error::QmiTimeout, "wlfw-request-timeout");
     if (status_.stage == Stage::WaitFirmware && status_.fw_ready_generation == status_.generation)
         stage(Stage::FirmwareReady, 0);
+    if (status_.stage == Stage::NativeHandoff && !withdrawClients()) return false;
+    if ((status_.stage == Stage::NativeReady || status_.stage == Stage::NativeHandoff) && external_.poll)
+        external_.poll(external_.ctx, status_.generation);
+    if (status_.stage == Stage::NativeReady && !drainExternal()) return false;
     if (stage_deadline_ && now_ >= stage_deadline_)
         return fail(status_.stage == Stage::Glink ? Error::GlinkTimeout :
                     status_.stage == Stage::WaitFirmware ? Error::FirmwareTimeout : Error::ServiceTimeout, "stage-timeout");

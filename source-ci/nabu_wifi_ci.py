@@ -4,7 +4,9 @@ import json
 from pathlib import Path
 
 
-def enable_wifi(upstream, device, radio=False):
+def enable_wifi(upstream, device, radio=False, ath10k=False):
+    if ath10k and not radio:
+        raise ValueError('The ath10k backend requires the explicit radio owner')
     kernel = Path(upstream) / 'scripts/unixnu/kernel.py'
     text = kernel.read_text(encoding='utf-8')
     marker = '    env = dict(os.environ)\n'
@@ -13,6 +15,10 @@ def enable_wifi(upstream, device, radio=False):
     text = text.replace(marker, marker + "    env['NABU_WIFI_CONTROL'] = '1'\n", 1)
     if radio:
         text = text.replace(marker, marker + "    env['NABU_WIFI_RADIO'] = '1'\n", 1)
+    if ath10k:
+        text = text.replace(marker, marker + "    env['NABU_WIFI_ATH10K'] = '1'\n", 1)
+        text = text.replace(marker, marker + "    env['NABU_WIFI_CI_SCRIPTS'] = " +
+                            repr(str(Path(__file__).resolve().parent)) + "\n", 1)
     kernel.write_text(text, encoding='utf-8')
     sources = sorted((Path(device) / 'platform').glob('NabuWifi*'))
     sources += sorted((Path(device) / 'ufs').glob('NabuWifi*.h'))
@@ -20,9 +26,21 @@ def enable_wifi(upstream, device, radio=False):
     if radio:
         dependencies = [Path(device) / 'usb/NabuUsbSmmu.h']
         dependencies += sorted((Path(device) / 'gpu/upstream/ArmSmmu4K').glob('*.h'))
+    native_dependencies = {}
+    if ath10k:
+        ci = Path(__file__).resolve().parent
+        native_dependencies = {'source-ci/' + name: hashlib.sha256((ci / name).read_bytes()).hexdigest()
+                               for name in ('nabu_wifi_network_source.py', 'nabu_wifi_network_ci.py')}
+        for name in ('scripts/nabu_wifi_ath10k_ci.py', 'configs/nabu-wifi-ath10k.json',
+                     'scripts/nabu_armcpu_source.py', 'scripts/build-nabu-platform.py'):
+            native_dependencies['device/' + name] = hashlib.sha256((Path(device) / name).read_bytes()).hexdigest()
+        native_dependencies.update({'device/patches/' + path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                                    for path in sorted((Path(device) / 'patches').glob('nabu-wifi-network-*.patch'))})
     return dict(build_gate='NABU_WIFI_CONTROL=1', boot_arg='nabu-wifi=1/2/3',
                 input_only_mode=1, cold_start_mode=2, firmware_ready_mode=3, runtime_qualified=False,
                 radio_enabled=radio,
+                ath10k_enabled=ath10k, native_network_mode=4 if ath10k else None,
+                native_dependency_sources=native_dependencies,
                 radio_dependencies={path.relative_to(device).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
                                     for path in dependencies},
                 sources={path.relative_to(device).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -47,6 +65,16 @@ def qualify(read, candidate, intent):
     if intent.get('firmware_ready_mode') is not None:
         require(intent['firmware_ready_mode'] == built.get('firmware_ready_mode') == 3,
                 'Compiled firmware-ready mode differs from build intent')
+    ath10k = intent.get('ath10k_enabled', False)
+    require(built.get('ath10k_enabled', False) == ath10k,
+            'Native ath10k compilation differs from build intent')
+    if ath10k:
+        require(intent.get('native_network_mode') == built.get('native_network_mode') == 4 and
+                built.get('native_network') and built.get('native_backend'),
+                'Native network mode lacks its real host/backend archives')
+        for path, expected in intent['native_dependency_sources'].items():
+            require(hashlib.sha256(read(path)).hexdigest() == expected,
+                    'Native Wi-Fi build/qualification input source drift')
     require(intent.get('runtime_qualified') is False and required <= image['names'].keys(),
             'Missing linked Wi-Fi definitions or invalid runtime claim')
     for original, expected in intent['sources'].items():
@@ -83,12 +111,71 @@ def qualify(read, candidate, intent):
                 'Wi-Fi compile command does not consume the bound source')
         if radio:
             require('-DNABU_WIFI_RADIO=1' in command, 'Radio translation unit lacks its explicit compilation flag')
+        if ath10k:
+            require('-DNABU_WIFI_ATH10K=1' in command, 'Native Wi-Fi translation unit lacks its explicit compilation flag')
     if radio:
         require({'_nabu_wifi_smmu_lock', '_nabu_wifi_smmu_unlock', '_armcpu_spi_attach'} <= image['names'].keys(),
                 'Radio ownership or fault interrupt dependency was not linked')
         for method in ('activateRadioAfterPasStop', 'observeRadio', 'radioAuthAttempted'):
             require(any('NabuWifiDma' in name and method in name for name in image['names']),
                     'Missing linked native radio method ' + method)
+    if ath10k:
+        required_native = {'_nabu_ath10k_driver_' + name for name in ('prepare', 'start', 'stop', 'transmit')}
+        required_native.update({'_nabu_wifi_network_static_init', '_nabu_wifi_network_register_classes',
+                                '_nabu_wifi_network_stack_start', '_nabu_ath10k_qrtr_bind',
+                                '_nabu_ath10k_qrtr_start_instance', '_nabu_qrtr_submitted',
+                                '_nabu_ath10k_os_station', '_nabu_ath10k_os_net_attach',
+                                '_armcpu_spi_attach_deferred', '_armcpu_spi_mask',
+                                '_armcpu_spi_unmask', '_armcpu_spi_detach'})
+        required_native.update('_nabu_ath10k_os_' + name for name in
+                               ('radio_memory', 'map_registers', 'radio_powered', 'radio_address',
+                                'irq_attach', 'irq_enable', 'irq_disable', 'irq_detach_all',
+                                'firmware', 'station_lost', 'station_fatal', 'net_input', 'net_link'))
+        require(required_native <= image['names'].keys(), 'Native Wi-Fi final link lacks a required provider')
+        from nabu_wifi_network_ci import qualify_artifacts as qualify_network
+        import importlib.util
+        helper = Path(__file__).resolve().parents[1] / 'nabu-device/scripts/nabu_wifi_ath10k_ci.py'
+        spec = importlib.util.spec_from_file_location('nabu_ath10k_qualification', helper)
+        backend = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(backend)
+        relative_read = lambda name: read('outputs/tree/' + name)
+        network_report = json.loads(relative_read(built['native_network']['report']))
+        backend_report = json.loads(relative_read(built['native_backend']['report']))
+        require(network_report['build_result'] == {key: value for key, value in built['native_network'].items()
+                                                   if key != 'qualification'}, 'Native network build result drift')
+        require(backend_report['build_result'] == built['native_backend'], 'Native backend build result drift')
+        require(backend_report['intent']['network_headers'] ==
+                {name: network_report['source_report']['outputs'][f'bsd/sys/hakios.{name}.h']
+                 for name in ('lx', 'qmi', 'sta')}, 'Backend/host callback header ABI drift')
+        qualify_network(relative_read, network_report)
+        backend.qualify_artifacts(relative_read, backend_report)
+        def linked_identity(name, expected):
+            require(name in image['names'], 'Missing linked network identity ' + name)
+            address = image['names'][name]
+            encoded = expected.encode() + b'\0'
+            matches = []
+            for start, length, offset, _, _, flags in image['sections']:
+                if flags & 255 in (1, 12, 18) or address < start or address - start > length:
+                    continue
+                position = address - start
+                if len(encoded) <= length - position and offset + position + len(encoded) <= len(candidate):
+                    matches.append(candidate[offset + position:offset + position + len(encoded)])
+            require(matches == [encoded], 'Linked network source identity differs from its actual object')
+        for unit in network_report['source_report']['translation_units'].values():
+            require(set(unit['exports']) <= image['names'].keys(), 'Final network host export set is incomplete')
+            linked_identity(unit['exports'][-1], unit['source_identity'])
+        linked_identity('_nabu_wifi_network_static_init_identity', network_report['constructor_glue']['identity'])
+        glue_start, glue_words, _ = _function(image, '_nabu_wifi_network_static_init')
+        glue_calls = []
+        for index, word in enumerate(glue_words):
+            if word & 0x7c000000 != 0x14000000:
+                continue
+            displacement = word & 0x3ffffff
+            if displacement & 0x2000000:
+                displacement -= 0x4000000
+            glue_calls.append((glue_start + index * 4 + displacement * 4) & 0xffffffffffffffff)
+        require(glue_calls == [image['names'][name] for name in network_report['constructor_glue']['calls']],
+                'Final network glue does not call its two actual constructors in order')
     root_entry = '__ZN9NativeUfs9startRootEP9IOService'
     require(root_entry in image['names'], 'Wi-Fi UFS root entry is missing')
     start, words, _ = _function(image, root_entry)
@@ -122,5 +209,7 @@ def qualify_candidate(upstream, device, candidate, prepared):
             return (tree / name.removeprefix('outputs/')).read_bytes()
         if name.startswith('device/'):
             return (Path(device) / name.removeprefix('device/')).read_bytes()
+        if name.startswith('source-ci/'):
+            return (Path(__file__).resolve().parent / name.removeprefix('source-ci/')).read_bytes()
         raise ValueError('Unsupported Wi-Fi qualification member prefix')
     return qualify(read, Path(candidate).read_bytes(), prepared.get('wifi_control'))

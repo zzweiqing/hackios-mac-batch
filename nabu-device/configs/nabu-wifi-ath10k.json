@@ -1,0 +1,319 @@
+{
+  "donor_commit": "56c7364f5c083583b07eea24dded38a9ee932e5f",
+  "donor_patches": {
+    "patches/nabu-ath10k/macho-pcpu-globl.patch": "022e453056158d21aa7c8d6ad568d31d995eac8242e3bd534506b516a66dec62",
+    "patches/nabu-ath10k/ready-only-qmi.patch": "fc3ee15ce4d741c7335068606fa207b0d89823c9bc8d947aa6d05424b3783b4a",
+    "patches/nabu-ath10k/station-association.patch": "a88f7470d999bc41e2fd3c38f9478a9a68d52ffa055bef8e0530cbe0862e9eba",
+    "patches/nabu-ath10k/station-start-rollback.patch": "07c3bfc51dad6fd100684419c1ce5ce611a0ab42804035da7693e5cf7a0e1eea",
+    "patches/nabu-ath10k/xcode-counted-by.patch": "46d99623a633785f07a9fe0abe82e92ba05dc2a76a9c4414976c43a340c191e1"
+  },
+  "donor_repository": "buhuo666/XIAOMI-PAD-5_nabu-on-IOS",
+  "reference_commit": "57722468a3774e2ec60017705ec356ae9b31f40e",
+  "reference_files": {
+    "LICENSE": {
+      "bytes": 2059,
+      "git_blob": "93b2ea50cf88acf34e1ffe81be503efc85894cfa",
+      "sha256": "861a70c4175cbd49dc10be7ddb060300728175d353d4fd3b8263823bc28f61a0"
+    },
+    "LICENSE.APSL": {
+      "bytes": 19829,
+      "git_blob": "fe81a60cae982c042a69f97623b427666c455093",
+      "sha256": "e5881019d8766c1e88a5fe1dbca4ba40c78011d41fcb18f6e9f50df60182685b"
+    },
+    "NOTICE": {
+      "bytes": 2264,
+      "git_blob": "cd3483f5a333185c62f9f8ddfb6712c651359f11",
+      "sha256": "e5a6698869ae84cf067533bc3c8e0504c2245ab2e893cd73a45787ba1853a234"
+    },
+    "tools/mk-ath10k.py": {
+      "bytes": 10945,
+      "git_blob": "5ad1a82114aa758b0275c1c86e13fdcbad10a75c",
+      "sha256": "bc8b25a6f85bc423b0cab471e26c45f5ea9be4a70f6dfa84704398ce437330a9"
+    },
+    "wifi/lx/ath10k/host.c": {
+      "bytes": 14698,
+      "git_blob": "e4cc522afeaa6347f59ca890a1f8ea6220875c58",
+      "sha256": "3bdb5e36cfa31d098a3d28abdc14003cf12a1b91d89105f5b158a4ff860f0351"
+    },
+    "wifi/lx/ath10k/include/ath10k_prelude.h": {
+      "bytes": 370,
+      "git_blob": "97aee9c15a8f44020b29073569fb8a822be059f6",
+      "sha256": "3f34db68b6b2c0e2e0653cb711ade95d2e8e4b37afe7541c0696ce98e4991f65"
+    },
+    "wifi/lx/ath10k/include/linux/acpi.h": {
+      "bytes": 145,
+      "git_blob": "501ccc1277d84ca3f05f3c1a54e796b52f3175bf",
+      "sha256": "103065e4ecff66675d9cb0e087d17c773b611f22588e175ebf3dbca2951aed22"
+    },
+    "wifi/lx/ath10k/include/linux/clk.h": {
+      "bytes": 337,
+      "git_blob": "d82884395524b87fd9e5038ccacf71c2157b457d",
+      "sha256": "c6a7026bda8b6334b2b61ee9a8d20828bf84f0f60d221d2bb6dce35894f9c7a4"
+    },
+    "wifi/lx/ath10k/include/linux/firmware/qcom/qcom_scm.h": {
+      "bytes": 370,
+      "git_blob": "4f0ee438dff8d3f8c1c156dfe63f37047a2272f5",
+      "sha256": "037560f474d860141dfb1ce2feed8fb342febfc2ed761d9a82f42cc23bcb9fe4"
+    },
+    "wifi/lx/ath10k/include/linux/nvmem-consumer.h": {
+      "bytes": 362,
+      "git_blob": "ea02cc0fdc2b611bd2d33bfa8afcad629df0e6d4",
+      "sha256": "487b67bf34ffd4bf3c7b8b681beb1d23af64766effcf7a1660b84c8d10a127d5"
+    },
+    "wifi/lx/ath10k/include/linux/of.h": {
+      "bytes": 1240,
+      "git_blob": "cc27b76bcaac785b78f15e2dc0cd85fe79ba51ae",
+      "sha256": "6536c85b0e73de3ba0f671d25abf334d7ca62940a28e1a03a593c9300f586e7a"
+    },
+    "wifi/lx/ath10k/include/linux/platform_device.h": {
+      "bytes": 1110,
+      "git_blob": "464326fd08b67cf9f40047d4f63195da5fe3c658",
+      "sha256": "30ee0e7c8c0fa0fdd405e90521cbe515474fa19f0a2896a5bdac0267cedb1fc4"
+    },
+    "wifi/lx/ath10k/include/linux/pwrseq/consumer.h": {
+      "bytes": 253,
+      "git_blob": "0144ce9eb2d0725ef93a0b7c27ed58e26e85d1fd",
+      "sha256": "4bd33ac207057d58e98bb3a0d110246fbaabd192b242e9d48ad80debbd399fbf"
+    },
+    "wifi/lx/ath10k/include/linux/qrtr.h": {
+      "bytes": 97,
+      "git_blob": "f7e40a2d2f62613079735aa756a42d268db6535d",
+      "sha256": "10d1e596a720fac224fc7ad488294374af25c3191052db8d01226cf6d5eb6a40"
+    },
+    "wifi/lx/ath10k/include/linux/regulator/consumer.h": {
+      "bytes": 402,
+      "git_blob": "59b008db92785890685a2c6125cc2bb1a1936092",
+      "sha256": "2ebb06e5046cfadddf999c4092d974af5813e63bfdd53aeb4df85d1500ec95f6"
+    },
+    "wifi/lx/ath10k/include/linux/remoteproc/qcom_rproc.h": {
+      "bytes": 417,
+      "git_blob": "76360e5deaa0bda4ff5dd8708fcf608fe10615f4",
+      "sha256": "e3bc828ed1476e9ad4e7488fd4151bd1d7db139f898c3f31ad1c36a3d760f554"
+    },
+    "wifi/lx/ath10k/include/linux/soc/qcom/smem.h": {
+      "bytes": 172,
+      "git_blob": "f320d9b01e5a4824ed909ae745865aff1e647f9f",
+      "sha256": "58ee5740137c8e7a12fe67a100aa29e7acb9ae7813cea3ce1e503adcac270085"
+    },
+    "wifi/lx/ath10k/include/net/sock.h": {
+      "bytes": 93,
+      "git_blob": "d2ded8636c0700441737635c972a5782c9231264",
+      "sha256": "5e1e05ccb9ec8ec277a07b655ee3a78f3d5f131f9ff5fcec622150801481aa76"
+    },
+    "wifi/lx/ath10k/patches/icnss-bootstrap.patch": {
+      "bytes": 1546,
+      "git_blob": "3d89a1f6859149d5e8d65cac49382d6911f6ecde",
+      "sha256": "f7af6b215c21107f9a559afbff278f2ecac45ffab04c7cbba852b9225e1e918f"
+    },
+    "wifi/lx/include/linux/irq.h": {
+      "bytes": 86,
+      "git_blob": "a34426a03b25b622235c918be5667c1a802a077d",
+      "sha256": "f2d7e643431b0dcd8d883523f8be1f43c9f5ceddc6d0cec61439edd857959850"
+    },
+    "wifi/lx/include/linux/of.h": {
+      "bytes": 2608,
+      "git_blob": "7a2ff9322ee11f25771396b3ab3377b2105dc02d",
+      "sha256": "96e3f2a14aa318fb99c93eee36063ff14fac4fc4de735c0d0bc8a7c4f62c5db7"
+    },
+    "wifi/lx/include/linux/of_irq.h": {
+      "bytes": 85,
+      "git_blob": "55ebc9061c4b24396b6856295777990a4d02e27c",
+      "sha256": "68dea4f571a311e6e5b8df65ccfe1fdd8b7c57ab7836beff8570b4ed7e9948df"
+    },
+    "wifi/lx/include/linux/of_reserved_mem.h": {
+      "bytes": 325,
+      "git_blob": "01c8e5806c7f512fa96f7c97c1e2ca4947cbbe29",
+      "sha256": "8d6c5f41cf72fb58f3dfb02d2195a4d3b27c376d13f8acc52382e77f0b1e183b"
+    },
+    "wifi/lx/include/linux/remoteproc.h": {
+      "bytes": 476,
+      "git_blob": "2f0efaa738ed91286190a805bab56f7e69064716",
+      "sha256": "87aa76736fccf7bbc516d0710d60fbaa6e9b8b62a8f51a54ed7852bc2441d072"
+    },
+    "wifi/lx/include/linux/rhashtable.h": {
+      "bytes": 1457,
+      "git_blob": "a447a178d3cd55e25c900ea0a59d88d627319bb4",
+      "sha256": "f226d85d23ece1677198d513378e1cd700463032b7edbb763811ff144faf0cd3"
+    },
+    "wifi/lx/include/linux/soc/qcom/qmi.h": {
+      "bytes": 1061,
+      "git_blob": "242b8269d917425a667a3daf1ae7b51c90149cb6",
+      "sha256": "8ba5f402a8518c15463cafa78b08f4fe5e4442188bf5a66d1377cb7b1bda0ad5"
+    },
+    "wifi/lx/include/lx_more.h": {
+      "bytes": 1851,
+      "git_blob": "f102120fa42a784cdc6ea7e7da930bf67c760112",
+      "sha256": "8c9db230677a951bf918f21b5985d0784928cc88d939ee7610dd330a998d9db7"
+    },
+    "wifi/lx/include/lx_os.h": {
+      "bytes": 326,
+      "git_blob": "484ec08598d476382674f403ffc138508be098d7",
+      "sha256": "4cf38fc50cc3f176bf18b07028053291c62f50d460bc2e4c326beeb9f6b59f64"
+    },
+    "wifi/lx/include/lx_prelude.h": {
+      "bytes": 443,
+      "git_blob": "f537b8396f52e2459a4cf34ba9254e3ea4183d5c",
+      "sha256": "a9b5511376c854b8ac3819c83d890d599bbf13eba2bd90f8942fb47fc3780758"
+    },
+    "wifi/lx/include/machine/pcpu.h": {
+      "bytes": 1145,
+      "git_blob": "a84e21177f730f757f62a0e32dc0a452ce0214ba",
+      "sha256": "25de37360b4cee9d34d75c700c5a5785507a35f7c903a26de44bd622a52cf9be"
+    },
+    "wifi/lx/include/stdbool.h": {
+      "bytes": 228,
+      "git_blob": "71fb8c6d69d11a1a7b1001a8461baddec00faf5d",
+      "sha256": "2c9b59e4f9191871e4e6dbcd24bfadb515d578ad454526b7aea25e4ad9347b76"
+    },
+    "wifi/lx/include/stddef.h": {
+      "bytes": 227,
+      "git_blob": "85ffbde18759d3a819756ae97cb79c93e4c17519",
+      "sha256": "1bc4d75250e298d3b8af8b00ee69395920a0d372349f637edb1a7fe6f537f85c"
+    },
+    "wifi/lx/include/stdint.h": {
+      "bytes": 227,
+      "git_blob": "f48828651c14c3a5b32e0be0b832f924fb74c223",
+      "sha256": "ca29b3f02141577f4b91ff392f4d5c3085a7386be0e8d6eb80c172923e08050c"
+    },
+    "wifi/lx/include/sys/cdefs.h": {
+      "bytes": 477,
+      "git_blob": "a1f23b613a65986eff953bfebc9e070720c3e79f",
+      "sha256": "7d030974d1a746e48a9161d52a8e1613bce29bbf430131e7f3f2fe6928b89bf7"
+    },
+    "wifi/lx/include/sys/linker_set.h": {
+      "bytes": 2317,
+      "git_blob": "9f753033dd32e00f3046b0457e38f46880b830bf",
+      "sha256": "890ea048f619d46e9a0664c55b19c6199cf48bcf974d59a007406e4d24f1804c"
+    },
+    "wifi/lx/patches/include-linux-device.h.patch": {
+      "bytes": 582,
+      "git_blob": "beaec09b59332abb203dbc36dac5a5614303d59a",
+      "sha256": "c70ca00174fa8db13c0ceb1d3196b6f847d7aea0cfb03962a87f33bd29c5f773"
+    },
+    "wifi/lx/patches/include-linux-etherdevice.h.patch": {
+      "bytes": 573,
+      "git_blob": "d71bb0761a9252384678c440f9e9173fc69a5ae0",
+      "sha256": "c65ca3a72cbf50036b798588cc151092dcf16a7b110cef3f54ead6711cea7619"
+    },
+    "wifi/lx/patches/include-linux-io.h.patch": {
+      "bytes": 374,
+      "git_blob": "ae5c03ffd9fda1dc9e666c571be093eecbfb0429",
+      "sha256": "85d1347badaa8f03e6868a7701ccdb88dd647ad0e72fa343230dc1404a87b026"
+    },
+    "wifi/lx/patches/include-linux-socket.h.patch": {
+      "bytes": 433,
+      "git_blob": "c911fe6b35edb63a9f89134c3e50a1e34def5074",
+      "sha256": "7a1d6450ff806bdef12dfb17c2ac1e997c0f7c682ced23fb41d014020b7e2640"
+    },
+    "wifi/lx/patches/include-net-cfg80211.h.patch": {
+      "bytes": 1099,
+      "git_blob": "961a9d7d467356963f589da48afac38273a0713b",
+      "sha256": "ceafbe2d3579b0ce1e63f037eb4736b68238cff9bbb3b68b1551fd3587856c0a"
+    },
+    "wifi/lx/patches/include-net-mac80211.h.patch": {
+      "bytes": 470,
+      "git_blob": "a8c96ffed24e26d210249beb61b0812aa38ac693",
+      "sha256": "49a65b1ab58f334194c305c1ba49154b02613ba7c06880944ad62673a500b7fe"
+    },
+    "wifi/lx/sae/crypto.c": {
+      "bytes": 9931,
+      "git_blob": "beb91a2545fcfb7ac6e4e60d7f1e6086989a2733",
+      "sha256": "b9de5018bada2838da31dfe9a974188c52937b203efbe1f88f14fd5b3970f376"
+    },
+    "wifi/lx/sae/mbedtls_config.h": {
+      "bytes": 588,
+      "git_blob": "b12708c8fd2c1d0abe476dadf41683413391696f",
+      "sha256": "8c1a75ebee776517e06240e4c56d62e8b1dc2598b31ae65da4f500f0d704bb58"
+    },
+    "wifi/lx/sae/platform.c": {
+      "bytes": 2935,
+      "git_blob": "25ccb8f14553038f586848b1504354c4ff567ee3",
+      "sha256": "11db91c64aa356dc4fb4011a891341e4e406ea6d37be61fa75e6873721aa42ba"
+    },
+    "wifi/lx/sae/platform.h": {
+      "bytes": 575,
+      "git_blob": "7db25b027bb63f7f5e07a34fd909a4d43abde04d",
+      "sha256": "87e8583025210cd5b96b941886d0ef1c559e01c085baee57a88d34cd2926e5cd"
+    },
+    "wifi/lx/sae/sae.c": {
+      "bytes": 3120,
+      "git_blob": "43281384312bc35373504c0b87a88a5cb1bedc68",
+      "sha256": "d131c3e04cc5859c4ebf333eae56c0294a2677669fc5cf2f8b93cbbe90549d42"
+    },
+    "wifi/lx/sae/sae.h": {
+      "bytes": 985,
+      "git_blob": "26c52100a900f622962af1117a19f35a4e12b2b1",
+      "sha256": "189bfb84c035c38e7427253a94a1fb7321df82b941c8db2f2e3dc904702c12d3"
+    },
+    "wifi/lx/src/lx.h": {
+      "bytes": 1433,
+      "git_blob": "0625ebba065523d2a1716e690adb1bde210b9d57",
+      "sha256": "cea64faa27849193278c7861bf272d0972b254a4e603426342dada2f321f6940"
+    },
+    "wifi/lx/src/lx_80211.c": {
+      "bytes": 85697,
+      "git_blob": "097825800d04dc918ca410c75f28d6f5fa78d38d",
+      "sha256": "008c18b4b7105152d30e2192443b9a3e57f02e5342d860291c43e75d2341b8fc"
+    },
+    "wifi/lx/src/lx_base.c": {
+      "bytes": 31664,
+      "git_blob": "6c720ae2f99ba92450f28a752aeae3261209d2c3",
+      "sha256": "39ae56a6ffb1fdd578805f955b5b3cb0819bfee9afb2cc6c73765042e03f1f05"
+    },
+    "wifi/lx/src/lx_bus.c": {
+      "bytes": 29768,
+      "git_blob": "cf40307143f17bf3ed8598224c04d5d2cdcb52a6",
+      "sha256": "f0fddee641aec18c26d99b5f53e1c70a667477dbf947a86ba5ae6a813b766af9"
+    },
+    "wifi/lx/src/lx_wpa.c": {
+      "bytes": 18970,
+      "git_blob": "a99264a46af145cf2a78d8189363144df0ea732a",
+      "sha256": "ab69eefc0d883bec422a96f82fb4fa414509e64137a3c1e605098f28627d6569"
+    },
+    "wifi/lx/src/lx_wpa.h": {
+      "bytes": 2912,
+      "git_blob": "dca5b0d76125439082d796a9d23526570fae3941",
+      "sha256": "4bc8355daea62e81b8b58665c668d3bf379effdcd00a508e6642bb3f1b518316"
+    },
+    "xnu/files/bsd/sys/hakios.lx.h": {
+      "bytes": 6240,
+      "git_blob": "e6dd5aae9169596a76e6829c02c1ba182e2e337e",
+      "sha256": "253d69156caeb57b60e35dfef0a54b12937593bd7309943a6da2007f8d100708"
+    },
+    "xnu/files/bsd/sys/hakios.qmi.h": {
+      "bytes": 10185,
+      "git_blob": "44e8258c3a87ef8aac8dc50e0dcbe78c3bf944c4",
+      "sha256": "bc1e9da6ad96eb93069d20774768c3a003e21e4eb60998920958d90fabd798f0"
+    },
+    "xnu/files/bsd/sys/hakios.sta.h": {
+      "bytes": 6148,
+      "git_blob": "87f7c027c9a5a7649e95deb8e1e920191cbf682f",
+      "sha256": "5db8f37106a7d48289303bfe0b5c5ef6020b5a932836fe30d30bebce5e4b58d7"
+    }
+  },
+  "reference_repository": "HeliumStudio-Dev/hackios-xnu-kernel",
+  "sources": {
+    "freebsd": {
+      "filename": "freebsd-15.1-src.txz",
+      "sha256": "cf5762da53fd52e1eaf0f9ceee9bf58cbe314c821031d0d9ffa76823185a89e1",
+      "url": "https://download.freebsd.org/releases/amd64/15.1-RELEASE/src.txz"
+    },
+    "hostap": {
+      "filename": "wpa_supplicant-2.11.tar.gz",
+      "sha256": "912ea06f74e30a8e36fbb68064d6cdff218d8d591db0fc5d75dee6c81ac7fc0a",
+      "url": "https://w1.fi/releases/wpa_supplicant-2.11.tar.gz"
+    },
+    "linux": {
+      "filename": "linux-7.0.14.tar.xz",
+      "sha256": "de9999b784d2293f00d39c62d8f92a08ab8a54bc4e80ffd250a0c09cb07a0f98",
+      "url": "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.0.14.tar.xz"
+    },
+    "mbedtls": {
+      "filename": "mbedtls-3.6.7.tar.bz2",
+      "github_asset_api": "https://api.github.com/repos/Mbed-TLS/mbedtls/releases/assets/464469768",
+      "sha256": "a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6",
+      "url": "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2"
+    }
+  },
+  "version": 1
+}

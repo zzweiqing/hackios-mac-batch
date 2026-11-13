@@ -133,6 +133,18 @@ def selected_files(upstream):
                 add(path, path.relative_to(work))
 
     display = build / 'native-legacy-display'
+    for name in ('nabu-wifi-network', 'nabu-wifi-ath10k'):
+        directory = build / name
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.rglob('*')):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(directory)
+            if name == 'nabu-wifi-ath10k' and relative.parts[:1] == ('build',):
+                if len(relative.parts) < 2 or relative.parts[1] not in ('obj', 'sae-kernel', 'gen'):
+                    continue
+            add(path, path.relative_to(work))
     if display.is_dir():
         for path in sorted(display.rglob('*')):
             if path.is_file():
@@ -280,6 +292,12 @@ def selected_sources(device):
                 for directory in ('platform', 'ufs')
                 for p in sorted((device / directory).glob('NabuWifi*')) if p.suffix in ('.h', '.cpp')]
     sources += [(source_dir / 'nabu_wifi_ci.py', 'source-ci/nabu_wifi_ci.py')]
+    sources += [(source_dir / name, 'source-ci/' + name) for name in
+                ('nabu_wifi_network_source.py', 'nabu_wifi_network_ci.py')]
+    sources += [(device / 'scripts/nabu_wifi_ath10k_ci.py', 'device/scripts/nabu_wifi_ath10k_ci.py'),
+                (device / 'configs/nabu-wifi-ath10k.json', 'device/configs/nabu-wifi-ath10k.json')]
+    sources += [(p, 'device/patches/' + p.name)
+                for p in sorted((device / 'patches').glob('nabu-wifi-network-*.patch'))]
     sources += [(source_dir / 'nabu_hall_ci.py', 'source-ci/nabu_hall_ci.py')]
     sources += [(p, 'device/platform/' + p.name) for p in sorted((device / 'platform').glob('NabuHall*'))]
     sources += [(device / 'scripts/nabu_hall_source.py', 'device/scripts/nabu_hall_source.py')]

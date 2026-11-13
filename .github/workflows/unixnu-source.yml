@@ -30,6 +30,10 @@ on:
         description: Build the owned WLAN DMA domain for the captured Wi-Fi control Metal profile
         type: boolean
         default: false
+      wifi_ath10k:
+        description: Build the pinned ath10k backend and native 21H16 network host
+        type: boolean
+        default: false
       hall_sensor:
         description: Build opt-in GPIO9 Hall sampling with a bound source FDT
         type: boolean
@@ -105,6 +109,7 @@ jobs:
           UI_WATCH: ${{ inputs.ui_watch }}
           WIFI_CONTROL: ${{ inputs.wifi_control }}
           WIFI_RADIO: ${{ inputs.wifi_radio }}
+          WIFI_ATH10K: ${{ inputs.wifi_ath10k }}
           HALL_SENSOR: ${{ inputs.hall_sensor }}
           TURNIP_RENDER_MODE: ${{ inputs.turnip_render_mode }}
           FPS_OPT: ${{ inputs.fps_opt }}
@@ -131,6 +136,10 @@ jobs:
           if [ "$WIFI_RADIO" = true ]; then
             test "$WIFI_CONTROL" = true && test "$REQUESTED_CONFIG" = nabu_ufs_gpu_metal_defconfig
             log_args+=(--wifi-radio)
+          fi
+          if [ "$WIFI_ATH10K" = true ]; then
+            test "$WIFI_RADIO" = true
+            log_args+=(--wifi-ath10k)
           fi
           if [ "$HALL_SENSOR" = true ]; then log_args+=(--hall-sensor); fi
           if [ "$GPU_USERPROBE" = true ]; then log_args+=(--gpu-userprobe); fi
@@ -273,12 +282,13 @@ jobs:
           WORKER_OPT: ${{ inputs.worker_opt }}
           TURNIP_RENDER_MODE: ${{ inputs.turnip_render_mode }}
           WIFI_RADIO: ${{ inputs.wifi_radio }}
+          WIFI_ATH10K: ${{ inputs.wifi_ath10k }}
           HALL_SENSOR: ${{ inputs.hall_sensor }}
           ASYNC_FIX: ${{ inputs.async_fix }}
           COMPLETION_FIX: ${{ inputs.completion_fix }}
           COMPLETION_OBSERVE: ${{ inputs.completion_observe }}
         run: |
-          test "$WIFI_RADIO" != true && test "$HALL_SENSOR" != true
+          test "$WIFI_RADIO" != true && test "$WIFI_ATH10K" != true && test "$HALL_SENSOR" != true
           fps_args=()
           if [ "$FPS_OPT" = true ]; then fps_args+=(--fps-opt); fi
           if [ "$WALLPAPER_FIX" = true ]; then

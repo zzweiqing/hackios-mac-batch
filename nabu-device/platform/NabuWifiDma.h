@@ -11,6 +11,11 @@
 #include <stdint.h>
 
 namespace NabuWifiDma {
+struct View {
+    void *cpu = nullptr;
+    uint32_t iova = 0;
+    size_t bytes = 0;
+};
 constexpr int RadioUnavailable = -1;
 int prepareRadio();
 /* Called just after successful real PAS_SHUTDOWN(PAS 4), using the selected
@@ -18,6 +23,13 @@ int prepareRadio();
 int activateRadioAfterPasStop();
 void radioAuthAttempted();
 bool observeRadio();
+/* Borrow only while Active and fault-free. Runtime stops its driver IRQ and
+ * drains its work before any retainedStop() route change. */
+bool radioMemory(View &);
+bool publishRadioMemory(size_t offset, size_t bytes);
+/* Records a nonzero failure and retains the lease/memory. True means retained.
+ * This records no route writes and performs no driver or PAS operations. */
+bool retainRadioFault(int status);
 }
 
 #if (defined(NABU_WIFI_RADIO) && NABU_WIFI_RADIO) || defined(NABU_WIFI_DMA_HOST_TEST)
@@ -40,20 +52,18 @@ struct Memory {
     void *cpu = nullptr;
     uint64_t physical = 0;
     size_t bytes = 0;
-};
-struct View {
-    void *cpu = nullptr;
-    uint32_t iova = 0;
-    size_t bytes = 0;
+    void *nativeDescriptor = nullptr;
 };
 struct Platform {
     void *cookie = nullptr;
     int (*managedWindow)(void *, uint64_t *, uint64_t *) = nullptr;
-    /* Exclusive, physically contiguous WB pages, aligned to 16 KiB in CPU
-     * and PA space. Failure leaves out empty. No implicit IOMemoryMapper. */
+    /* Exclusive, physically contiguous pages, aligned to 16 KiB in CPU and PA
+     * space. Native arena is verified NormalUncached, tables are WB. Failure
+     * leaves out empty. No implicit IOMemoryMapper or additional CPU alias. */
     int (*allocate)(void *, size_t, Memory *) = nullptr;
     void (*release)(void *, Memory *) = nullptr;
-    /* Zero only after real clean/invalidate to PoC and a barrier. */
+    /* Native arena orders verified NormalUncached writes. WB tables require
+     * real clean/invalidate to PoC. Both finish with a barrier. */
     int (*publish)(void *, const Memory *, size_t, size_t) = nullptr;
 };
 struct Lease {
@@ -113,8 +123,9 @@ struct Result {
  * mapping and runtime power alive through every retained path. No destructor
  * frees DMA memory. Lifecycle calls reject concurrent/reentrant execution.
  * result() is a diagnostic reference for an externally serialized caller.
- * memory() lends the whole LinuxKPI arena. Return every CPU borrower before
- * releasePrepared(). Active means SMMU attached, without CE/IRQ/FW readiness.
+ * memory() lends the whole LinuxKPI arena only while Active and fault-free.
+ * Active means SMMU attached, without CE/IRQ/FW readiness. Retained memory and
+ * descriptors last for this boot, including after borrower faults.
  */
 class Owner {
 public:
@@ -724,7 +735,7 @@ inline bool Owner::memory(View &view)
 {
     view = {};
     if (!enter()) return false;
-    bool ok = result_.state == State::Prepared || result_.state == State::Active;
+    bool ok = result_.state == State::Active && result_.error == Error::None;
     if (ok) view = {arena_.cpu, uint32_t(IovaBase), ArenaBytes};
     leave();
     return ok;
@@ -734,7 +745,7 @@ inline bool Owner::publish(size_t offset, size_t bytes)
 {
     if (!enter()) return false;
     bool ok = false;
-    if ((result_.state == State::Prepared || result_.state == State::Active) &&
+    if (result_.state == State::Active && result_.error == Error::None &&
         bytes && offset <= ArenaBytes && bytes <= ArenaBytes - offset) {
         int status = platform_.publish(platform_.cookie, &arena_, offset, bytes);
         ok = status == 0;

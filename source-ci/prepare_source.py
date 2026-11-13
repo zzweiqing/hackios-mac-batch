@@ -698,12 +698,15 @@ def main():
     p.add_argument('--ui-watch', action='store_true', help='Compile opt-in bounded UI exec/main-thread observations')
     p.add_argument('--wifi-control', action='store_true', help='Build the independent firmware loader and MPSS control executor')
     p.add_argument('--wifi-radio', action='store_true', help='Build the owned WLAN DMA domain before PAS authentication')
+    p.add_argument('--wifi-ath10k', action='store_true', help='Build the pinned ath10k backend and native network host')
     p.add_argument('--hall-sensor', action='store_true', help='Build opt-in Hall GPIO sampling')
     args = p.parse_args()
     if args.wifi_control and (args.profile not in UFS_OWNER_PROFILES or not args.capture_logs):
         raise SystemExit('The first Wi-Fi control candidate requires a captured hardware UFS owner profile')
     if args.wifi_radio and (not args.wifi_control or args.profile != UFS_GPU_METAL_PROFILE):
         raise SystemExit('Wi-Fi radio requires the captured Wi-Fi control Metal profile')
+    if args.wifi_ath10k and not args.wifi_radio:
+        raise SystemExit('Wi-Fi ath10k requires the explicit radio build')
     if args.hall_sensor and (args.profile not in UFS_OWNER_PROFILES or not args.capture_logs):
         raise SystemExit('Hall sampling requires a captured hardware UFS owner profile')
     if args.ui_watch and (args.profile != UFS_GPU_METAL_PROFILE or not args.capture_logs or not args.gpu_userprobe):
@@ -793,7 +796,8 @@ def main():
     if 'CONFIG_XNU_OWNER_DATA_MOUNT=y' in options:
         data_skeleton = prepare_data_skeleton(args.upstream)
     log_capture = enable_logging(args.upstream, args.device) if args.capture_logs else None
-    wifi_control = enable_wifi(args.upstream, args.device, radio=args.wifi_radio) if args.wifi_control else None
+    wifi_control = enable_wifi(args.upstream, args.device, radio=args.wifi_radio,
+                               ath10k=args.wifi_ath10k) if args.wifi_control else None
     hall_sensor = None
     if args.hall_sensor:
         from nabu_hall_ci import enable_hall

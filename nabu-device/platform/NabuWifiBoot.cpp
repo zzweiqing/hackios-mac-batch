@@ -4,6 +4,7 @@
 #include "NabuWifiMpss.h"
 #include "NabuWifiPower.h"
 #include "NabuWifiDma.h"
+#include "NabuWifiRuntime.h"
 #include <IOKit/IOLib.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IODeviceTreeSupport.h>
@@ -125,7 +126,10 @@ bool selectedBoard(char *path, size_t capacity, uint32_t *capability) {
     chosen->release();
     return valid;
 }
-void coldStart(bool firmware_ready) {
+void coldStart(bool firmware_ready, bool ath10k = false) {
+#if !defined(NABU_WIFI_ATH10K) || !NABU_WIFI_ATH10K
+    if (ath10k) { IOLog("NABU WIFI boot error gate=ath10k-not-compiled\n"); return; }
+#endif
 #if !defined(NABU_WIFI_RADIO) || !NABU_WIFI_RADIO
     if (firmware_ready) { IOLog("NABU WIFI boot error gate=radio-not-compiled\n"); return; }
 #endif
@@ -162,7 +166,15 @@ void coldStart(bool firmware_ready) {
     resources.msa_bytes = 0x100000;
     resources.assignMsa = assignMsa;
     const nabu_wifi::FileProvider provider{nullptr, getFile};
+#if defined(NABU_WIFI_ATH10K) && NABU_WIFI_ATH10K
+    if (ath10k && !NabuWifiRuntime::configure(*control)) {
+        IOLog("NABU WIFI boot error gate=native-owner-configuration\n"); return;
+    }
+#endif
     if (!control->initialize(resources, provider)) return;
+#if defined(NABU_WIFI_ATH10K) && NABU_WIFI_ATH10K
+    if (ath10k && !NabuWifiRuntime::bind()) { control->reportRadioFailure(-1); return; }
+#endif
     const int power = NabuWifiPower::beginBeforeGpu();
     if (power) { IOLog("NABU WIFI boot error gate=power-owner status=%d\n", power); return; }
     if (firmware_ready) {
@@ -218,7 +230,11 @@ void coldStart(bool firmware_ready) {
 #if defined(NABU_WIFI_RADIO) && NABU_WIFI_RADIO
     uint64_t radio_observation_at = 0;
 #endif
-    while (control->poll(nowMs(nullptr))) {
+    for (;;) {
+#if defined(NABU_WIFI_ATH10K) && NABU_WIFI_ATH10K
+        if (ath10k && !NabuWifiRuntime::healthy()) { control->reportRadioFailure(-1); break; }
+#endif
+        if (!control->poll(nowMs(nullptr))) break;
 #if defined(NABU_WIFI_RADIO) && NABU_WIFI_RADIO
         const uint64_t now = nowMs(nullptr);
         if (firmware_ready && now >= radio_observation_at) {
@@ -235,19 +251,28 @@ void coldStart(bool firmware_ready) {
                   current.board_bytes, current.board_sent, current.board_segments,
                   current.board_downloaded, current.calibration_reported);
             reported_ready = true;
+#if defined(NABU_WIFI_ATH10K) && NABU_WIFI_ATH10K
+            if (ath10k && !NabuWifiRuntime::beginHandoff()) { control->reportRadioFailure(-1); break; }
+#endif
         }
+#if defined(NABU_WIFI_ATH10K) && NABU_WIFI_ATH10K
+        if (ath10k && !NabuWifiRuntime::poll()) { control->reportRadioFailure(-1); break; }
+#endif
         waitMs(nullptr, 1);
     }
     const nabu_wifi::Control::Status stopped = control->status();
     IOLog("NABU WIFI services stopped stage=%s error=%s status=%d\n",
           nabu_wifi::Control::stageName(stopped.stage), nabu_wifi::Control::errorName(stopped.error), stopped.detail);
+#if defined(NABU_WIFI_ATH10K) && NABU_WIFI_ATH10K
+    if (ath10k) NabuWifiRuntime::summary();
+#endif
 }
 void worker(void *argument, wait_result_t) {
     const uintptr_t mode = reinterpret_cast<uintptr_t>(argument);
     thread_set_thread_name(current_thread(), "nabu-wifi-control");
     IOLog("NABU WIFI boot begin mode=%lu\n", static_cast<unsigned long>(mode));
     if (nabu_wifi_firmware_load() == 0) {
-        if (mode == 2 || mode == 3) coldStart(mode == 3);
+        if (mode >= 2 && mode <= 4) coldStart(mode >= 3, mode == 4);
         else IOLog("NABU WIFI boot input-only-complete\n");
     }
     thread_terminate(current_thread());
@@ -257,7 +282,7 @@ void worker(void *argument, wait_result_t) {
 extern "C" void nabu_wifi_start() {
     unsigned mode = 0;
     if (!PE_parse_boot_argn("nabu-wifi", &mode, sizeof(mode)) || !mode) return;
-    if (mode > 3) { IOLog("NABU WIFI boot error gate=mode\n"); return; }
+    if (mode > 4) { IOLog("NABU WIFI boot error gate=mode\n"); return; }
     uint32_t expected = 0;
     if (!__atomic_compare_exchange_n(&started, &expected, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
     thread_t thread = THREAD_NULL;

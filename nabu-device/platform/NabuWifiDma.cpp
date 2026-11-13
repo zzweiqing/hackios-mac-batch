@@ -3,14 +3,19 @@
 
 #if defined(NABU_WIFI_RADIO) && NABU_WIFI_RADIO
 #include <IOKit/IOLib.h>
+#include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IORegistryEntry.h>
 #include <libkern/c++/OSData.h>
 #include <mach/vm_param.h>
+#include <kern/task.h>
+#include <vm/memory_types.h>
+#include <pexpert/pexpert.h>
 extern "C" uint64_t gPhysBase, gPhysSize;
 extern "C" vm_offset_t ml_vtophys(vm_offset_t);
+extern "C" unsigned int pmap_cache_attributes(ppnum_t);
 /* CI 43253223009 / build/armcpu/ArmCpu.cpp:902. Registration enables the
  * level source immediately and exposes group/enable/edge/priority/router. */
 extern "C" IOReturn armcpu_spi_attach(uint32_t, bool, void (*)(void *), void *, uint32_t *, uint64_t *);
@@ -129,42 +134,109 @@ int nativeWindow(void *, uint64_t *base, uint64_t *bytes)
     *bytes = gPhysSize;
     return 0;
 }
+bool nativeCacheRange(const Memory &memory, size_t offset, size_t bytes)
+{
+    if (!detail::validMemory(memory, memory.bytes, gPhysBase, gPhysSize) ||
+        !bytes || offset > memory.bytes || bytes > memory.bytes - offset ||
+        (memory.bytes != ArenaBytes && memory.bytes != TableBytes) ||
+        bool(memory.nativeDescriptor) != (memory.bytes == ArenaBytes)) return false;
+    int managedRtNormal = 0;
+    if (memory.nativeDescriptor) {
+        PE_parse_boot_argn("t733-managed-rt-normal", &managedRtNormal, sizeof(managedRtNormal));
+    }
+    const size_t end = offset + bytes;
+    for (size_t at = offset & ~size_t(4095); at < end; at += 4096) {
+        const uint64_t physical = memory.physical + at;
+        if (ml_vtophys(vm_offset_t(uintptr_t(memory.cpu) + at)) != physical) return false;
+        const unsigned attribute = pmap_cache_attributes(ppnum_t(physical >> 12)) & VM_WIMG_MASK;
+        if (memory.nativeDescriptor) {
+            if (attribute != VM_WIMG_WCOMB &&
+                !(attribute == VM_WIMG_RT && managedRtNormal == 1)) return false;
+        } else if (attribute != VM_WIMG_COPYBACK && attribute != VM_WIMG_INNERWBACK) {
+            return false;
+        }
+    }
+    return true;
+}
+void nativeRelease(void *, Memory *memory)
+{
+    if (memory->nativeDescriptor) {
+        auto *descriptor = static_cast<IOBufferMemoryDescriptor *>(memory->nativeDescriptor);
+        descriptor->complete();
+        descriptor->release();
+    } else if (memory->cpu) {
+        IOFreeContiguous(memory->cpu, memory->bytes);
+    }
+    *memory = {};
+}
 int nativeAllocate(void *, size_t bytes, Memory *out)
 {
-    if (!out || (bytes != ArenaBytes && bytes != TableBytes)) return int(kIOReturnBadArgument);
+    if (!out) return int(kIOReturnBadArgument);
     *out = {};
-    /* nullptr avoids IOMallocContiguous's legacy 32-bit PA-output constraint.
-     * ml_vtophys checks every real 4 KiB span of the owned WB allocation. */
-    void *cpu = IOMallocContiguous(bytes, AllocationAlignment, nullptr);
-    if (!cpu) return int(kIOReturnNoMemory);
-    uint64_t physical = ml_vtophys(reinterpret_cast<vm_offset_t>(cpu));
-    Memory memory{cpu, physical, bytes};
-    bool valid = detail::contiguousMemory(memory, gPhysBase, gPhysSize,
-        [](uintptr_t address) { return ml_vtophys(vm_offset_t(address)); });
+    if (bytes != ArenaBytes && bytes != TableBytes) return int(kIOReturnBadArgument);
+    if (PAGE_SIZE != 4096 || page_size != 4096 ||
+        !detail::inside(gPhysBase, gPhysSize, detail::DramBase, detail::DramBytes) ||
+        ((gPhysBase | gPhysSize) & 4095)) return int(kIOReturnUnsupported);
+    Memory memory;
+    bool valid = true;
+    if (bytes == ArenaBytes) {
+        /* The descriptor owns the only CPU view. No separate map or physical
+         * window alias is made for the noncoherent LinuxKPI DMA arena. */
+        const IOOptionBits options = static_cast<IOOptionBits>(kIODirectionInOut) |
+            static_cast<IOOptionBits>(kIOMemoryMapperNone) | kIOMemoryPhysicallyContiguous |
+            kIOMapWriteCombineCache;
+        auto *descriptor = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+            options, bytes, ((UINT64_C(1) << 36) - 1) & ~uint64_t(AllocationAlignment - 1));
+        if (!descriptor) return int(kIOReturnNoMemory);
+        const IOReturn status = descriptor->prepare();
+        if (status) {
+            descriptor->release();
+            return int(status);
+        }
+        IOByteCount span = 0;
+        memory = {descriptor->getBytesNoCopy(),
+            descriptor->getPhysicalSegment(0, &span, kIOMemoryMapperNone), bytes, descriptor};
+        valid = descriptor->getLength() == bytes && span >= bytes;
+        for (size_t at = 0; valid && at < bytes; at += 4096) {
+            const uint64_t physical = descriptor->getPhysicalSegment(at, &span, kIOMemoryMapperNone);
+            valid = physical == memory.physical + at && span >= 4096;
+        }
+    } else {
+        void *cpu = IOMallocContiguous(bytes, AllocationAlignment, nullptr);
+        if (!cpu) return int(kIOReturnNoMemory);
+        memory = {cpu, ml_vtophys(reinterpret_cast<vm_offset_t>(cpu)), bytes};
+    }
+    valid = valid && nativeCacheRange(memory, 0, bytes);
     if (!valid) {
-        IOFreeContiguous(cpu, bytes);
+        nativeRelease(nullptr, &memory);
         return int(kIOReturnUnsupported);
     }
     *out = memory;
     return 0;
-}
-void nativeRelease(void *, Memory *memory)
-{
-    IOFreeContiguous(memory->cpu, memory->bytes);
-    *memory = {};
 }
 int nativePublish(void *, const Memory *memory, size_t offset, size_t bytes)
 {
     if (!memory || !memory->cpu || !bytes || offset > memory->bytes || bytes > memory->bytes - offset) {
         return int(kIOReturnBadArgument);
     }
-    uintptr_t start = reinterpret_cast<uintptr_t>(memory->cpu) + offset;
-    uintptr_t end = start + bytes;
-    for (uintptr_t at = start & ~uintptr_t(63); at < end; at += 64) {
-        __asm__ volatile("dc civac, %0" :: "r"(at) : "memory");
+    if (!nativeCacheRange(*memory, offset, bytes)) return int(kIOReturnUnsupported);
+    if (!memory->nativeDescriptor) {
+        uintptr_t start = reinterpret_cast<uintptr_t>(memory->cpu) + offset;
+        uintptr_t end = start + bytes;
+        for (uintptr_t at = start & ~uintptr_t(63); at < end; at += 64) {
+            __asm__ volatile("dc civac, %0" :: "r"(at) : "memory");
+        }
     }
     __asm__ volatile("dsb sy" ::: "memory");
     return 0;
+}
+bool radioReady()
+{
+    if (__atomic_load_n(&faultIrqs.contextHandler.faulted, __ATOMIC_ACQUIRE)) {
+        nativeOwner.retainFault();
+        return false;
+    }
+    return nativeOwner.result().state == State::Active && nativeOwner.result().error == Error::None;
 }
 } // namespace
 const Platform &nativePlatform()
@@ -229,6 +301,34 @@ bool observeRadio()
     return observeAfterFault(nativeOwner, faultIrqs.contextHandler.faulted);
 }
 
+bool radioMemory(View &view)
+{
+    view = {};
+    RadioCall call;
+    if (!call.entered || !radioReady()) return false;
+    bool ok = nativeOwner.memory(view);
+    if (!radioReady()) {
+        view = {};
+        return false;
+    }
+    return ok;
+}
+
+bool publishRadioMemory(size_t offset, size_t bytes)
+{
+    RadioCall call;
+    if (!call.entered || !radioReady()) return false;
+    return nativeOwner.publish(offset, bytes) && radioReady();
+}
+
+bool retainRadioFault(int status)
+{
+    RadioCall call;
+    if (!call.entered || !status) return false;
+    nativeOwner.retainFault(status);
+    return nativeOwner.result().state == State::Retained;
+}
+
 int lockShared()
 {
     IOLock *lock = __atomic_load_n(&sharedLock, __ATOMIC_ACQUIRE);
@@ -272,5 +372,8 @@ int prepareRadio() { return RadioUnavailable; }
 int activateRadioAfterPasStop() { return RadioUnavailable; }
 void radioAuthAttempted() {}
 bool observeRadio() { return false; }
+bool radioMemory(View &view) { view = {}; return false; }
+bool publishRadioMemory(size_t, size_t) { return false; }
+bool retainRadioFault(int) { return false; }
 }
 #endif

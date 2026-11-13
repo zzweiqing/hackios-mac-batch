@@ -294,11 +294,283 @@ def patch_smp_hold(text):
     return text.replace(SMP_HOLD_OLD, SMP_HOLD_NEW, 1)
 
 
-def patch_source(text):
+def patch_source(text, spi_lifecycle=False):
     # The pinned file may be checked out with CRLF; normalize so the pinned
     # source templates match and the transform is deterministic.
     text = patch_assembly(patch_timer_source(text.replace('\r\n', '\n')))
-    return patch_boot_handoff(patch_smp_hold(patch_boot_order(text)))
+    text = patch_boot_handoff(patch_smp_hold(patch_boot_order(text)))
+    return patch_spi_lifecycle(text) if spi_lifecycle else text
+
+
+# The default transform remains byte-identical. A coordinator opts in only
+# for a candidate that links the IRQ lifecycle consumers and qualifies them.
+SPI_STATE_OLD = '''struct ArmCpuSpi {uint32_t id; void (*handler) (void *); void *context; volatile uint64_t count;};
+static ArmCpuSpi gSpi[ARMCPU_SPI_SLOTS];
+static volatile uint32_t gSpiUsed = 0;
+'''
+SPI_STATE_NEW = r'''#define ARMCPU_SPI_LIFECYCLE_VERSION 1
+struct ArmCpuSpi {
+  uint32_t id;
+  void (*handler) (void *);
+  void *context;
+  uint64_t count;
+  uint32_t readers, accepting;
+  bool registered, deferred, edge;
+};
+static ArmCpuSpi gSpi[ARMCPU_SPI_SLOTS];
+static uint32_t gSpiUsed = 0;
+'''
+SPI_DISPATCH_OLD = '''      ArmCpuSpi *spi = nullptr;
+      const uint32_t used = __atomic_load_n (&gSpiUsed, __ATOMIC_ACQUIRE);
+      for (uint32_t slot = 0; intid >= 32 && slot < used && spi == nullptr; slot++) {
+        if (gSpi[slot].id == intid) { spi = &gSpi[slot]; }
+      }
+      if (spi != nullptr) {
+        armcpu_irq_phase = 7;
+        spi->count = spi->count + 1;
+        spi->handler (spi->context);
+'''
+SPI_DISPATCH_NEW = '''      if (armcpuSpiDispatch (intid)) {
+'''
+SPI_NATIVE = r'''static IOLock *gSpiConfigLock = nullptr;
+static uint64_t armcpuSpiNowMs (void)
+{
+  uint64_t ns = 0;
+  absolutetime_to_nanoseconds (mach_absolute_time (), &ns);
+  return ns / 1000000;
+}
+static bool armcpuSpiThreadContext (void)
+{
+  return !ml_at_interrupt_context () && ml_get_interrupts_enabled ();
+}
+static bool armcpuSpiTryLock (void)
+{
+  IOLock *lock = __atomic_load_n (&gSpiConfigLock, __ATOMIC_ACQUIRE);
+  if (lock == nullptr) {
+    IOLock *allocated = IOLockAlloc ();
+    if (allocated == nullptr) { return false; }
+    IOLock *expected = nullptr;
+    if (!__atomic_compare_exchange_n (&gSpiConfigLock, &expected, allocated, false,
+                                      __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+      IOLockFree (allocated);
+      lock = expected;
+    } else { lock = allocated; }
+  }
+  return IOLockTryLock (lock);
+}
+static void armcpuSpiUnlock (void) { IOLockUnlock (gSpiConfigLock); }
+static void armcpuSpiSleep (void) { IOSleep (1); }
+static void armcpuSpiBarrier (void) { __asm__ volatile ("dsb sy" ::: "memory"); }
+'''
+SPI_HELPER = r'''// Administrative operations are thread-only and serialized. The ISR never
+// takes that lock. IDs are immutable after publication, including tombstones.
+// SC reader admission and closure make a successful drain safe for context
+// release. Reader counters are never reset when the same INTID is reattached.
+static ArmCpuSpi *armcpuSpiFind (uint32_t intid)
+{
+  const uint32_t used = __atomic_load_n (&gSpiUsed, __ATOMIC_ACQUIRE);
+  for (uint32_t slot = 0; slot < used; slot++) {
+    if (gSpi[slot].id == intid) { return &gSpi[slot]; }
+  }
+  return nullptr;
+}
+static void armcpuSpiDisable (uint32_t intid)
+{
+  write32 (gDist, 0x180 + (intid / 32) * 4, 1U << (intid % 32));
+  armcpuSpiBarrier ();
+}
+static bool armcpuSpiDispatch (uint32_t intid)
+{
+  ArmCpuSpi *spi = armcpuSpiFind (intid);
+  if (spi == nullptr) { return false; }
+  __atomic_fetch_add (&spi->readers, 1U, __ATOMIC_SEQ_CST);
+  bool deliver = __atomic_load_n (&spi->accepting, __ATOMIC_SEQ_CST) != 0;
+  if (deliver && spi->deferred) {
+    deliver = __atomic_exchange_n (&spi->accepting, 0U, __ATOMIC_SEQ_CST) != 0;
+    armcpuSpiDisable (intid);
+  } else if (!deliver) { armcpuSpiDisable (intid); }
+  if (deliver) {
+    armcpu_irq_phase = 7;
+    __atomic_fetch_add (&spi->count, 1ULL, __ATOMIC_RELAXED);
+    spi->handler (spi->context);
+  }
+  __atomic_fetch_sub (&spi->readers, 1U, __ATOMIC_SEQ_CST);
+  return true;
+}
+static bool armcpuSpiLock (uint64_t deadline, unsigned budget)
+{
+  for (unsigned polls = 0; ; polls++) {
+    if (armcpuSpiTryLock ()) { return true; }
+    if (polls >= budget || armcpuSpiNowMs () >= deadline) { return false; }
+    armcpuSpiSleep ();
+  }
+}
+static bool armcpuSpiDrain (ArmCpuSpi *spi, uint64_t deadline, unsigned budget)
+{
+  for (unsigned polls = 0; ; polls++) {
+    if (__atomic_load_n (&spi->readers, __ATOMIC_SEQ_CST) == 0) { return true; }
+    if (polls >= budget || armcpuSpiNowMs () >= deadline) { return false; }
+    armcpuSpiSleep ();
+  }
+}
+static uint32_t armcpuSpiReadback (uint32_t intid)
+{
+  const uint32_t word = (intid / 32) * 4, bit = 1U << (intid % 32);
+  const unsigned cfg = 0xc00 + (intid / 16) * 4, shift = (intid % 16) * 2 + 1;
+  return ((read32 (gDist, 0x80 + word) & bit) ? 1U : 0U) |
+         ((read32 (gDist, 0x100 + word) & bit) ? 2U : 0U) |
+         (((read32 (gDist, cfg) >> shift) & 1U) << 2) |
+         (static_cast<uint32_t> (*reinterpret_cast<volatile uint8_t *> (gDist + 0x400 + intid)) << 8);
+}
+static __attribute__((always_inline)) inline IOReturn armcpuSpiAttach (
+    uint32_t intid, bool edge, void (*handler) (void *), void *context,
+    uint32_t *readback, uint64_t *router, bool deferred)
+{
+  if (gDist == 0 || armcpu_gic_ready == 0 || handler == nullptr) { return kIOReturnNotReady; }
+  const unsigned interrupts = ((read32 (gDist, 4) & 31) + 1) * 32;
+  if (intid < 32 || intid >= 1020 || intid >= interrupts) { return kIOReturnBadArgument; }
+  if (!armcpuSpiThreadContext ()) { return kIOReturnNotPermitted; }
+  if (!armcpuSpiLock (armcpuSpiNowMs () + 1000, 1000)) { return kIOReturnTimeout; }
+  ArmCpuSpi *spi = armcpuSpiFind (intid);
+  IOReturn result = kIOReturnSuccess;
+  if (spi != nullptr && spi->registered) { result = kIOReturnExclusiveAccess; }
+  const uint32_t used = __atomic_load_n (&gSpiUsed, __ATOMIC_ACQUIRE);
+  if (spi == nullptr && used >= ARMCPU_SPI_SLOTS) { result = kIOReturnNoResources; }
+  if (result != kIOReturnSuccess) { armcpuSpiUnlock (); return result; }
+  const uint32_t word = (intid / 32) * 4, bit = 1U << (intid % 32);
+  write32 (gDist, 0x180 + word, bit);
+  if (!waitClear (gDist, 0, 1U << 31)) { armcpuSpiUnlock (); return kIOReturnTimeout; }
+  write32 (gDist, 0x80 + word, read32 (gDist, 0x80 + word) | bit);
+  *reinterpret_cast<volatile uint8_t *> (gDist + 0x400 + intid) = 0xa0;
+  const unsigned cfg = 0xc00 + (intid / 16) * 4, shift = (intid % 16) * 2 + 1;
+  write32 (gDist, cfg, (read32 (gDist, cfg) & ~(1U << shift)) | ((edge ? 1U : 0U) << shift));
+  *reinterpret_cast<volatile uint64_t *> (gDist + 0x6000 + 8 * intid) = gBootAffinity;
+  const uint64_t route = *reinterpret_cast<volatile uint64_t *> (gDist + 0x6000 + 8 * intid);
+  // Legacy attach still returns its actual readback and enables immediately.
+  // Deferred attach requires ownership/configuration readback before publishing.
+  if (deferred && (armcpuSpiReadback (intid) != (1U | (edge ? 4U : 0U) | 0xa000U) ||
+                   route != gBootAffinity)) { armcpuSpiUnlock (); return kIOReturnNotPermitted; }
+  if (spi == nullptr) { spi = &gSpi[used]; spi->id = intid; }
+  spi->handler = handler;
+  spi->context = context;
+  spi->deferred = deferred;
+  spi->edge = edge;
+  spi->registered = true;
+  __atomic_store_n (&spi->count, 0ULL, __ATOMIC_RELAXED);
+  __atomic_store_n (&spi->accepting, deferred ? 0U : 1U, __ATOMIC_SEQ_CST);
+  if (used < ARMCPU_SPI_SLOTS && spi == &gSpi[used]) {
+    __atomic_store_n (&gSpiUsed, used + 1, __ATOMIC_RELEASE);
+  }
+  armcpuSpiBarrier ();
+  if (!deferred) { write32 (gDist, 0x100 + word, bit); }
+  if (readback != nullptr) { *readback = armcpuSpiReadback (intid); }
+  if (router != nullptr) { *router = *reinterpret_cast<volatile uint64_t *> (gDist + 0x6000 + 8 * intid); }
+  armcpuSpiUnlock ();
+  return kIOReturnSuccess;
+}
+extern "C" IOReturn armcpu_spi_attach (uint32_t intid, bool edge, void (*handler) (void *), void *context,
+                                       uint32_t *readback, uint64_t *router)
+{
+  return armcpuSpiAttach (intid, edge, handler, context, readback, router, false);
+}
+extern "C" IOReturn armcpu_spi_attach_deferred (uint32_t intid, bool edge, void (*handler) (void *), void *context,
+                                                uint32_t *readback, uint64_t *router)
+{
+  return armcpuSpiAttach (intid, edge, handler, context, readback, router, true);
+}
+static IOReturn armcpuSpiChange (uint32_t intid, void (*handler) (void *), void *context,
+                                 unsigned timeoutMs, unsigned operation)
+{
+  if (!armcpuSpiThreadContext ()) { return kIOReturnNotPermitted; }
+  if (timeoutMs > 10000 || handler == nullptr) { return kIOReturnBadArgument; }
+  const uint64_t deadline = armcpuSpiNowMs () + timeoutMs;
+  if (!armcpuSpiLock (deadline, timeoutMs)) { return kIOReturnTimeout; }
+  ArmCpuSpi *spi = armcpuSpiFind (intid);
+  if (spi == nullptr || !spi->registered || spi->handler != handler || spi->context != context) {
+    armcpuSpiUnlock (); return kIOReturnExclusiveAccess;
+  }
+  __atomic_store_n (&spi->accepting, 0U, __ATOMIC_SEQ_CST);
+  armcpuSpiDisable (intid);
+  for (unsigned polls = 0; (read32 (gDist, 0) & (1U << 31)) != 0 ||
+                           (armcpuSpiReadback (intid) & 2U) != 0; polls++) {
+    if (polls >= timeoutMs || armcpuSpiNowMs () >= deadline) {
+      armcpuSpiUnlock (); return kIOReturnTimeout;
+    }
+    armcpuSpiSleep ();
+  }
+  if (!armcpuSpiDrain (spi, deadline, timeoutMs)) { armcpuSpiUnlock (); return kIOReturnTimeout; }
+  if (operation == 1) {
+    if (armcpuSpiReadback (intid) != (1U | (spi->edge ? 4U : 0U) | 0xa000U) ||
+        *reinterpret_cast<volatile uint64_t *> (gDist + 0x6000 + 8 * intid) != gBootAffinity) {
+      armcpuSpiUnlock (); return kIOReturnNotPermitted;
+    }
+    __atomic_store_n (&spi->accepting, 1U, __ATOMIC_SEQ_CST);
+    write32 (gDist, 0x100 + (intid / 32) * 4, 1U << (intid % 32));
+    armcpuSpiBarrier ();
+    if ((armcpuSpiReadback (intid) & 2U) == 0 &&
+        __atomic_load_n (&spi->accepting, __ATOMIC_SEQ_CST) != 0) {
+      __atomic_store_n (&spi->accepting, 0U, __ATOMIC_SEQ_CST);
+      armcpuSpiDisable (intid);
+      armcpuSpiUnlock (); return kIOReturnNotPermitted;
+    }
+  } else if (operation == 2) {
+    spi->registered = false;
+    spi->handler = nullptr;
+    spi->context = nullptr;
+  }
+  armcpuSpiUnlock ();
+  return kIOReturnSuccess;
+}
+extern "C" IOReturn armcpu_spi_mask (uint32_t intid, void (*handler) (void *), void *context, unsigned timeoutMs)
+{ return armcpuSpiChange (intid, handler, context, timeoutMs, 0); }
+extern "C" IOReturn armcpu_spi_unmask (uint32_t intid, void (*handler) (void *), void *context, unsigned timeoutMs)
+{ return armcpuSpiChange (intid, handler, context, timeoutMs, 1); }
+extern "C" IOReturn armcpu_spi_detach (uint32_t intid, void (*handler) (void *), void *context, unsigned timeoutMs)
+{ return armcpuSpiChange (intid, handler, context, timeoutMs, 2); }
+extern "C" uint64_t armcpu_spi_count (uint32_t intid)
+{
+  ArmCpuSpi *spi = armcpuSpiFind (intid);
+  return spi == nullptr ? 0 : __atomic_load_n (&spi->count, __ATOMIC_RELAXED);
+}
+'''
+
+
+def patch_spi_lifecycle(text):
+    """Replace only the SPI table, dispatch subsection and exported SPI API."""
+    newline = '\r\n' if '\r\n' in text else '\n'
+    text = text.replace('\r\n', '\n')
+    if 'ARMCPU_SPI_LIFECYCLE_VERSION' in text:
+        raise ValueError('ArmCpu SPI lifecycle already present; use the preserved baseline')
+    start = 'extern "C" IOReturn armcpu_spi_attach ('
+    end = 'extern "C" uint64_t armcpu_spi_count (uint32_t intid)\n'
+    if text.count(start) != 1 or text.count(end) != 1:
+        raise ValueError('ArmCpu SPI API source drift')
+    first = text.index(start)
+    last = text.index('\n}', text.index(end, first)) + 2
+    old_api = text[first:last]
+    # Bind the exact actual implementation; changes to its register recipe or
+    # output layout need an explicit review instead of a permissive rewrite.
+    if hashlib.sha256(old_api.encode()).hexdigest() != SPI_API_SHA256:
+        raise ValueError('ArmCpu SPI API register/readback source drift')
+    for old in (SPI_STATE_OLD, SPI_DISPATCH_OLD):
+        if text.count(old) != 1:
+            raise ValueError('ArmCpu SPI state/dispatch source drift')
+    text = text.replace(old_api, SPI_HELPER[SPI_HELPER.index('static __attribute__((always_inline))'):], 1)
+    text = text.replace(SPI_STATE_OLD, SPI_STATE_NEW, 1)
+    text = text.replace(SPI_DISPATCH_OLD, SPI_DISPATCH_NEW, 1)
+    marker = 'extern "C" {\nvolatile uint64_t armcpu_spi_unhandled = 0;'
+    if text.count(marker) != 1:
+        raise ValueError('ArmCpu SPI helper insertion source drift')
+    prefix = SPI_NATIVE + SPI_HELPER[:SPI_HELPER.index('static __attribute__((always_inline))')]
+    text = text.replace(marker, prefix + '\n' + marker, 1)
+    includes = '#include <machine/machine_routines.h>\n'
+    if text.count(includes) != 1:
+        raise ValueError('ArmCpu SPI include source drift')
+    text = text.replace(includes, includes + '#include <IOKit/IOLib.h>\n#include <IOKit/IOLocks.h>\n#include <kern/clock.h>\n#include <mach/mach_time.h>\n', 1)
+    return text.replace('\n', newline)
+
+
+SPI_API_SHA256 = 'cebb9197e690622d36fc9ededcb7ebb7ca68f7e1b842f3ff7ef8f5e088e36095'
 
 
 # A64 encodings verified against clang for arm64-apple-ios17.0. System-register

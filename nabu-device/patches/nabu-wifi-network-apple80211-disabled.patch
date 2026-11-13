@@ -1,52 +1,256 @@
 --- a/bsd/dev/hakios.apple80211.c
 +++ b/bsd/dev/hakios.apple80211.c
-@@ -1,3 +1,11 @@
-+/* 21H16 Apple80211 layout awaits original-input qualification. */
+@@ -1,3 +1,10 @@
++/* Static 21H16 core ABI bound to original IO80211 UUID 155a5c63-5ba1-34f2-86a5-672ed429db23. */
 +#ifndef NABU_WIFI_APPLE80211_21H16_ABI
-+#define NABU_WIFI_APPLE80211_21H16_ABI 0
++#define NABU_WIFI_APPLE80211_21H16_ABI 1
 +#endif
-+#if NABU_WIFI_APPLE80211_21H16_ABI != 0
-+#error NABU_WIFI_APPLE80211_21H16_ABI_has_no_qualified_layout
++#if NABU_WIFI_APPLE80211_21H16_ABI != 1
++#error NABU_WIFI_APPLE80211_21H16_ABI_requires_the_bound_core_layout
 +#endif
-+#if NABU_WIFI_APPLE80211_21H16_ABI
  /*
   * Darwin-on-hakios: Apple80211, answered in the kernel.
   *
-@@ -792,3 +800,37 @@
+@@ -113,7 +120,7 @@
+ 	uint8_t unknown_3[3600];
+ } __attribute__((packed));
+ 
+-/* SCAN_REQ (10): 5456 bytes */
++/* SCAN_REQ (10): 21H16, 5520 bytes with a caller-generated UUID tail. */
+ struct apple80211_scan_request {
+ 	uint32_t version, bss_type;
+ 	uint8_t bssid[6], unused_0[2];
+@@ -129,10 +136,12 @@
+ 	uint32_t unused_2;
+ 	uint32_t name_count;                    /* networks asked for by name, each in 56 bytes */
+ 	uint8_t names[10][56];
+-	uint32_t short_ssid, unused_3;
++	uint32_t short_ssid;
++	char scan_uuid[64];
++	uint8_t reserved_tail[4];
+ };
+ 
+-/* SCAN_RESULT (11) and CURRENT_NETWORK (103): 1164 bytes */
++/* SCAN_RESULT (11): 21H16, 1228 bytes. CURRENT_NETWORK remains unqualified. */
+ struct apple80211_scan_result {
+ 	uint32_t version;
+ 	struct apple80211_channel channel;
+@@ -147,9 +156,10 @@
+ 	uint8_t flags, unused_2;
+ 	uint16_t elements_length;               /* comes in as the room there is */
+ 	uint8_t elements[1024];
++	char scan_uuid[64];
+ };
+ 
+-/* ASSOCIATE (20): 592 bytes, including the selected RSN at offset 0xce. */
++/* ASSOCIATE (20): 21H16, 856 bytes with WSEC_FLAGS at 0x250. */
+ struct apple80211_assoc {
+ 	uint32_t version;
+ 	uint16_t mode, auth_lower, auth_upper, unused_0;
+@@ -163,6 +173,8 @@
+ 	uint16_t rsn_length;
+ 	uint8_t rsn[258];
+ 	uint8_t rest[0x250 - 0x1d0];
++	uint32_t wsec_flags;
++	uint8_t opaque_tail[0x358 - 0x254];
+ };
+ 
+ #define CIPHER_PMK              6
+@@ -179,20 +191,27 @@
+ 	uint8_t unused_3[4];
+ };
+ 
+-_Static_assert(sizeof(struct apple80211_assoc) == 592 && offsetof(struct apple80211_assoc, key) == 0x48 &&
+-    offsetof(struct apple80211_assoc, rsn_length) == 0xcc && offsetof(struct apple80211_assoc, rsn) == 0xce,
+-    "the association request as Darwin userland 16.5 has it");
+-_Static_assert(sizeof(struct apple80211_link_changed) == 32 && offsetof(struct apple80211_link_changed, reason) == 0x14,
+-    "the link event as Darwin userland 16.5 reads it");
++_Static_assert(sizeof(struct apple80211_assoc) == 856 && offsetof(struct apple80211_assoc, ssid) == 0x10 &&
++    offsetof(struct apple80211_assoc, bssid) == 0x30 && offsetof(struct apple80211_assoc, key) == 0x48 &&
++    offsetof(struct apple80211_assoc, rsn_length) == 0xcc && offsetof(struct apple80211_assoc, rsn) == 0xce &&
++    offsetof(struct apple80211_assoc, wsec_flags) == 0x250,
++    "the association request from original 21H16 IO80211");
++_Static_assert(sizeof(struct apple80211_link_changed) == 32 && offsetof(struct apple80211_link_changed, rssi) == 4 &&
++    offsetof(struct apple80211_link_changed, reason) == 0x14 && offsetof(struct apple80211_link_changed, subreason) == 0x18,
++    "the 32-byte LINK_CHANGED prefix consumed by original 21H16 IO80211");
+ _Static_assert(sizeof(struct apple80211_channels) == 4824, "the channel list as Darwin userland 16.5 has it");
+ _Static_assert(sizeof(struct apple80211_channels_info) == 10016 && offsetof(struct apple80211_channels_info, number) == 0x32e &&
+     offsetof(struct apple80211_channels_info, flags) == 0x12d0, "the channels' description as Darwin userland 16.5 has it");
+-_Static_assert(sizeof(struct apple80211_scan_request) == 5456 && offsetof(struct apple80211_scan_request, channels) == 0x48 &&
+-    offsetof(struct apple80211_scan_request, flags) == 0x1308 && offsetof(struct apple80211_scan_request, names) == 0x1318,
+-    "the scan request as Darwin userland 16.5 has it");
+-_Static_assert(sizeof(struct apple80211_scan_result) == 1164 && offsetof(struct apple80211_scan_result, ssid_length) == 0x60 &&
+-    offsetof(struct apple80211_scan_result, age_ms) == 0x84 && offsetof(struct apple80211_scan_result, elements) == 0x8c,
+-    "a scan's result as Darwin userland 16.5 has it");
++_Static_assert(sizeof(struct apple80211_scan_request) == 5520 && offsetof(struct apple80211_scan_request, channels) == 0x48 &&
++    offsetof(struct apple80211_scan_request, flags) == 0x1308 && offsetof(struct apple80211_scan_request, names) == 0x1318 &&
++    offsetof(struct apple80211_scan_request, scan_uuid) == 0x154c,
++    "the scan request from original 21H16 IO80211");
++_Static_assert(sizeof(struct apple80211_scan_result) == 1228 && offsetof(struct apple80211_scan_result, bssid) == 0x1c &&
++    offsetof(struct apple80211_scan_result, ssid_length) == 0x60 && offsetof(struct apple80211_scan_result, ssid) == 0x61 &&
++    offsetof(struct apple80211_scan_result, age_ms) == 0x84 && offsetof(struct apple80211_scan_result, elements_length) == 0x8a &&
++    offsetof(struct apple80211_scan_result, elements) == 0x8c &&
++    offsetof(struct apple80211_scan_result, scan_uuid) == 0x48c,
++    "the scan result from original 21H16 IO80211");
+ 
+ /* Apple80211's events (APPLE80211_M_...) */
+ enum { EVENT_POWER_CHANGED = 1, EVENT_SSID_CHANGED = 2, EVENT_BSSID_CHANGED = 3, EVENT_LINK_CHANGED = 4, EVENT_ASSOC_DONE = 9,
+@@ -247,6 +266,8 @@
+ static int
+ give_network(const struct apple80211req *request, const struct hakios_sta_bss *bss)
+ {
++	if (request->req_len != sizeof(struct apple80211_scan_result) || request->req_data == USER_ADDR_NULL ||
++	    bss->ssid_length > sizeof(bss->ssid) || bss->elements_length > sizeof(bss->elements)) return EINVAL;
+ 	struct apple80211_scan_result *result = kalloc_data(sizeof(*result), Z_WAITOK | Z_ZERO);
+ 	unsigned room = sizeof(result->elements);
+ 	int error;
+@@ -254,11 +275,15 @@
+ 	if (result == NULL) {
+ 		return ENOMEM;
  	}
- 	return error;
+-	if (request->req_len >= sizeof(*result) && copyin(request->req_data, result, offsetof(struct apple80211_scan_result,
+-	    elements)) == 0 && result->elements_length < room) {
+-		room = result->elements_length;
+-	}
+-	bzero(result, sizeof(*result));
++	error = copyin(request->req_data, result, sizeof(*result));
++	if (error != 0) {
++		kfree_data(result, sizeof(*result));
++		return error;
++	}
++	if (result->elements_length < room) room = result->elements_length;
++	/* 21H16 initializes scan_uuid before RawGet. Preserve all 64 caller bytes
++	 * while rebuilding only the result prefix, including the bounded IE area. */
++	bzero(result, offsetof(struct apple80211_scan_result, scan_uuid));
+ 	result->version = 1;
+ 	channel_fill(&result->channel, bss->frequency, 0);
+ 	result->rssi = bss->rssi;
+@@ -291,6 +316,10 @@
+ static int
+ get(struct apple80211req *request)
+ {
++	/* Only the original-bound result layouts are active in this candidate. */
++	if (request->req_type != 11 && request->req_type != 21) return EOPNOTSUPP;
++	if (request->req_type == 11 && (request->req_len != sizeof(struct apple80211_scan_result) ||
++	    request->req_data == USER_ADDR_NULL)) return EINVAL;
+ 	struct hakios_sta_state *state;
+ 	int error = 0;
+ 
+@@ -382,10 +411,11 @@
+ 			return ENOMEM;
+ 		}
+ 		lck_mtx_lock(&apple80211_lock);
+-		index = result_next++;
+-		lck_mtx_unlock(&apple80211_lock);
++		index = result_next;
+ 		there = hakios_sta_heard(index, bss);
+ 		error = there ? give_network(request, bss) : EIO;
++		if (error == 0) result_next++;
++		lck_mtx_unlock(&apple80211_lock);
+ 		kfree_data(bss, sizeof(*bss));
+ 		return error;
+ 	}
+@@ -520,6 +550,8 @@
+ join_security(const struct apple80211_assoc *asked)
+ {
+ 	if (asked->version != 1 || asked->key_version != 1) return EINVAL;
++	/* The field location is proven. Additional security flag semantics await qualification. */
++	if (asked->wsec_flags != 0) return EOPNOTSUPP;
+ 	if (asked->mode != 2 || asked->auth_lower != 1 || asked->auth_upper != 8 ||
+ 	    asked->key_flags || asked->key_index) return EOPNOTSUPP;
+ 	if (asked->key_cipher != CIPHER_PMK && asked->key_cipher != CIPHER_PASSPHRASE) return EOPNOTSUPP;
+@@ -556,7 +588,7 @@
+ 	struct hakios_sta_join *what;
+ 	int error;
+ 
+-	if (request->req_len < sizeof(struct apple80211_assoc)) {
++	if (request->req_len != sizeof(struct apple80211_assoc)) {
+ 		return EINVAL;
+ 	}
+ 	asked = kalloc_data(sizeof(*asked), Z_WAITOK | Z_ZERO);
+@@ -607,6 +639,7 @@
+ static int
+ set(const struct apple80211req *request, char *said, size_t said_size)
+ {
++	if (request->req_type != 10 && request->req_type != 20) return EOPNOTSUPP;
+ 	switch (request->req_type) {
+ 	case 20:
+ 		return set_join(request, said, said_size);
+@@ -654,17 +687,7 @@
+ void
+ hakios_apple80211_signal(int rssi)
+ {
+-	uint8_t payload[180] = { 0 };
+-	int32_t value = rssi;
+-	static unsigned said;
+-
+-	payload[0] = 1;
+-	memcpy(payload + 4, &value, sizeof(value));
+-	post(EVENT_RSSI_CHANGED, payload, sizeof(payload));
+-	if (said < 16) {
+-		said++;
+-		printf("apple80211: signal update event 39, RSSI %d dBm\n", rssi);
+-	}
++	(void)rssi; /* RSSI_CHANGED event 39 has no complete 21H16 payload qualification. */
  }
-+
-+#else
-+#include <sys/errno.h>
-+#include <sys/systm.h>
-+#include <sys/hakios.net.h>
-+#include <sys/hakios.sta.h>
-+
-+errno_t
-+hakios_apple80211_ioctl(u_long command, void *data)
-+{
-+	(void)command;
-+	(void)data;
-+	return EOPNOTSUPP;
-+}
-+
-+void
-+hakios_apple80211_event(enum hakios_sta_event event, int status)
-+{
-+	(void)event;
-+	(void)status;
-+}
-+
-+void
-+hakios_apple80211_signal(int rssi)
-+{
-+	(void)rssi;
-+}
-+
-+void
-+hakios_apple80211_summary(void)
-+{
-+	printf("NABU WIFI network: Apple80211 21H16 layout unqualified, ioctl/events disabled\n");
-+}
-+#endif
+ 
+ /* What the station side says has happened (drivers/wifi/hakios.sta.c calls this, on its thread or the station's). */
+@@ -680,19 +703,23 @@
+ 	}
+ 	switch (event) {
+ 	case HAKIOS_STA_POWER:
+-		post(EVENT_POWER_CHANGED, NULL, 0);
++		/* POWER_CHANGED payload is outside this original-bound event subset. */
+ 		break;
+ 	case HAKIOS_STA_SCAN_DONE:
+ 		lck_mtx_lock(&apple80211_lock);
+ 		result_next = 0;
+ 		lck_mtx_unlock(&apple80211_lock);
+-		post(EVENT_SCAN_DONE, NULL, 0);
++		int32_t scan_error = status;
++		post(EVENT_SCAN_DONE, &scan_error, sizeof(scan_error));
+ 		break;
+ 	case HAKIOS_STA_JOIN_DONE:
+ 		lck_mtx_lock(&apple80211_lock);
+ 		join_result = status == 0 ? 1 : status == EAUTH ? 21 : status == ETIMEDOUT ? 9 : 2;
+ 		lck_mtx_unlock(&apple80211_lock);
+-		post(EVENT_ASSOC_DONE, NULL, 0);
++		/* The original scalar branch forwards an error directly. Success is zero,
++		 * while request 21 keeps its separate association-result representation. */
++		int32_t association_error = status;
++		post(EVENT_ASSOC_DONE, &association_error, sizeof(association_error));
+ 		break;
+ 	case HAKIOS_STA_LINK: {
+ 		struct apple80211_link_changed link = { .down = status != 1, .involuntary = status != 1 && status != 0,
+@@ -704,8 +731,7 @@
+ 			link.rssi = status == 1 ? state->bss.rssi : 0;
+ 			kfree_data(state, sizeof(*state));
+ 		}
+-		post(EVENT_SSID_CHANGED, NULL, 0);
+-		post(EVENT_BSSID_CHANGED, NULL, 0);
++		/* Emit only the original-bound 32-byte LINK_CHANGED payload. */
+ 		post(EVENT_LINK_CHANGED, &link, sizeof(link));
+ 		break;
+ 	}
+--- a/bsd/dev/hakios.sta.c
++++ b/bsd/dev/hakios.sta.c
+@@ -233,8 +233,8 @@
+ 				}
+ 				bzero(&fallback, sizeof(fallback));
+ 			} else {
+-				/* The current Apple80211 SCAN_DONE has no errno payload. */
+-				publish = error == 0 && sta_want_on && scan_generation == sta_scan_generation;
++				/* The 21H16 scalar SCAN_DONE carries this completed scan error. */
++				publish = sta_want_on && scan_generation == sta_scan_generation;
+ 			}
+ 		}
+ 		lck_mtx_unlock(&sta_lock);
+@@ -252,7 +252,7 @@
+ 					hakios_apple80211_event(HAKIOS_STA_LINK, 1);
+ 				}
+ 			} else {
+-				hakios_apple80211_event(HAKIOS_STA_SCAN_DONE, 0);
++				hakios_apple80211_event(HAKIOS_STA_SCAN_DONE, error);
+ 			}
+ 		}
+ 		lck_mtx_unlock(&sta_publish);

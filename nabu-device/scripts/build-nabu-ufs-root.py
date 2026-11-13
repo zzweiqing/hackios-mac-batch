@@ -341,7 +341,25 @@ def main():
     logging = os.environ.get('NABU_CAPTURE_LOG') == '1'
     wifi = os.environ.get('NABU_WIFI_CONTROL') == '1'
     radio = os.environ.get('NABU_WIFI_RADIO') == '1'
+    ath10k = os.environ.get('NABU_WIFI_ATH10K') == '1'
     hall = os.environ.get('NABU_HALL_SENSOR') == '1'
+    if ath10k and not radio:
+        raise SystemExit('The ath10k backend requires the owned WLAN radio domain')
+    native_network = None
+    native_backend = None
+    native_objects = []
+    native_includes = []
+    if ath10k:
+        sys.path.insert(0, os.environ['NABU_WIFI_CI_SCRIPTS'])
+        sys.path.insert(0, str(device / 'scripts'))
+        import nabu_wifi_network_ci
+        import nabu_wifi_ath10k_ci
+        native_network = nabu_wifi_network_ci.build_kernel(root)
+        network_headers = root / native_network['source_dir'] / 'bsd'
+        native_backend = nabu_wifi_ath10k_ci.build_kernel(root, headers=network_headers)
+        native_objects = [root / path for path in native_network['objects'] + native_backend['objects']]
+        native_includes = ['-I', str(network_headers), '-I', str(root / native_network['header_dir']),
+                           '-DNABU_WIFI_ATH10K=1']
     if radio and not wifi:
         raise ValueError('WLAN DMA compilation requires the Wi-Fi control owner')
     logging_identity = None
@@ -450,6 +468,7 @@ def main():
         command += ['-I', str(source / 'platform')]
     if radio:
         command += ['-DNABU_WIFI_RADIO=1']
+    command += native_includes
     if logging and os.environ.get('XNU_NABU_SHALLOW_IDLE') == '1':
         command.append('-DXNU_NABU_SHALLOW_IDLE=1')
     (out / 'compile-command.json').write_text(json.dumps(command, indent=2) + '\n', encoding='utf-8')
@@ -470,6 +489,7 @@ def main():
             wifi_command += ['-I', str(root / '.cache/xnu-work/osfmk')]
             if radio:
                 wifi_command += ['-DNABU_WIFI_RADIO=1']
+            wifi_command += native_includes
             (out / (path.stem + '-compile-command.json')).write_text(
                 json.dumps(wifi_command, indent=2) + '\n', encoding='utf-8')
             result = subprocess.run(wifi_command, cwd=record['directory'], capture_output=True)
@@ -518,7 +538,7 @@ def main():
 
     archive = out / 'libNativeUfs.a'
     subprocess.run(['xcrun', 'ar', 'rcs', str(archive), str(obj), str(compat_obj),
-                    *map(str, wifi_objects), *map(str, hall_objects)], check=True)
+                    *map(str, wifi_objects), *map(str, hall_objects), *map(str, native_objects)], check=True)
     (out / 'build-report.json').write_text(json.dumps({
         'source_commit': prepare.PINNED_COMMIT,
         'source_files': {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
@@ -538,6 +558,8 @@ def main():
                          'default': 'off', 'input_only_mode': 1, 'cold_start_mode': 2,
                          'firmware_ready_mode': 3,
                          'radio_enabled': radio,
+                         'ath10k_enabled': ath10k, 'native_network_mode': 4 if ath10k else None,
+                         'native_network': native_network, 'native_backend': native_backend,
                          'runtime_qualified': False},
         'hall_sensor': {'enabled': hall, 'default': 'off', 'sources': hall_sources,
                         'objects': hall_build, 'runtime_qualified': False},

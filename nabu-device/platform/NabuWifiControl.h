@@ -17,7 +17,7 @@ class Control final {
 public:
     enum class Stage { Empty, Inputs, Smp2pPrepared, WaitReady, Glink, Services,
                        WaitWlfw, Capability, Complete, BoardDownload, WaitFirmware,
-                       FirmwareReady, PdFailureAck, Failed };
+                       FirmwareReady, NativeHandoff, NativeReady, PdFailureAck, Failed };
     enum class Error { None, InvalidResources, Provider, Registry, Smem, AlreadyRunning,
                        NotPrepared, Clock, Smp2p, Fatal, Restart, QueueFull, Protocol,
                        GlinkTimeout, IntentTimeout, ServiceTimeout, QmiTimeout, QmiResult,
@@ -56,6 +56,22 @@ public:
         int (*assignMsa)(void *, uint64_t address, uint32_t bytes, bool secure);
     };
     struct Smp2pObservation { bool negotiated, entryPresent, fresh; uint32_t state; };
+    /* All callbacks run synchronously on the sole Control poll executor.
+     * poll may queueExternal, but must not call poll recursively or block on
+     * a QMI reply. submitted means the final GLINK chunk was submitted, not
+     * that a remote peer acknowledged it. Borrowed RX data expires on return. */
+    struct ExternalOps {
+        void *ctx;
+        void (*announce)(void *, uint32_t generation, uint32_t service, uint32_t instance,
+                         uint32_t node, uint32_t port, bool available);
+        /* false requests a retry from Control's bounded retained RX queue. */
+        bool (*receive)(void *, uint32_t generation, uint32_t node, uint32_t port,
+                        uint32_t local_port, const uint8_t *, size_t);
+        void (*poll)(void *, uint32_t generation);
+        void (*invalidate)(void *, uint32_t generation, int reason);
+        void (*submitted)(void *, uint64_t ticket, int status);
+    };
+    enum class QueueResult { Queued, Busy, Invalid, Unavailable };
     struct Status {
         Stage stage;
         Error error;
@@ -65,6 +81,7 @@ public:
         uint64_t rmtfs_requests, pd_requests, tftp_requests, packets;
         uint32_t msa_ready_generation, fw_ready_generation, fw_init_generation;
         uint32_t board_bytes, board_sent, board_segments;
+        uint32_t withdrawn_clients;
         bool board_downloaded, calibration_reported;
     };
 
@@ -103,24 +120,38 @@ public:
      * generation's capability. KNEL retains MSA ownership. DMON owns BDF/CAL.
      * Poll remains the sole executor and continues all modem file services. */
     bool beginBoardDownload(const char *path);
+    /* Configure before initialize. The legacy firmware-only modes leave this
+     * unset. Handoff withdraws KNEL and DMON through real DEL_CLIENT packets
+     * before allowing native QMI ports to send or receive. */
+    bool configureExternal(const ExternalOps &);
+    bool beginNativeHandoff();
+    QueueResult queueExternal(uint32_t type, uint32_t source_port, uint32_t node,
+                              uint32_t port, const void *, size_t,
+                              uint32_t generation, uint64_t ticket);
     bool reportRadioFailure(int status);
     const Status &status() const { return status_; }
     static const char *stageName(Stage);
     static const char *errorName(Error);
 
 private:
-    enum { kQueue = 16, kIntents = 8, kRemoteIntents = 128, kTransfers = 8,
+    enum { kQueue = 16, kExternalIngress = 16, kIntents = 8, kRemoteIntents = 128, kTransfers = 8,
            kRamFiles = 8, kRamFileBytes = 65536, kRegistry = 32, kBlockBytes = 1024,
            kPdDiagnosticBytes = 256, kTftpRetries = 25 };
     struct Packet {
         uint8_t data[wire::kPacketBytes];
         uint32_t bytes, offset, iid, generation;
         uint64_t deadline;
+        uint64_t external_ticket;
+        uint32_t withdrawal;
         bool intent_requested, intent_assigned;
     };
     // Remote IID zero is valid. A nonzero byte capacity marks a populated slot.
     struct Intent { uint32_t iid, bytes; bool busy; uint64_t deadline; };
     struct Receive { uint8_t data[wire::kPacketBytes]; uint32_t bytes, remaining, iid; bool active, advertised; uint64_t deadline; };
+    struct ExternalReceive {
+        uint8_t data[wire::kPacketBytes - 32];
+        uint32_t bytes, node, port, local_port, generation;
+    };
     struct Registry { char service[80], domain[80]; uint32_t instance, data; bool valid; };
     struct RamFile { char path[160]; uint8_t data[kRamFileBytes]; size_t bytes; bool used, writing; unsigned readers; };
     struct Transaction {
@@ -143,6 +174,7 @@ private:
         size_t initial_bytes;
     };
     Resources resources_;
+    ExternalOps external_;
     FileProvider provider_;
     Smem smem_;
     Smem::Item outbound_, descriptors_, tx_, rx_;
@@ -156,6 +188,8 @@ private:
     uint16_t remote_channel_, transaction_;
     uint32_t features_, queue_head_, queue_count_, registry_count_, rx_cursor_, next_local_iid_;
     bool qmi_pending_;
+    uint32_t withdrawal_queued_;
+    uint32_t external_head_, external_count_;
     uint64_t qmi_deadline_;
     uint32_t qmi_node_, qmi_port_, qmi_generation_;
     enum class Wlfw : uint8_t { Idle, IndRegister, HostCap, MsaInfo, MsaAssign, MsaReady, Cap,
@@ -174,6 +208,7 @@ private:
     Packet queue_[kQueue];
     Intent remote_intents_[kRemoteIntents];
     Receive receive_[kIntents];
+    ExternalReceive external_receive_[kExternalIngress];
     Registry registry_[kRegistry];
     Transfer transfers_[kTransfers];
     RamFile ram_files_[kRamFiles];
@@ -193,6 +228,9 @@ private:
     bool receiveOne();
     void peek(uint32_t off, void *, size_t);
     bool flush(bool transmit = true);
+    bool withdrawClients();
+    bool receiveExternal(const wire::QrtrPacket &);
+    bool drainExternal();
     bool send(uint32_t, uint32_t, uint32_t, uint32_t, const void *, size_t);
     bool advertise(uint32_t node);
     bool packet(const uint8_t *, size_t);

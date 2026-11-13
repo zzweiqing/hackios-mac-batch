@@ -28,6 +28,7 @@ extern "C" kern_return_t thread_terminate(thread_t);
 
 namespace {
 uint32_t started = 0;
+uint32_t hesStatus = static_cast<uint32_t>(nabu_hall::CoverStatus::Unqualified);
 
 uint64_t nowMs()
 {
@@ -70,6 +71,7 @@ void runHall()
         reinterpret_cast<const volatile uint32_t *>(mapping->getVirtualAddress());
     IOLog("NABU HALL sampler pa=%#llx gpio=9 active-low=1 debounce-ms=%u poll-ms=%u\n",
           (unsigned long long)nabu_hall::GpioPhysical, nabu_hall::DebounceMs, nabu_hall::PollMs);
+    IOLog("NABU HALL HES gate=21h16-native-interface missing=%#x\n", nabu_hall::NativeCoverMissing);
     nabu_hall::State state;
     uint64_t sequence = 0;
     bool publicationFailed = false;
@@ -129,5 +131,53 @@ extern "C" bool nabu_hall_start(void)
     return true;
 #else
     return false;
+#endif
+}
+
+extern "C" uint32_t nabu_hall_hes_missing(void)
+{
+#if XNU_NABU_HALL
+    return nabu_hall::NativeCoverMissing;
+#else
+    return nabu_hall::NativeCoverMissing | nabu_hall::CompiledOut;
+#endif
+}
+
+extern "C" nabu_hall::CoverStatus nabu_hall_hes_subscribe(
+    const nabu_hall::CoverOps *ops, const uint8_t sourceFdtSha256[32])
+{
+#if XNU_NABU_HALL
+    using nabu_hall::CoverStatus;
+    CoverStatus status = CoverStatus::Unqualified;
+    if (!ops || !ops->publish || !ops->withdraw || !sourceFdtSha256) {
+        status = CoverStatus::InvalidOps;
+    } else if (memcmp(sourceFdtSha256, nabu_hall::SourceFdtSha256, 32)) {
+        status = CoverStatus::SourceMismatch;
+    }
+    __atomic_store_n(&hesStatus, static_cast<uint32_t>(status), __ATOMIC_RELEASE);
+    return status;
+#else
+    (void)ops;
+    (void)sourceFdtSha256;
+    return nabu_hall::CoverStatus::Disabled;
+#endif
+}
+
+extern "C" nabu_hall::CoverStatus nabu_hall_hes_unsubscribe(void)
+{
+    // Preserve the current native qualification failure for inspection.
+#if XNU_NABU_HALL
+    return nabu_hall::CoverStatus::Inactive;
+#else
+    return nabu_hall::CoverStatus::Disabled;
+#endif
+}
+
+extern "C" nabu_hall::CoverStatus nabu_hall_hes_status(void)
+{
+#if XNU_NABU_HALL
+    return static_cast<nabu_hall::CoverStatus>(__atomic_load_n(&hesStatus, __ATOMIC_ACQUIRE));
+#else
+    return nabu_hall::CoverStatus::Disabled;
 #endif
 }

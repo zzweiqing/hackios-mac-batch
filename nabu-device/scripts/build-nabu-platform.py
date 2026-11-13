@@ -71,7 +71,8 @@ def main():
                 '(normalized sha256 %s, got %s)' %
                 (PINNED_ARMCPU_COMMIT, PINNED_ARMCPU_SOURCE_SHA256, actual_sha))
         patched = out / 'ArmCpu.cpp'
-        patched.write_text(patch_source(source_bytes.decode('utf-8')), encoding='utf-8')
+        spi_lifecycle = os.environ.get('NABU_WIFI_ATH10K') == '1'
+        patched.write_text(patch_source(source_bytes.decode('utf-8'), spi_lifecycle=spi_lifecycle), encoding='utf-8')
         source = patched
         armcpu_identity = {
             'upstream_commit': PINNED_ARMCPU_COMMIT,
@@ -79,6 +80,7 @@ def main():
             'original_source_sha256': actual_sha,
             'raw_checkout_sha256': raw_sha,
             'patched_source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+            'spi_lifecycle_enabled': spi_lifecycle,
             'template_count': 14,
             'source_sites': 17,
         }
