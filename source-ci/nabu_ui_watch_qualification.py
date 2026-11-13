@@ -141,6 +141,9 @@ def object_symbols(data, prefix='_nabu_ui_watch_'):
         va, backed, fileoff, flags = sections[section - 1]
         if not flags & 0x80000000:
             continue  # Private state symbols are not emitted function definitions.
+        if (prefix == '' and kind == 0xe and re.fullmatch(r'ltmp[0-9]+', name) and
+                backed == 0 and address == va and flags & 0xff == 0 and fileoff <= len(data)):
+            continue  # LLVM local section marker in a data-only object's empty text section.
         require(va <= address < va + backed and fileoff + backed <= len(data),
                 'UI observer unbacked code')
         require(name not in found, 'UI observer entry must be unique instructions')
