@@ -113,7 +113,7 @@ def _platform(root):
     return module, path
 
 
-def command_for(record, path, obj, dependency, source_dir, header_dir, language, retarget):
+def command_for(record, path, obj, dependency, source_dir, header_dir, language, retarget, xnu_source):
     admit_recipe(record, language)
     command = retarget(record, path, obj)
     command = [value for value in command if value not in ('-MMD', '-MD', '-MP')]
@@ -123,6 +123,11 @@ def command_for(record, path, obj, dependency, source_dir, header_dir, language,
     prefixes = ['-I', str(source_dir / 'bsd')]
     prefixes += ['-I', str(header_dir)]
     command[1:1] = prefixes
+    # MACH_KERNEL_PRIVATE makes exported string.h include the unexported
+    # libsa/types.h. Match the osfmk component's source and libsa include roots;
+    # retain the selected recipe's include precedence and capture the actual
+    # header closure rather than supplying replacement type declarations.
+    command += ['-I', str(xnu_source / 'osfmk'), '-I', str(xnu_source / 'osfmk/libsa')]
     command += [
         '-DKERNEL=1', '-DKERNEL_PRIVATE=1', '-DXNU_KERNEL_PRIVATE=1', '-DMACH_KERNEL_PRIVATE=1',
         '-DBSD_KERNEL_PRIVATE=1', '-D__APPLE_API_PRIVATE=1', '-D__APPLE_API_UNSTABLE=1']
@@ -465,7 +470,7 @@ def qualify_artifacts(read, metadata):
         dependency = root / record['dependency_artifact']['artifact_path']
         full_dependency = root / record['full_dependency_artifact']['artifact_path']
         expected = command_for(recipes[language], source_path, obj, dependency, source_dir, header_dir,
-                               language, helper.compile_command)
+                               language, helper.compile_command, root / '.cache/xnu-work')
         require(record['recipe'] == (chosen if language == 'c' else CXX_RECIPE), 'Unit recipe selection drift')
         require(record['command'] == expected and json.loads(artifact_bytes(read, record['command_artifact'])) == expected,
                 'Actual compilation flags drift')
@@ -609,7 +614,8 @@ def build_kernel(root, out=None):
         commands.mkdir(parents=True, exist_ok=True)
         dependency = commands / (path.stem + '.d')
         full_dependency = commands / (path.stem + '.full.d')
-        command = command_for(record, path, obj, dependency, source_dir, header_dir, language, platform.compile_command)
+        command = command_for(record, path, obj, dependency, source_dir, header_dir, language,
+                              platform.compile_command, root / '.cache/xnu-work')
         command_path = commands / (path.stem + '.compile.json')
         command_path.write_text(json.dumps(command, indent=2) + '\n')
         dependency_command = full_dependency_command(command, full_dependency, obj)
