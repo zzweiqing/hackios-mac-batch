@@ -288,15 +288,31 @@ def inspect_object(content):
         require(kind & 0xe0 or kind & 0xe != 0 or address == 0, 'Network object has unallocated COMMON storage')
     for section in sections:
         relocations = []
+        require(section['relocation_offset'] + section['relocation_count'] * 8 <= len(content),
+                'Network relocation table bounds')
         for index in range(section['relocation_count']):
             at, value = struct.unpack_from('<II', content, section['relocation_offset'] + index * 8)
             require(not at & 0x80000000, 'Scattered ARM64 relocation is unsupported')
             target = value & 0xffffff
             external = bool(value >> 27 & 1)
-            require(target < len(entries) if external else 0 < target <= len(sections), 'Network relocation target bounds')
-            relocations.append(dict(offset=at, type=value >> 28, length=value >> 25 & 3,
-                                    pcrel=bool(value >> 24 & 1), external=external,
-                                    target=entries[target]['name'] if external else sections[target - 1]['name']))
+            kind, length, pcrel = value >> 28, value >> 25 & 3, bool(value >> 24 & 1)
+            require(at + (1 << length) <= section['bytes'], 'Network relocation address bounds')
+            record = dict(offset=at, type=kind, length=length, pcrel=pcrel, external=external)
+            if kind == 10:  # ARM64_RELOC_ADDEND stores a signed 24-bit value, not an ordinal.
+                require(not external and not pcrel and length == 2 and index + 1 < section['relocation_count'],
+                        'Malformed ARM64 addend relocation')
+                next_at, next_value = struct.unpack_from('<II', content,
+                                                        section['relocation_offset'] + (index + 1) * 8)
+                next_kind = next_value >> 28
+                require(next_at == at and next_kind in (2, 3, 4) and next_value >> 25 & 3 == 2 and
+                        next_value >> 27 & 1 and bool(next_value >> 24 & 1) == (next_kind in (2, 3)),
+                        'ARM64 addend relocation pair mismatch')
+                record.update(target=None, addend=target - (1 << 24) if target & (1 << 23) else target)
+            else:
+                require(target < len(entries) if external else 0 < target <= len(sections),
+                        'Network relocation target bounds')
+                record['target'] = entries[target]['name'] if external else sections[target - 1]['name']
+            relocations.append(record)
         section['relocations'] = relocations
     return dict(image=image, sections=sections, symbols=entries, sha256=sha(content))
 

@@ -1,0 +1,81 @@
+--- a/bsd/dev/hakios.qmi.c
++++ b/bsd/dev/hakios.qmi.c
+@@ -42,6 +42,9 @@
+ 	lck_mtx_t mutex;
+ };
+ 
++#define os_alloc_type(type) kalloc_type(type, Z_WAITOK | Z_ZERO)
++#define os_free_type(type, memory) kfree_type(type, memory)
++
+ static void *
+ os_alloc(size_t size)
+ {
+@@ -118,6 +121,9 @@
+ 	pthread_mutex_t mutex;
+ 	pthread_cond_t woken;
+ };
++
++#define os_alloc_type(type) ((type *)os_alloc(sizeof(type)))
++#define os_free_type(type, memory) os_free(memory, sizeof(type))
+ 
+ static void *
+ os_alloc(size_t size)
+@@ -733,7 +739,7 @@
+ 	os_unlock(&s->lock);
+ 
+ 	if (arrived && svc == NULL) {
+-		svc = os_alloc(sizeof(*svc));
++		svc = os_alloc_type(struct qmi_service);
+ 		if (svc == NULL) {
+ 			return;
+ 		}
+@@ -743,7 +749,7 @@
+ 		svc->node = node;
+ 		svc->port = port;
+ 		if (s->ops.new_server != NULL && s->ops.new_server(s->handle, svc) < 0) {
+-			os_free(svc, sizeof(*svc));
++			os_free_type(struct qmi_service, svc);
+ 			return;
+ 		}
+ 		os_lock(&s->lock);
+@@ -754,7 +760,7 @@
+ 		if (s->ops.del_server != NULL) {
+ 			s->ops.del_server(s->handle, svc);
+ 		}
+-		os_free(svc, sizeof(*svc));
++		os_free_type(struct qmi_service, svc);
+ 	}
+ }
+ 
+@@ -768,7 +774,7 @@
+ 	if (transport == NULL) {
+ 		return -ENXIO;
+ 	}
+-	s = os_alloc(sizeof(*s));
++	s = os_alloc_type(struct qmi_state);
+ 	if (s == NULL) {
+ 		return -ENOMEM;
+ 	}
+@@ -785,7 +791,7 @@
+ 	if (s->port == NULL) {
+ 		qmi->sock = NULL;
+ 		os_lock_destroy(&s->lock);
+-		os_free(s, sizeof(*s));
++		os_free_type(struct qmi_state, s);
+ 		return -ENXIO;
+ 	}
+ 	return 0;
+@@ -810,11 +816,11 @@
+ 	s->transport->close(s->port);                   /* no callback after this */
+ 	while ((svc = s->services) != NULL) {
+ 		s->services = svc->next;
+-		os_free(svc, sizeof(*svc));
++		os_free_type(struct qmi_service, svc);
+ 	}
+ 	qmi->sock = NULL;
+ 	os_lock_destroy(&s->lock);
+-	os_free(s, sizeof(*s));
++	os_free_type(struct qmi_state, s);
+ }
+ 
+ int
